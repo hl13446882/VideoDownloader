@@ -1298,8 +1298,7 @@ public sealed partial class MainViewModel : ObservableObject
                 existing.Update(video);
                 existing.ReplaceVariants(video);
                 _forceReplaceResults = false;
-                if (SelectedDetectedVideo is null || !ReferenceEquals(SelectedDetectedVideo, existing))
-                    SelectedDetectedVideo = existing;
+                FocusLargestVideoVariant(existing);
                 SetStatusKey(_pipeline.IsCompleted ? "status.probeDone" : "status.probeFound", DetectedVideos.Count);
                 return;
             }
@@ -1310,10 +1309,26 @@ public sealed partial class MainViewModel : ObservableObject
             vm.ReplaceVariants(video);
             _videoMap[video.VideoId] = vm;
             InsertDetectedVideo(vm);
-            SelectedDetectedVideo = vm;
             _forceReplaceResults = false;
+            FocusLargestVideoVariant(vm);
             SetStatusKey(_pipeline.IsCompleted ? "status.probeDone" : "status.probeFound", DetectedVideos.Count);
         }, System.Windows.Threading.DispatcherPriority.Background);
+    }
+
+    private void FocusLargestVideoVariant(DetectedVideoViewModel vm)
+    {
+        SelectedDetectedVideo = vm;
+        var videoLabel = _loc.ModeVideo;
+        var audioLabel = _loc.ModeAudio;
+        var hasVideo = vm.AllVariants.Any(v => DetectedVideoViewModel.MatchesMode(v.Variant, videoLabel));
+        vm.SelectedMode = hasVideo ? videoLabel : audioLabel;
+        vm.ApplyModeFilter();
+        vm.SelectedVariant = vm.Variants
+            .OrderByDescending(v => v.Variant.TotalContentLength ?? 0)
+            .ThenByDescending(v => v.Variant.Bandwidth ?? 0)
+            .ThenByDescending(v => v.Variant.Height ?? 0)
+            .FirstOrDefault()
+            ?? vm.Variants.FirstOrDefault();
     }
 
     private void PruneOtherVideosForPage(Uri pageUrl, Guid keepId)

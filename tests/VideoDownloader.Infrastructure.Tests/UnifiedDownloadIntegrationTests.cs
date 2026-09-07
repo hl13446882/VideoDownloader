@@ -83,11 +83,13 @@ public class UnifiedDownloadIntegrationTests
             pipeline.VideoDetected += (_, video) => detected.TrySetResult(video);
             var script = JsonSerializer.Serialize(new { caption = "Local test", media = new[] { url.AbsoluteUri } });
             await pipeline.ProbePageAsync(page, "Local test", script, RequestContext.CreateEmpty(), timeout.Token);
+            await pipeline.CompleteDiscoveryAsync(timeout.Token);
             var video = await detected.Task.WaitAsync(timeout.Token);
             Assert.Contains(video.Variants, v => v.Tracks.All(t => t.Kind == MediaTrackKind.Audio));
             pipeline.Clear();
             detected = new(TaskCreationOptions.RunContinuationsAsynchronously);
             await pipeline.ProbePageAsync(page, "Wrong page title", JsonSerializer.Serialize(new { caption = "Refreshed", media = new[] { url.AbsoluteUri } }), RequestContext.CreateEmpty(), timeout.Token);
+            await pipeline.CompleteDiscoveryAsync(timeout.Token);
             Assert.Equal("Refreshed", (await detected.Task.WaitAsync(timeout.Token)).DisplayTitle);
             var options = Options.Create(new AppOptions { Ffmpeg = new() { ExecutablePath = ffmpegPath }, Database = new() { Path = Path.Combine(dir, "history.db") } });
             var adapter = new M3u8DownloadAdapter(factory, new FfmpegAdapter(options, NullLogger<FfmpegAdapter>.Instance));

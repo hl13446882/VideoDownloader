@@ -887,6 +887,18 @@ public sealed class YtDlpResolver : IExternalSiteResolver
         if (host.Contains("bilibili", StringComparison.OrdinalIgnoreCase))
             return IsCookieDomainMatch("bilibili.com", domain);
 
+        if (host.Contains("tiktok", StringComparison.OrdinalIgnoreCase))
+        {
+            return IsCookieDomainMatch("tiktok.com", domain) ||
+                   IsCookieDomainMatch("tiktokv.com", domain) ||
+                   IsCookieDomainMatch("bytedance.com", domain) ||
+                   IsCookieDomainMatch("byteoversea.com", domain) ||
+                   IsCookieDomainMatch("ibytedtos.com", domain) ||
+                   IsCookieDomainMatch("ttlivecdn.com", domain) ||
+                   IsCookieDomainMatch("tiktokcdn.com", domain) ||
+                   IsCookieDomainMatch("tiktokcdn-us.com", domain);
+        }
+
         return false;
     }
 

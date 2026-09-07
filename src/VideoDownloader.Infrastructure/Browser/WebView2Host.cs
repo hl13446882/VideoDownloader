@@ -554,6 +554,14 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             yield return "https://www.bilibili.com/";
             yield return "https://bilibili.com/";
         }
+
+        if (host.Contains("tiktok", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return "https://www.tiktok.com/";
+            yield return "https://tiktok.com/";
+            yield return "https://www.tiktokv.com/";
+            yield return "https://api16-normal-c-useast1a.tiktokv.com/";
+        }
     }
 
     /// <summary>

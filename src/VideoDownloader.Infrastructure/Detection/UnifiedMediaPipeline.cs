@@ -28,6 +28,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
     private ConcurrentDictionary<string, byte> _pending = new();
     private ConcurrentDictionary<string, Probed> _media = new();
     private ConcurrentDictionary<string, DetectedVideo> _externalVideos = new(StringComparer.OrdinalIgnoreCase);
+    private DetectedVideo? _lastBuilt;
     private CancellationTokenSource _generation = new();
     private CancellationTokenSource _validationBudget = new();
     private bool _validationStarted;
@@ -44,7 +45,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         {
             if (sessionId!=SessionId || string.IsNullOrWhiteSpace(caption) || caption==_title) return;
             _title=caption.Trim();
-            Publish(_generation.Token);
+            Publish(_generation.Token, forceEmit: true);
         }
     }
     public IDiscoveryScope? BeginDiscovery(Guid sessionId)
@@ -95,9 +96,23 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             }
         }
     }
-    public Task CompleteDiscoveryAsync(CancellationToken ct)
+    public async Task CompleteDiscoveryAsync(CancellationToken ct)
     {
-        lock (_gate) return _session.CompleteAsync(ct);
+        Task idle;
+        lock (_gate)
+            idle = _session.CompleteAsync(ct);
+
+        await idle.ConfigureAwait(false);
+
+        lock (_gate)
+        {
+            if (_session.Phase != DetectionPhase.Completed)
+                return;
+            if (_lastBuilt is not null)
+                EmitBuilt(_lastBuilt);
+            else
+                PublishCore(_generation.Token, forceEmit: true);
+        }
     }
 
     public UnifiedMediaPipeline(
@@ -139,6 +154,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         _title = null;
         _author = null;
         _observedIdentity = null;
+        _lastBuilt = null;
         LastExternalError = null;
     }
 
@@ -716,20 +732,37 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             LastExternalError = "未找到可用的 yt-dlp";
     }
 
-    private void Publish(CancellationToken generation)
+    private void Publish(CancellationToken generation, bool forceEmit = false)
     {
-        lock (_gate) PublishCore(generation);
+        lock (_gate) PublishCore(generation, forceEmit);
     }
 
-    private void PublishCore(CancellationToken generation)
+    private void EmitBuilt(DetectedVideo merged)
+    {
+        VideoDetected?.Invoke(this, merged);
+        VideoUpdated?.Invoke(this, merged);
+        PageProbed?.Invoke(this, [merged]);
+    }
+
+    private void PublishCore(CancellationToken generation, bool forceEmit = false)
     {
         if (generation.IsCancellationRequested)
             return;
 
         var page = _page;
         var owner = page is null ? null : MediaOwnership.ForPage(page, _observedIdentity);
-        var probed = _media.Select(entry => entry.Value with
-            { Track = entry.Value.Track with { ContentIdentity = _owners.GetValueOrDefault(entry.Key) ?? entry.Value.Track.ContentIdentity } })
+        var probed = _media.Select(entry =>
+            {
+                var inherited = _owners.GetValueOrDefault(entry.Key)
+                                ?? entry.Value.Track.ContentIdentity
+                                ?? (owner is not null && owner.StartsWith("id:", StringComparison.Ordinal)
+                                    ? owner
+                                    : null);
+                return entry.Value with
+                {
+                    Track = entry.Value.Track with { ContentIdentity = inherited }
+                };
+            })
             .Where(m => page is null || SamePage(m.Page, page))
             .Where(m => owner is null || m.Track.ContentIdentity is null || m.Track.ContentIdentity == owner)
             .ToArray();
@@ -772,9 +805,13 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         if (!string.IsNullOrWhiteSpace(_title))
             merged = merged with { DisplayTitle = _title };
 
-        VideoDetected?.Invoke(this, merged);
-        VideoUpdated?.Invoke(this, merged);
-        PageProbed?.Invoke(this, [merged]);
+        _lastBuilt = merged;
+
+        // Defer UI emission until discovery completes so the list shows the final fact set once.
+        if (!forceEmit && _session.Phase != DetectionPhase.Completed)
+            return;
+
+        EmitBuilt(merged);
     }
 
     private DetectedVideo BuildAggregatedVideo(IReadOnlyList<Probed> all, string? extractedCaption)
@@ -958,17 +995,16 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
 
     private static bool CanPair(Probed video, Probed audio)
     {
-        if (video.Track.ContentIdentity is null || video.Track.ContentIdentity != audio.Track.ContentIdentity || !SamePage(video.Page, audio.Page))
+        if (!SamePage(video.Page, audio.Page))
             return false;
 
-        if (video.Duration > 0 && audio.Duration > 0)
-        {
-            var delta = Math.Abs(video.Duration - audio.Duration);
-            var max = Math.Max(video.Duration, audio.Duration);
-            return delta <= 3 || delta / max <= 0.15;
-        }
+        var videoId = video.Track.ContentIdentity;
+        var audioId = audio.Track.ContentIdentity;
+        if (videoId is null || audioId is null || videoId != audioId)
+            return false;
 
-        // DASH/segment streams often lack duration — allow same-page complementary tracks.
+        // Matching content identity is authoritative. Douyin/TikTok BGM duration often
+        // differs from the clipped video timeline and must not block pairing.
         return true;
     }
 

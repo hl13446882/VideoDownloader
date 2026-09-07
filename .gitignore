@@ -1,9 +1,7 @@
-/artifacts/
-/publish/
-.tmp-tools*/
-.tmp-tools/
-tools/external/
+/artifacts
+/publish
 *.exe
 *.zip
 **/bin/
 **/obj/
+/artifacts

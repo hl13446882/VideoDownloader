@@ -38,8 +38,25 @@ public class MediaTrackReconciliationTests
         await pipeline.CompleteDiscoveryAsync(default);
         Assert.Contains(latest!.Variants.SelectMany(v => v.Tracks), t => t.Kind == MediaTrackKind.Video);
         Assert.Contains(latest.Variants.SelectMany(v => v.Tracks), t => t.Kind == MediaTrackKind.Audio);
-        Assert.DoesNotContain(latest.Variants, v => v.Tracks.Count > 1); // Unknown ownership is not permission to mux.
+        // Page path /video/100 yields id:100; complementary DOM+network tracks inherit and pair.
+        Assert.Contains(latest.Variants, v => v.Tracks.Count > 1);
         Assert.DoesNotContain(latest.Variants, v => v.VariantId.Contains("无音轨", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task FeedPage_WithoutItemId_DoesNotPairOrphanTracks()
+    {
+        var feed = new Uri("https://example.test/feed");
+        var pipeline = Create();
+        pipeline.InspectOverride = (u, _, _, _) => Task.FromResult<UnifiedMediaPipeline.Probed?>(
+            new(feed, Media(u, u.AbsolutePath.Contains("audio") ? MediaTrackKind.Audio : MediaTrackKind.Video).Track with { ContentIdentity = null }, 30, 720));
+        DetectedVideo? latest = null;
+        pipeline.VideoDetected += (_, v) => latest = v;
+        await pipeline.ProbePageAsync(feed, null, JsonSerializer.Serialize(new { media = new[] { "https://cdn.test/video.mp4" } }), Context, default);
+        await pipeline.ProbePageAsync(feed, null, JsonSerializer.Serialize(new { media = new[] { "https://cdn.test/audio.m4a" } }), Context, default);
+        await pipeline.CompleteDiscoveryAsync(default);
+        Assert.NotNull(latest);
+        Assert.DoesNotContain(latest!.Variants, v => v.Tracks.Count > 1);
     }
 
     [Fact]
@@ -100,11 +117,12 @@ public class MediaTrackReconciliationTests
         await pipeline.ProbePageAsync(Page, "Wrong page title", JsonSerializer.Serialize(new { identity = "content:100", caption = playerCaption, media = Array.Empty<string>() }), Context, default);
         if (localFirst) await Submit(pipeline, ["https://cdn.test/opaque-video.mp4"], true);
         await pipeline.ProbePageAsync(Page, "Wrong page title", null, Context, default, runExternal: true);
-        Assert.Equal(playerCaption ?? "Original extracted caption", latest!.DisplayTitle);
+        if (!localFirst) await Submit(pipeline, ["https://cdn.test/opaque-video.mp4"], true);
 
         // A later variant must not regenerate metadata from its CDN filename.
         await Submit(pipeline, ["https://cdn.test/opaque-hd.mp4"], true);
         await pipeline.ProbePageAsync(Page, "Another wrong page title", null, Context, default);
+        Assert.Null(latest); // deferred until discovery completes
         await pipeline.CompleteDiscoveryAsync(default);
         Assert.Equal(playerCaption ?? "Original extracted caption", latest!.DisplayTitle);
         Assert.Contains(latest.Variants, v => v.Tracks.Count == 2);
@@ -229,17 +247,21 @@ public class MediaTrackReconciliationTests
     }
 
     [Fact]
-    public async Task ValidationCanEnrichOwnershipAfterNetworkResultAlreadyArrived()
+    public async Task DeferredPublish_WaitsUntilCompleteDiscovery()
     {
         var pipeline = Create();
         pipeline.InspectOverride = (u, _, _, _) => Task.FromResult<UnifiedMediaPipeline.Probed?>(Media(u, u.AbsolutePath.Contains("audio") ? MediaTrackKind.Audio : MediaTrackKind.Video));
+        var published = 0;
         DetectedVideo? latest = null;
-        pipeline.VideoDetected += (_, v) => latest = v;
+        pipeline.VideoDetected += (_, v) => { published++; latest = v; };
         await Submit(pipeline, ["https://cdn.test/audio.m4a"]);
         await Submit(pipeline, ["https://cdn.test/video.mp4"], true);
-        Assert.DoesNotContain(latest!.Variants, v => v.Tracks.Count == 2);
+        Assert.Equal(0, published);
+        Assert.Null(latest);
         await pipeline.ProbePageAsync(Page, null, """{"candidates":[{"url":"https://cdn.test/audio.m4a","contentIdentity":"id:100"}]}""", Context, default);
+        Assert.Equal(0, published);
         await pipeline.CompleteDiscoveryAsync(default);
+        Assert.Equal(1, published);
         Assert.Contains(latest!.Variants, v => v.Tracks.Count == 2);
     }
 

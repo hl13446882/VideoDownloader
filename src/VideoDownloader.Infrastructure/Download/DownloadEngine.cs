@@ -504,6 +504,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         Func<Task> checkpoint,
         CancellationToken ct)
     {
+        job.Variant = EnsureDownloadContext(job);
         var backend = _backendRouter.Resolve(job.Variant);
         switch (backend)
         {
@@ -739,6 +740,94 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             return uri;
 
         return null;
+    }
+
+    /// <summary>
+    /// TikTok/Douyin CDN often rejects bare GETs. Fill Referer/Origin from the page URL
+    /// and refresh cookies from the live browser when the captured context is empty.
+    /// </summary>
+    private MediaVariant EnsureDownloadContext(DownloadJob job)
+    {
+        var variant = job.Variant;
+        var pageUrl = ResolvePageUrl(job);
+        var ctx = variant.RequestContext;
+        var headers = new Dictionary<string, string>(ctx.Headers, StringComparer.OrdinalIgnoreCase);
+        var referer = ctx.Referer;
+        var origin = ctx.Origin;
+        var userAgent = ctx.UserAgent;
+        var cookies = ctx.Cookies;
+        var changed = false;
+
+        if (pageUrl is not null)
+        {
+            if (string.IsNullOrWhiteSpace(referer))
+            {
+                referer = pageUrl.AbsoluteUri;
+                changed = true;
+            }
+
+            if (string.IsNullOrWhiteSpace(origin))
+            {
+                origin = pageUrl.GetLeftPart(UriPartial.Authority);
+                changed = true;
+            }
+
+            if (cookies.Count == 0 || string.IsNullOrWhiteSpace(userAgent))
+            {
+                var fresh = _contextProvider.CaptureCurrentContext(pageUrl, variant.SourceUrl);
+                if (cookies.Count == 0 && fresh.Cookies.Count > 0)
+                {
+                    cookies = fresh.Cookies;
+                    changed = true;
+                }
+
+                if (string.IsNullOrWhiteSpace(userAgent) && !string.IsNullOrWhiteSpace(fresh.UserAgent))
+                {
+                    userAgent = fresh.UserAgent;
+                    changed = true;
+                }
+
+                if (string.IsNullOrWhiteSpace(referer) && !string.IsNullOrWhiteSpace(fresh.Referer))
+                {
+                    referer = fresh.Referer;
+                    changed = true;
+                }
+
+                if (string.IsNullOrWhiteSpace(origin) && !string.IsNullOrWhiteSpace(fresh.Origin))
+                {
+                    origin = fresh.Origin;
+                    changed = true;
+                }
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(referer) &&
+            !headers.ContainsKey("Referer"))
+        {
+            headers["Referer"] = referer!;
+            changed = true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(origin) &&
+            !headers.ContainsKey("Origin"))
+        {
+            headers["Origin"] = origin!;
+            changed = true;
+        }
+
+        if (!changed)
+            return variant;
+
+        return variant.WithRequestContext(ctx with
+        {
+            Referer = referer,
+            Origin = origin,
+            UserAgent = userAgent,
+            Headers = headers,
+            Cookies = cookies,
+            Version = ctx.Version + 1,
+            CapturedAt = DateTimeOffset.UtcNow
+        });
     }
 
     private static bool IsCompletedFileConsistent(DownloadJob job)
