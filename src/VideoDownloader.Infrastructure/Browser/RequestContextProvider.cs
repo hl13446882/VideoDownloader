@@ -23,7 +23,7 @@ public sealed class RequestContextProvider : IRequestContextProvider
         CancellationToken ct)
     {
         var host = _locator.Active;
-        if (host is null)
+        if (host is null || host.CurrentPageUrl != pageUrl)
             return previousContext ?? RequestContext.CreateEmpty();
 
         await host.RefreshContextSnapshotAsync(ct);

@@ -407,14 +407,35 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
 
         async Task<string?> RunAsync()
         {
-            const string script = """
+            var session = _pipeline.SessionId;
+            var script = """
                 (() => {
                   const observation = window.__vdProbe?.() ?? window.__vdObserve?.();
-                  if (!observation) return JSON.stringify({href:location.href,media:[]});
-                  return JSON.stringify(observation);
+                  const result = observation ?? {href:location.href,media:[]};
+                  if (!result.identity) result.candidates = [...(result.candidates ?? []), ...ADDRESS_DISCOVERY];
+                  return JSON.stringify(result);
                 })();
-                """;
-            return DecodeScriptResult(await _core.ExecuteScriptAsync(script));
+                """.Replace("ADDRESS_DISCOVERY", MediaAddressDiscoveryScript.Expression);
+            ct.ThrowIfCancellationRequested();
+            var json = DecodeScriptResult(await _core.ExecuteScriptAsync(script).WaitAsync(ct));
+            if (session != _pipeline.SessionId || string.IsNullOrWhiteSpace(json)) return null;
+            var payload = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+            if (payload["identity"] is null)
+            {
+                try
+                {
+                    var addresses = await FrameAddressDiscovery.CollectAsync(_core.CallDevToolsProtocolMethodAsync,
+                        () => session == _pipeline.SessionId && _captureEnabled, ct);
+                    if (payload["candidates"] is not System.Text.Json.Nodes.JsonArray)
+                        payload["candidates"] = new System.Text.Json.Nodes.JsonArray();
+                    var candidates = payload["candidates"]!.AsArray();
+                    foreach (var address in addresses) candidates.Add(new System.Text.Json.Nodes.JsonObject { ["url"] = address });
+                    _logger.LogInformation("Address discovery session={Session} frameCandidates={Count}", session, addresses.Count);
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested) { _logger.LogInformation("Frame discovery timed out session={Session}", session); }
+                catch (Exception ex) when (ex is not OperationCanceledException) { _logger.LogInformation("Frame discovery unavailable session={Session} reason={Reason}", session, ex.GetType().Name); }
+            }
+            return session == _pipeline.SessionId ? payload.ToJsonString() : null;
         }
 
         if (!_uiDispatcher.CheckAccess())
@@ -733,6 +754,8 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             if (redirected is not null && redirected.SessionId != _pipeline.SessionId)
             { scope?.Dispose(); scope = null; }
             if (_captureEnabled && (resourceType is "Media" or "XHR" or "Fetch" ||
+                ((resourceType is "Script" or "Document") && CurrentPageUrl is { } documentPage &&
+                 VideoDownloader.Infrastructure.Detection.MediaOwnership.ForPage(documentPage, CurrentMediaSessionKey) is null) ||
                 VideoDownloader.Infrastructure.Detection.UnifiedMediaPipeline.IsCandidate(new Uri(url), null)))
                 scope ??= _pipeline.BeginDiscovery(_pipeline.SessionId);
             var pending = new PendingRequest(
@@ -854,8 +877,9 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             if (body.Length > 2097152 || pending.Event.PageUrl is not { } page) return;
             var currentOwner = VideoDownloader.Infrastructure.Detection.MediaOwnership.ForPage(page, CurrentMediaSessionKey);
             var requestOwner = VideoDownloader.Infrastructure.Detection.MediaOwnership.ForPage(pending.Event.Url, null);
-            var addresses = VideoDownloader.Infrastructure.Detection.MediaAddressScanner.Scan(body, currentOwner,
+            var addresses = VideoDownloader.Infrastructure.Detection.MediaAddressScanner.ScanResponse(body, currentOwner,
                 requestOwner == currentOwner ? requestOwner : null);
+            _logger.LogInformation("Response discovery session={Session} host={Host} candidates={Count}", pending.Event.SessionId, pending.Event.Url.Host, addresses.Count);
             if (addresses.Count > 0 && _captureEnabled)
                 await scope.SubmitAsync(page, JsonSerializer.Serialize(new { candidates = addresses.Select(a => new { url = a.Url, contentIdentity = a.ContentIdentity }) }),
                     CaptureCurrentContext(page,page), timeout.Token);
@@ -867,6 +891,8 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
     {
         if (raw.MimeType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true)
             return true;
+        if (raw.MimeType?.Contains("javascript", StringComparison.OrdinalIgnoreCase) == true ||
+            raw.MimeType?.Contains("html", StringComparison.OrdinalIgnoreCase) == true) return true;
 
         var url = raw.Url.AbsoluteUri;
         return url.Contains("/aweme/", StringComparison.OrdinalIgnoreCase) ||

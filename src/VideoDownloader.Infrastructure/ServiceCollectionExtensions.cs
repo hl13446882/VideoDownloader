@@ -48,6 +48,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IMediaDetectionPipeline, VideoDownloader.Infrastructure.Detection.UnifiedMediaPipeline>();
         services.AddSingleton<VideoDownloader.Infrastructure.Download.M3u8DownloadAdapter>();
         services.AddSingleton<IRequestMessageFactory, RequestMessageFactory>();
+        services.AddSingleton<VideoDownloader.Infrastructure.Http.MediaAvailabilityValidator>();
         services.AddSingleton<IDownloadJobStateMachine, DownloadJobStateMachine>();
         services.AddSingleton<IDownloadRepository, SqliteDownloadRepository>();
         services.AddSingleton<IDownloadBackendRouter, DownloadBackendRouter>();

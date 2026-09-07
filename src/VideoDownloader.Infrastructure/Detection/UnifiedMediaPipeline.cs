@@ -5,6 +5,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
@@ -119,13 +121,20 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         IRequestMessageFactory requests,
         IEnumerable<IExternalSiteResolver> externals,
         IOptions<AppOptions> options,
-        IManifestResolver? manifests = null)
+        IManifestResolver? manifests = null,
+        VideoDownloader.Infrastructure.Http.MediaAvailabilityValidator? availability = null,
+        ILogger<UnifiedMediaPipeline>? logger = null)
     {
         _requests = requests;
         _externals = (externals ?? []).ToArray();
         _options = options.Value;
         _manifests = manifests;
+        _availability = availability;
+        _logger = logger ?? NullLogger<UnifiedMediaPipeline>.Instance;
     }
+
+    private readonly VideoDownloader.Infrastructure.Http.MediaAvailabilityValidator? _availability;
+    private readonly ILogger<UnifiedMediaPipeline> _logger;
 
     public event EventHandler<DetectedVideo>? VideoDetected;
     public event EventHandler<DetectedVideo>? VideoUpdated;
@@ -678,6 +687,48 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             try
             {
                 var videos = await resolver.ResolveAsync(target, context, token);
+                if (_availability is not null)
+                {
+                    using var sampleBudget = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    sampleBudget.CancelAfter(TimeSpan.FromSeconds(60));
+                    var sampleResults = new Dictionary<(Uri, Guid, int), bool>();
+                    var checkedVideos = new List<DetectedVideo>();
+                    foreach (var video in videos)
+                    {
+                        var usable = new List<MediaVariant>();
+                        foreach (var variant in video.Variants)
+                        {
+                            // Manifests retain their existing resolver/segment validation path.
+                            if (variant.Tracks.Any(t => t.Container is "hls" or "dash"))
+                            { usable.Add(variant); continue; }
+                            var valid = true;
+                            foreach (var track in variant.Tracks)
+                            {
+                                var key = (track.SourceUrl, track.RequestContext.ContextId, track.RequestContext.Version);
+                                if (!sampleResults.TryGetValue(key, out var accepted))
+                                {
+                                    if (sampleBudget.IsCancellationRequested) { valid = false; break; }
+                                    try
+                                    {
+                                        await _availability.ValidateAsync(variant with { Tracks = [track] }, sampleBudget.Token);
+                                        accepted = true;
+                                    }
+                                    catch (VideoDownloader.Core.Errors.DownloadException ex)
+                                    { _logger.LogInformation("External media rejected host={Host} code={Code}", track.SourceUrl.Host, ex.ErrorCode); }
+                                    catch (HttpRequestException)
+                                    { _logger.LogInformation("External media rejected host={Host} code=NETWORK", track.SourceUrl.Host); }
+                                    catch (OperationCanceledException) when (!token.IsCancellationRequested) { }
+                                    sampleResults[key] = accepted;
+                                }
+                                valid &= accepted;
+                            }
+                            if (valid) usable.Add(variant);
+                        }
+                        _logger.LogInformation("External sample validation host={Host} candidates={Candidates} usable={Usable}", target.Host, video.Variants.Count, usable.Count);
+                        checkedVideos.Add(video with { Variants = usable });
+                    }
+                    videos = checkedVideos;
+                }
                 lock (_gate)
                 {
                 token.ThrowIfCancellationRequested();
@@ -690,6 +741,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 if (videos.Count == 0)
                     continue;
 
+                var acceptedVideo = false;
                 foreach (var video in videos)
                 {
                     var owner = MediaOwnership.ForPage(pageUrl, _observedIdentity);
@@ -701,8 +753,14 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                         continue;
 
                     results[pageUrl.AbsoluteUri] = filtered with { PageUrl = pageUrl };
+                    acceptedVideo = true;
                 }
 
+                if (!acceptedVideo)
+                {
+                    LastExternalError = "外置解析候选未通过可下载性或视频归属校验";
+                    continue;
+                }
                 LastExternalError = null;
                 Publish(generation);
                 return;
@@ -800,6 +858,17 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         if (page is not null)
         {
             merged = merged with { VideoId = _session.Id, SessionId = _session.Id };
+            var recovery = VideoDownloader.Infrastructure.Download.MediaAddressRenewal.RecoveryAddress(page, owner);
+            var candidates = merged.Variants;
+            merged = merged with { Variants = candidates.Select(v => v with
+            {
+                ContentIdentity = owner,
+                RecoveryPageUrl = recovery,
+                Alternatives = owner is null ? [] : v.Alternatives.Concat(candidates.Where(a => a != v &&
+                    VideoDownloader.Infrastructure.Download.MediaAddressRenewal.Compatible(v, a))
+                    ).DistinctBy(a => string.Join('|', a.Tracks.Select(t => t.SourceUrl.AbsoluteUri)))
+                    .Take(4).Select(a => a with { ContentIdentity = owner, RecoveryPageUrl = recovery, Alternatives = [] }).ToArray()
+            }).ToArray() };
         }
 
         if (!string.IsNullOrWhiteSpace(_title))
@@ -910,10 +979,12 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                     ? $"a|{v.Container}|{v.SourceUrl.AbsoluteUri}"
                     : $"v|{v.Height ?? 0}|{v.Container}|{v.VideoCodec}|{v.AudioCodec}|{string.Join(',',v.Tracks.Where(t=>t.Kind==MediaTrackKind.Audio).Select(t=>t.TrackId))}";
             }, StringComparer.OrdinalIgnoreCase)
-            .Select(g => g
-                .OrderByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
-                .ThenByDescending(v => v.Height ?? 0)
-                .First())
+            .Select(g =>
+            {
+                var ordered = g.OrderByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
+                    .ThenByDescending(v => v.Height ?? 0).ToArray();
+                return ordered[0] with { Alternatives = ordered.Skip(1).Take(4).ToArray() };
+            })
             .Where(v => !MediaResourceSizeFilter.ShouldExcludeVariant(v))
             .OrderByDescending(v => v.Height ?? 0)
             .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)

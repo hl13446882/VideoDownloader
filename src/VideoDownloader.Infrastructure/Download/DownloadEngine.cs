@@ -26,6 +26,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
     private readonly ILogger<DownloadEngine> _logger;
     private readonly LicenseService _license;
     private readonly IReadOnlyList<IExternalSiteResolver> _resolvers;
+    private readonly MediaAvailabilityValidator? _availability;
     private readonly ConcurrentDictionary<Guid, DownloadJob> _jobs = new();
     private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _ctsMap = new();
     private readonly ConcurrentDictionary<Guid, byte> _removedJobs = new();
@@ -44,7 +45,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         IOptions<AppOptions> options,
         ILogger<DownloadEngine> logger,
         LicenseService license,
-        IEnumerable<IExternalSiteResolver>? resolvers = null)
+        IEnumerable<IExternalSiteResolver>? resolvers = null,
+        MediaAvailabilityValidator? availability = null)
     {
         _httpDownloader = httpDownloader;
         _m3u8 = m3u8;
@@ -57,6 +59,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         _logger = logger;
         _license = license;
         _resolvers = (resolvers ?? []).ToArray();
+        _availability = availability;
         _concurrency = new SemaphoreSlim(_options.Download.MaxConcurrentDownloads);
     }
 
@@ -428,14 +431,25 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                     !cts.IsCancellationRequested)
                 {
                     contextRefreshed = true;
-                    var pageUrl = ResolvePageUrl(job) ?? throw new DownloadException(ErrorCodes.ContextExpired,"Original page address is unavailable.");
+                    _logger.LogWarning("Job {JobId} media HTTP_403; starting same-content recovery", job.Id);
+                    var pageUrl = job.Variant.RecoveryPageUrl ?? ResolvePageUrl(job) ?? throw new DownloadException(ErrorCodes.ContextExpired,"Original page address is unavailable.");
                     var refreshed = await _contextProvider.RefreshContextAsync(
                         pageUrl,
                         job.Variant.SourceUrl,
                         job.Variant.RequestContext,
                         cts.Token);
 
-                    job.Variant = await MediaAddressRenewal.ResolveAsync(pageUrl, job.Variant, refreshed, _resolvers, cts.Token);
+                    try
+                    {
+                        job.Variant = await MediaAddressRenewal.ResolveAsync(pageUrl, job.Variant, refreshed, _resolvers, cts.Token,
+                            _availability is null ? null : _availability.ValidateAsync);
+                    }
+                    catch (Exception recoveryError)
+                    {
+                        _logger.LogWarning("Job {JobId} original=HTTP_403 recovery={Reason}", job.Id,
+                            VideoDownloader.Infrastructure.Logging.SanitizedLogger.SanitizeMessage(recoveryError.Message));
+                        throw;
+                    }
                     // Signed-address renewal starts a fresh transfer; old partial bytes are not assumed compatible.
                     var scratch = Path.Combine(Path.GetDirectoryName(job.TargetPath)!, ".parts", job.Id.ToString("N"));
                     if (Directory.Exists(scratch)) Directory.Delete(scratch, recursive: true);

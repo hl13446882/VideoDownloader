@@ -214,7 +214,8 @@ public class RequestMessageFactoryTests
             context,
             container: "mp4");
 
-        using var request = new RequestMessageFactory().Create(
+        using var request = new RequestMessageFactory(Microsoft.Extensions.Options.Options.Create(
+            new VideoDownloader.Infrastructure.Configuration.AppOptions { Browser = new() { CaptureCookies = true } })).Create(
             variant,
             HttpMethod.Get,
             variant.SourceUrl);
@@ -225,7 +226,7 @@ public class RequestMessageFactoryTests
     }
 
     [Fact]
-    public void Create_PreservesExplicitCookieHeaderFromResolver()
+    public void Create_CookieDisabled_RejectsExplicitCookieHeaderFromResolver()
     {
         var context = RequestContext.CreateEmpty() with
         {
@@ -246,8 +247,7 @@ public class RequestMessageFactoryTests
             HttpMethod.Get,
             variant.SourceUrl);
 
-        var cookie = string.Join("; ", request.Headers.GetValues("Cookie"));
-        Assert.Contains("cdn-token=resolver", cookie);
+        Assert.False(request.Headers.Contains("Cookie"));
     }
 }
 

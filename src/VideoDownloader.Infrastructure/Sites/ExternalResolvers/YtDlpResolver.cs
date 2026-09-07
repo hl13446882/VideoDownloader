@@ -66,7 +66,7 @@ public sealed class YtDlpResolver : IExternalSiteResolver
         {
             var path = PathExpander.Expand(_options.ExternalResolvers.YtDlpPath);
             var resolveUrl = CanonicalizePageUrl(pageUrl);
-            var cookieFile = _options.ExternalResolvers.UseBrowserCookies
+            var cookieFile = _options.Browser.CaptureCookies && _options.ExternalResolvers.UseBrowserCookies
                 ? await WriteCookieFileAsync(context, pageUrl, ct)
                 : null;
             if (cookieFile is null &&

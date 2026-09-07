@@ -8,6 +8,26 @@ internal static class MediaAddressScanner
     internal sealed record Address(string Url, string? ContentIdentity);
     public static IReadOnlyList<string> FromJson(string json) => Scan(json).Select(a => a.Url).Distinct(StringComparer.Ordinal).ToArray();
 
+    internal static IReadOnlyList<Address> ScanResponse(string body, string? currentOwner, string? requestOwner)
+    {
+        if (body.Length > 2097152) return [];
+        try { return Scan(body, currentOwner, requestOwner); }
+        catch (JsonException) { }
+        // Do not associate unstructured scripts with a feed's active item.
+        if (currentOwner is not null) return [];
+        var matches = System.Text.RegularExpressions.Regex.Matches(body,
+            "(?:[\"']?(?:src|file|url|playUrl|videoUrl|audioUrl)[\"']?\\s*[:=]\\s*)[\"'](?<url>https?[^\"'\\r\\n]{1,8192})[\"']",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(100));
+        var results = new List<Address>();
+        foreach (System.Text.RegularExpressions.Match match in matches.Take(64))
+        {
+            var value = System.Net.WebUtility.HtmlDecode(match.Groups["url"].Value.Replace("\\/", "/"));
+            if (Uri.TryCreate(value, UriKind.Absolute, out var url) && UnifiedMediaPipeline.IsCandidate(url, null) && !IsAssetExtension(url))
+                results.Add(new(url.AbsoluteUri, null));
+        }
+        return results.Distinct().ToArray();
+    }
+
     public static IReadOnlyList<Address> Scan(string json, string? currentOwner = null, string? requestOwner = null)
     {
         using var doc = JsonDocument.Parse(json);

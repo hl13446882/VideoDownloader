@@ -17,7 +17,14 @@ internal static class DownloadJobMapper
         string? Referer,
         string? Origin,
         string? UserAgent,
-        List<TrackMeta> Tracks);
+        List<TrackMeta> Tracks)
+    {
+        public string? ContentIdentity { get; init; }
+        public Uri? RecoveryPageUrl { get; init; }
+        public List<StoredAlternative>? Alternatives { get; init; }
+    }
+
+    internal sealed record StoredAlternative(string MetaJson, byte[]? Secret);
 
     internal sealed record TrackMeta(
         string TrackId,
@@ -57,13 +64,25 @@ internal static class DownloadJobMapper
             stripped.Referer,
             stripped.Origin,
             stripped.UserAgent,
-            tracks));
+            tracks)
+        {
+            ContentIdentity = variant.ContentIdentity,
+            RecoveryPageUrl = variant.RecoveryPageUrl,
+            Alternatives = variant.Alternatives.Take(4).Select(v =>
+            {
+                var saved = SerializeVariant(v with { Alternatives = [] });
+                return new StoredAlternative(saved.MetaJson, saved.Secret);
+            }).ToList()
+        });
 
         var secret = RequestContextProtector.Protect(primaryContext);
         return (meta, secret);
     }
 
-    public static MediaVariant DeserializeVariant(string sourceUrl, string metaJson, byte[]? secret)
+    public static MediaVariant DeserializeVariant(string sourceUrl, string metaJson, byte[]? secret) =>
+        DeserializeVariant(sourceUrl, metaJson, secret, true);
+
+    private static MediaVariant DeserializeVariant(string sourceUrl, string metaJson, byte[]? secret, bool includeAlternatives)
     {
         var meta = JsonSerializer.Deserialize<VariantMeta>(metaJson);
         if (meta is null)
@@ -108,7 +127,13 @@ internal static class DownloadJobMapper
             meta.Height,
             meta.Bandwidth,
             meta.Container,
-            tracks);
+            tracks) with
+        {
+            ContentIdentity = meta.ContentIdentity,
+            RecoveryPageUrl = meta.RecoveryPageUrl,
+            Alternatives = !includeAlternatives ? [] : (meta.Alternatives ?? []).Take(4)
+                .Select(a => DeserializeVariant(sourceUrl, a.MetaJson, a.Secret, false)).ToArray()
+        };
     }
 
     private static MediaVariant LegacyDeserialize(string sourceUrl, string metaJson, byte[]? secret)

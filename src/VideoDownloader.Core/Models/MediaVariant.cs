@@ -8,6 +8,9 @@ public sealed record MediaVariant(
     string? Container,
     IReadOnlyList<MediaTrack> Tracks)
 {
+    public string? ContentIdentity { get; init; }
+    public Uri? RecoveryPageUrl { get; init; }
+    public IReadOnlyList<MediaVariant> Alternatives { get; init; } = [];
     public Uri SourceUrl => PrimaryTrack.SourceUrl;
 
     public RequestContext RequestContext => PrimaryTrack.RequestContext;
