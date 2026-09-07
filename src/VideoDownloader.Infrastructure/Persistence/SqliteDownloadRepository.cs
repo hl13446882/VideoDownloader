@@ -1,0 +1,199 @@
+using Dapper;
+using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Options;
+using VideoDownloader.Core.Contracts;
+using VideoDownloader.Core.Models;
+using VideoDownloader.Infrastructure.Configuration;
+
+namespace VideoDownloader.Infrastructure.Persistence;
+
+public sealed class SqliteDownloadRepository : IDownloadRepository
+{
+    private readonly string _connectionString;
+
+    public SqliteDownloadRepository(IOptions<AppOptions> options)
+    {
+        var dbPath = PathExpander.Expand(options.Value.Database.Path);
+        Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+        _connectionString = new SqliteConnectionStringBuilder { DataSource = dbPath }.ConnectionString;
+    }
+
+    public async Task InitializeAsync(CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        const string sql = """
+            CREATE TABLE IF NOT EXISTS download_jobs (
+                id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                target_path TEXT NOT NULL,
+                media_family INTEGER NOT NULL,
+                status INTEGER NOT NULL,
+                downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+                total_bytes INTEGER NULL,
+                etag TEXT NULL,
+                last_modified TEXT NULL,
+                context_version INTEGER NOT NULL DEFAULT 1,
+                request_context_meta_json TEXT NOT NULL,
+                request_context_secret BLOB NULL,
+                page_url TEXT NULL,
+                last_error_code TEXT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_download_jobs_status ON download_jobs(status);
+            """;
+        await conn.ExecuteAsync(sql);
+        await TryAddColumnAsync(conn, "page_url", "TEXT NULL");
+    }
+
+    private static async Task TryAddColumnAsync(SqliteConnection conn, string name, string definition)
+    {
+        try
+        {
+            await conn.ExecuteAsync($"ALTER TABLE download_jobs ADD COLUMN {name} {definition}");
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+        {
+            // duplicate column
+        }
+    }
+
+    public async Task SaveAsync(DownloadJob job, CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+
+        var (meta, secret) = DownloadJobMapper.SerializeVariant(job.Variant);
+        var mediaFamily = ResolveMediaFamily(job.Variant.Container);
+
+        const string sql = """
+            INSERT INTO download_jobs (
+                id, display_name, source_url, target_path, media_family, status,
+                downloaded_bytes, total_bytes, etag, last_modified, context_version,
+                request_context_meta_json, request_context_secret, page_url, last_error_code,
+                created_at, updated_at)
+            VALUES (
+                @Id, @DisplayName, @SourceUrl, @TargetPath, @MediaFamily, @Status,
+                @DownloadedBytes, @TotalBytes, @ETag, @LastModified, @ContextVersion,
+                @MetaJson, @Secret, @PageUrl, @LastErrorCode, @CreatedAt, @UpdatedAt)
+            ON CONFLICT(id) DO UPDATE SET
+                display_name = excluded.display_name,
+                target_path = excluded.target_path,
+                status = excluded.status,
+                downloaded_bytes = excluded.downloaded_bytes,
+                total_bytes = excluded.total_bytes,
+                etag = excluded.etag,
+                last_modified = excluded.last_modified,
+                last_error_code = excluded.last_error_code,
+                updated_at = excluded.updated_at;
+            """;
+
+        await conn.ExecuteAsync(sql, new
+        {
+            Id = job.Id.ToString(),
+            job.DisplayName,
+            SourceUrl = job.Variant.SourceUrl.ToString(),
+            job.TargetPath,
+            MediaFamily = (int)mediaFamily,
+            Status = (int)job.Status,
+            job.DownloadedBytes,
+            job.TotalBytes,
+            job.ETag,
+            job.LastModified,
+            ContextVersion = job.Variant.RequestContext.Version,
+            MetaJson = meta,
+            Secret = secret,
+            PageUrl = job.PageUrl?.ToString(),
+            job.LastErrorCode,
+            CreatedAt = job.CreatedAt.ToString("O"),
+            UpdatedAt = job.UpdatedAt.ToString("O")
+        });
+    }
+
+    public async Task<DownloadJob?> GetByIdAsync(Guid id, CancellationToken ct = default)
+    {
+        var all = await GetAllAsync(ct);
+        return all.FirstOrDefault(j => j.Id == id);
+    }
+
+    public async Task DeleteAsync(Guid id, CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            "DELETE FROM download_jobs WHERE id = @Id",
+            new { Id = id.ToString() });
+    }
+
+    public async Task<IReadOnlyList<DownloadJob>> GetAllAsync(CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        var rows = await conn.QueryAsync<JobRow>("SELECT * FROM download_jobs ORDER BY updated_at DESC");
+        return rows.Select(MapRow).Where(j => j is not null).Cast<DownloadJob>().ToList();
+    }
+
+    private static DownloadJob? MapRow(JobRow row)
+    {
+        if (!Uri.TryCreate(row.source_url, UriKind.Absolute, out var sourceUrl))
+            return null;
+
+        var variant = DownloadJobMapper.DeserializeVariant(
+            row.source_url,
+            row.request_context_meta_json,
+            row.request_context_secret);
+
+        Uri? pageUrl = null;
+        if (!string.IsNullOrWhiteSpace(row.page_url) &&
+            Uri.TryCreate(row.page_url, UriKind.Absolute, out var parsedPage))
+            pageUrl = parsedPage;
+
+        return new DownloadJob
+        {
+            Id = Guid.Parse(row.id),
+            DisplayName = row.display_name,
+            Variant = variant,
+            TargetPath = row.target_path,
+            PageUrl = pageUrl,
+            Status = (DownloadStatus)row.status,
+            DownloadedBytes = row.downloaded_bytes,
+            TotalBytes = row.total_bytes,
+            ETag = row.etag,
+            LastModified = row.last_modified,
+            LastErrorCode = row.last_error_code,
+            CreatedAt = DateTimeOffset.Parse(row.created_at),
+            UpdatedAt = DateTimeOffset.Parse(row.updated_at)
+        };
+    }
+
+    private static MediaFamily ResolveMediaFamily(string? container) =>
+        container?.ToLowerInvariant() switch
+        {
+            "hls" => MediaFamily.Hls,
+            "dash" => MediaFamily.Dash,
+            _ => MediaFamily.DirectMp4
+        };
+
+    private sealed class JobRow
+    {
+        public string id { get; set; } = string.Empty;
+        public string display_name { get; set; } = string.Empty;
+        public string source_url { get; set; } = string.Empty;
+        public string target_path { get; set; } = string.Empty;
+        public int media_family { get; set; }
+        public int status { get; set; }
+        public long downloaded_bytes { get; set; }
+        public long? total_bytes { get; set; }
+        public string? etag { get; set; }
+        public string? last_modified { get; set; }
+        public int context_version { get; set; }
+        public string request_context_meta_json { get; set; } = string.Empty;
+        public byte[]? request_context_secret { get; set; }
+        public string? page_url { get; set; }
+        public string? last_error_code { get; set; }
+        public string created_at { get; set; } = string.Empty;
+        public string updated_at { get; set; } = string.Empty;
+    }
+}

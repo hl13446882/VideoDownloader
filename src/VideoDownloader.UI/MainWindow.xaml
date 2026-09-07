@@ -1,0 +1,284 @@
+﻿<Window x:Class="VideoDownloader.UI.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Video Downloader"
+        Height="900"
+        Width="1280"
+        MinHeight="700"
+        MinWidth="1000">
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+    </Window.Resources>
+    <Grid Margin="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Address(~50%) | Probe(*) | New | Back | Forward | Lang | Go | Probe | Settings -->
+        <Grid Grid.Row="0" Margin="0,0,0,6">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <ComboBox x:Name="AddressBox"
+                      Grid.Column="0"
+                      IsEditable="True"
+                      IsTextSearchEnabled="False"
+                      StaysOpenOnEdit="False"
+                      Text="{Binding AddressBar, UpdateSourceTrigger=PropertyChanged, Mode=TwoWay}"
+                      ItemsSource="{Binding AddressPresets}"
+                      MinWidth="160"
+                      Height="32"
+                      VerticalContentAlignment="Center"
+                      Padding="4,2"
+                      Margin="0,0,8,0"
+                      PreviewKeyDown="AddressBox_PreviewKeyDown"
+                      SelectionChanged="AddressBox_SelectionChanged">
+                <ComboBox.ItemTemplate>
+                    <DataTemplate>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" Width="72"/>
+                            <TextBlock Text="{Binding Url}" Foreground="#666666" Margin="8,0,0,0"/>
+                        </StackPanel>
+                    </DataTemplate>
+                </ComboBox.ItemTemplate>
+            </ComboBox>
+            <TextBlock Grid.Column="1"
+                       Text="{Binding StatusMessage}"
+                       ToolTip="{Binding StatusMessage}"
+                       Foreground="#B45309"
+                       VerticalAlignment="Center"
+                       TextTrimming="CharacterEllipsis"
+                       Margin="0,0,8,0"
+                       Visibility="{Binding HasStatusMessage, Converter={StaticResource BoolToVis}}"/>
+            <Button Grid.Column="2"
+                    Content="{Binding L.NavNewTab}"
+                    ToolTip="{Binding L.TipNewTab}"
+                    Command="{Binding AddTabCommand}"
+                    Width="72" Height="32" Margin="0,0,4,0"/>
+            <Button Grid.Column="3"
+                    Content="{Binding L.NavBack}"
+                    ToolTip="{Binding L.TipBack}"
+                    Command="{Binding GoBackCommand}"
+                    Width="56" Height="32" Margin="0,0,4,0"/>
+            <Button Grid.Column="4"
+                    Content="{Binding L.NavForward}"
+                    ToolTip="{Binding L.TipForward}"
+                    Command="{Binding GoForwardCommand}"
+                    Width="56" Height="32" Margin="0,0,4,0"/>
+            <Button Grid.Column="5"
+                    Content="{Binding L.LanguageToggleLabel}"
+                    ToolTip="{Binding L.LanguageToggleTip}"
+                    Command="{Binding ToggleLanguageCommand}"
+                    Width="40" Height="32" Margin="0,0,4,0"/>
+            <Button Grid.Column="6"
+                    Content="{Binding L.NavGo}"
+                    ToolTip="{Binding L.TipGo}"
+                    Command="{Binding NavigateCommand}"
+                    Width="72" Height="32" Margin="0,0,4,0"/>
+            <Button Grid.Column="7"
+                    Content="{Binding L.NavProbe}"
+                    ToolTip="{Binding L.TipProbe}"
+                    Command="{Binding RefreshCommand}"
+                    Width="72" Height="32" Margin="0,0,4,0"/>
+            <Button Grid.Column="8"
+                    Content="{Binding L.NavSettings}"
+                    ToolTip="{Binding L.TipSettings}"
+                    Command="{Binding OpenSettingsCommand}"
+                    Width="72" Height="32"/>
+        </Grid>
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="300"/>
+            </Grid.ColumnDefinitions>
+
+            <DockPanel Grid.Column="0" Margin="0,0,8,0">
+                <ListBox ItemsSource="{Binding Tabs}"
+                         SelectedItem="{Binding SelectedTab, Mode=TwoWay}"
+                         DockPanel.Dock="Top"
+                         Height="32"
+                         BorderThickness="0"
+                         ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                         ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                         Margin="0,0,0,4">
+                    <ListBox.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Horizontal"/>
+                        </ItemsPanelTemplate>
+                    </ListBox.ItemsPanel>
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="Padding" Value="8,4"/>
+                            <Setter Property="Margin" Value="0,0,4,0"/>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{Binding Title}"
+                                           MaxWidth="140"
+                                           TextTrimming="CharacterEllipsis"
+                                           VerticalAlignment="Center"
+                                           Margin="0,0,6,0"/>
+                                <Button Content="×"
+                                        Width="18"
+                                        Height="18"
+                                        Padding="0"
+                                        Command="{Binding DataContext.CloseTabCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                        CommandParameter="{Binding}"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+                <Border BorderBrush="#CCC" BorderThickness="1" CornerRadius="4">
+                    <Grid x:Name="WebViewHostPanel"/>
+                </Border>
+            </DockPanel>
+
+            <Grid Grid.Column="1">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <GroupBox Grid.Row="0" Header="{Binding L.SideDetected}" Margin="0,0,0,4">
+                    <DockPanel>
+                        <StackPanel DockPanel.Dock="Bottom" Margin="0,6,0,0">
+                            <ComboBox ItemsSource="{Binding SelectedDetectedVideo.ModeOptions}"
+                                      SelectedItem="{Binding SelectedDetectedVideo.SelectedMode, Mode=TwoWay}"
+                                      Margin="0,0,0,4"/>
+                            <ComboBox ItemsSource="{Binding SelectedDetectedVideo.Variants}"
+                                      SelectedItem="{Binding SelectedDetectedVideo.SelectedVariant, Mode=TwoWay}"
+                                      DisplayMemberPath="Label"
+                                      Margin="0,0,0,4"/>
+                            <Button Content="{Binding L.BtnDownload}"
+                                    Height="28"
+                                    Command="{Binding DownloadSelectedVideoCommand}"/>
+                        </StackPanel>
+                        <ListBox ItemsSource="{Binding DetectedVideos}"
+                                 SelectedItem="{Binding SelectedDetectedVideo, Mode=TwoWay}"
+                                 BorderThickness="0"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel Margin="0,2">
+                                        <TextBlock Text="{Binding Title}"
+                                                   TextWrapping="Wrap"
+                                                   FontWeight="SemiBold"/>
+                                        <TextBlock Text="{Binding StatusText}"
+                                                   Foreground="#B45309"
+                                                   FontSize="11"
+                                                   TextWrapping="Wrap"/>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </DockPanel>
+                </GroupBox>
+
+                <GroupBox Grid.Row="1" Header="{Binding L.SideQueue}" Margin="0,4,0,4">
+                    <ListBox ItemsSource="{Binding DownloadJobs}"
+                             SelectedItem="{Binding SelectedDownloadJob, Mode=TwoWay}"
+                             BorderThickness="0"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             ToolTip="{Binding L.QueueTooltip}"
+                             MouseDoubleClick="OnDownloadQueueDoubleClick"
+                             PreviewMouseRightButtonDown="OnDownloadQueuePreviewMouseRightButtonDown">
+                        <ListBox.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="{Binding PlacementTarget.DataContext.L.MenuPlay, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                          Click="OnDownloadQueuePlayClick"
+                                          IsEnabled="{Binding PlacementTarget.DataContext.CanPlaySelected, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                <MenuItem Header="{Binding PlacementTarget.DataContext.L.MenuRename, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                          Click="OnDownloadQueueRenameClick"
+                                          IsEnabled="{Binding PlacementTarget.DataContext.CanRenameSelected, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                <MenuItem Header="{Binding PlacementTarget.DataContext.L.MenuOpenUrl, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                          Command="{Binding PlacementTarget.DataContext.OpenSelectedPageCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                          IsEnabled="{Binding PlacementTarget.DataContext.CanOpenSelectedPage, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                <Separator/>
+                                <MenuItem Header="{Binding PlacementTarget.DataContext.L.MenuPause, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                          Command="{Binding PlacementTarget.DataContext.PauseSelectedCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                          IsEnabled="{Binding PlacementTarget.DataContext.CanPauseSelected, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                <MenuItem Header="{Binding PlacementTarget.DataContext.L.MenuResume, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                          Command="{Binding PlacementTarget.DataContext.ResumeSelectedCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                          IsEnabled="{Binding PlacementTarget.DataContext.CanResumeSelected, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                <MenuItem Header="{Binding PlacementTarget.DataContext.L.MenuCancel, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                          Command="{Binding PlacementTarget.DataContext.CancelSelectedCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                          IsEnabled="{Binding PlacementTarget.DataContext.CanCancelSelected, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                <Separator/>
+                                <MenuItem Header="{Binding PlacementTarget.DataContext.L.MenuRemove, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                          Command="{Binding PlacementTarget.DataContext.RemoveSelectedCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                          IsEnabled="{Binding PlacementTarget.DataContext.CanRemoveSelected, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                            </ContextMenu>
+                        </ListBox.ContextMenu>
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Margin="0,2">
+                                    <Grid>
+                                        <TextBlock Text="{Binding DisplayNameEllipsized}"
+                                                   ToolTip="{Binding DisplayName}"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   VerticalAlignment="Center">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsEditing}" Value="True">
+                                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                        <DockPanel>
+                                            <DockPanel.Style>
+                                                <Style TargetType="DockPanel">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsEditing}" Value="True">
+                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </DockPanel.Style>
+                                            <TextBlock DockPanel.Dock="Right"
+                                                       Text="{Binding ExtensionLabel}"
+                                                       Margin="4,0,0,0"
+                                                       VerticalAlignment="Center"
+                                                       Foreground="#888"/>
+                                            <TextBox Text="{Binding EditStem, UpdateSourceTrigger=PropertyChanged}"
+                                                     Padding="2,1"
+                                                     Loaded="OnRenameTextBoxLoaded"
+                                                     LostFocus="OnRenameTextBoxLostFocus"
+                                                     PreviewKeyDown="OnRenameTextBoxPreviewKeyDown"/>
+                                        </DockPanel>
+                                    </Grid>
+                                    <TextBlock Text="{Binding ProgressText}" FontSize="11" Foreground="#555"/>
+                                    <TextBlock Text="{Binding Status}" FontSize="11" Foreground="#666"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </GroupBox>
+
+                <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Center">
+                    <Button Content="{Binding L.BtnPause}" Width="64" Height="28" Margin="0,0,4,0" Command="{Binding PauseSelectedCommand}"/>
+                    <Button Content="{Binding L.BtnResume}" Width="64" Height="28" Margin="0,0,4,0" Command="{Binding ResumeSelectedCommand}"/>
+                    <Button Content="{Binding L.BtnCancel}" Width="64" Height="28" Margin="0,0,4,0" Command="{Binding CancelSelectedCommand}"/>
+                    <Button Content="{Binding L.BtnRemove}" Width="64" Height="28" Command="{Binding RemoveSelectedCommand}"/>
+                </StackPanel>
+            </Grid>
+        </Grid>
+    </Grid>
+</Window>

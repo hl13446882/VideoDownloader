@@ -1,0 +1,782 @@
+﻿Video Downloader
+缃戦〉瑙嗛鎺㈡祴涓庝笅杞借蒋浠?
+瀹屾暣寮€鍙戣璁°€佸疄鏂借鍒掍笌楠屾敹瑙勮寖
+鐗堟湰锛歷1.1鏃ユ湡锛?026-09-02閫傜敤瀵硅薄锛氫骇鍝佽礋璐ｄ汉銆佹灦鏋勫笀銆佸紑鍙戝伐绋嬪笀銆佹祴璇曞伐绋嬪笀銆佸彂甯冨伐绋嬪笀
+0. 鏂囨。鎺у埗
+椤圭洰
+鍐呭
+鏂囨。鍚嶇О
+Video Downloader - 瀹屾暣寮€鍙戣璁°€佸疄鏂借鍒掍笌楠屾敹瑙勮寖
+鏂囨。鐗堟湰
+v1.1
+鐘舵€?
+瀹炴柦鍐荤粨鍩虹嚎
+鎶€鏈熀绾?
+.NET 10 / C# / WPF / WebView2 / CDP / HttpClient / SQLite / FFmpeg
+閫傜敤骞冲彴
+Windows 10/11 x64锛堥鐗堬級锛沇indows Server 涓嶄綔涓烘闈㈠鎴风鐩爣
+璁捐鐩爣
+娴忚鍣ㄥ唴鎺㈡祴鐢ㄦ埛鏈夋潈璁块棶鐨勯潪 DRM 瑙嗛璧勬簮锛屽苟鎻愪緵鍙仮澶嶃€佸彲杩借釜鐨勪笅杞借兘鍔?
+闈炵洰鏍?
+涓嶆彁渚?DRM 缁曡繃銆佷粯璐规巿鏉冪粫杩囥€佽处鍙锋潈闄愮粫杩囥€佺郴缁熺骇涓棿浜鸿В瀵嗘姄鍖?
+0.1 淇璁板綍
+鐗堟湰
+鏃ユ湡
+璇存槑
+v1.0
+2026-09-02
+鍦ㄥ師濮嬪紑鍙戞鏋跺熀纭€涓婃敹鏁涙灦鏋勮竟鐣岋紝琛ラ綈 RequestContext銆佸弻鎺㈡祴婧愩€丮ediaAggregator銆佺姸鎬佹満銆侀獙鏀舵爣鍑嗕笌浠ｇ爜鏍蜂緥銆?
+v1.1
+2026-09-02
+淇骞跺喕缁撳弻婧愬幓閲嶃€丷equestContext 鐢熷懡鍛ㄦ湡銆丠TTP 瀹㈡埛绔?Cookie 闅旂銆丷ange/If-Range 缁紶銆丗Fmpeg 鍙栨秷銆丏RM 鍒ゅ畾銆佹棩蹇楄劚鏁忋€乀estMediaServer 涓庨獙鏀剁煩闃点€?
+0.2 鏂囨。浣跨敤鏂瑰紡
+鏈枃浠舵槸 v1.1 寮€鍙戝疄鏂藉喕缁撳熀绾裤€傚紑鍙戝洟闃熷簲浠モ€滄ā鍧楄亴璐ｃ€佸叧閿绾︺€佺姸鎬佽涔夈€佸畨鍏ㄨ竟鐣屻€侀獙鏀舵爣鍑嗏€濅綔涓轰笉鍙殢鎰忔敼鍙樼殑绾︽潫锛涗唬鐮佹牱渚嬩负鍙傝€冨疄鐜帮紝鍙湪涓嶆敼鍙樺绾︿笌琛屼负鐨勫墠鎻愪笅浼樺寲銆備换浣曟秹鍙婃暟鎹ā鍨嬨€丷equestContext銆佷换鍔＄姸鎬併€佹帰娴嬮摼璺€丠TTP 缁紶璇箟銆丏RM 杈圭晫鎴栨晱鎰熸暟鎹鐞嗙殑鍙樻洿锛屽繀椤荤粡杩囪璁¤瘎瀹″苟鍚屾鏇存柊鏈枃妗ｅ悗鏂瑰彲瀹炴柦銆?
+0.3 鐩綍
+1. 浜у搧鐩爣涓庤寖鍥?
+2. 鎬讳綋鏋舵瀯
+3. 瑙ｅ喅鏂规涓庨」鐩粨鏋?
+4. 鏍稿績棰嗗煙妯″瀷
+5. 娴忚鍣ㄤ笌缃戠粶鎺㈡祴璁捐
+6. 濯掍綋璇嗗埆涓庡綊骞惰璁?
+7. HLS/DASH Manifest 瑙ｆ瀽
+8. 涓嬭浇寮曟搸璁捐
+9. FFmpeg 闆嗘垚
+10. 鏁版嵁鎸佷箙鍖栦笌浠诲姟鎭㈠
+11. UI 涓庝氦浜掕璁?
+12. 閰嶇疆銆佹棩蹇椾笌瀹夊叏
+13. 鍏抽敭浠ｇ爜鏍蜂緥
+14. 寮€鍙戣鍒掍笌閲岀▼纰?
+15. 娴嬭瘯绛栫暐
+16. 楠屾敹鏍囧噯
+17. 鍙戝竷涓庨儴缃?
+18. 椋庨櫓涓庡悗缁紨杩?
+闄勫綍 A锛氱姸鎬佷笌閿欒鐮?
+闄勫綍 B锛氭渶缁堜氦浠樻竻鍗?
+闄勫綍 C锛氬叧閿爣鍑嗕笌瀹樻柟瀹炵幇鍙傝€?
+1. 浜у搧鐩爣涓庤寖鍥?
+1.1 浜у搧瀹氫綅
+鏈蒋浠跺畾浣嶄负 Windows 妗岄潰鈥滅綉椤佃棰戞帰娴?+ 涓嬭浇鍣ㄢ€濄€傝蒋浠跺唴缃?WebView2 娴忚鍣紝鐢ㄦ埛鍦ㄦ甯告祻瑙堛€佺櫥褰曞拰鎾斁缃戦〉瑙嗛鐨勮繃绋嬩腑锛岀▼搴忎粠娴忚鍣ㄧ綉缁滃眰瑙傚療瀹為檯 HTTP/HTTPS 璇锋眰锛岃瘑鍒?MP4銆丠LS锛坢3u8锛夊拰 DASH锛坢pd锛夊獟浣撹祫婧愶紝骞跺湪淇濈暀鍚堟硶娴忚浼氳瘽鎵€闇€璇锋眰涓婁笅鏂囩殑鍓嶆彁涓嬫墽琛屼笅杞姐€?
+1.2 鏍稿績鐩爣
+缃戦〉鏃犻渶鎻愪緵鈥滀笅杞芥寜閽€濓紝鍙娴忚鍣ㄥ疄闄呰姹傚埌闈?DRM 濯掍綋璧勬簮锛岃蒋浠跺嵆鍙皢鍏惰瘑鍒负鍊欓€夎祫婧愩€?
+鏀寔鏅€?MP4銆丠LS銆丏ASH 涓夌被鏍稿績濯掍綋銆?
+澶勭悊 blob/MSE 鍦烘櫙锛氫笉涓嬭浇 blob URL 鏈韩锛岃€屾槸瀹氫綅鍏跺簳灞傚獟浣撹姹傘€?
+鑷姩鍏宠仈 Cookie銆丷eferer銆丱rigin銆乁ser-Agent 鍙婂繀瑕佽姹傚ご锛岄檷浣庘€滄祻瑙堝櫒鑳芥挱鏀句絾涓嬭浇 403鈥濈殑姒傜巼銆?
+鏀寔涓嬭浇浠诲姟鎸佷箙鍖栥€佸け璐ラ噸璇曘€佹殏鍋?鎭㈠銆佸彇娑堝拰绋嬪簭閲嶅惎鍚庣殑鎭㈠銆?
+瀵圭敤鎴峰睍绀衡€滆棰戔€濊€岄潪澶ч噺搴曞眰鍒嗙墖璇锋眰锛涘悓涓€瑙嗛鐨勪笉鍚屾竻鏅板害搴斿綊骞跺睍绀恒€?
+瀵?DRM 淇濇姢鍐呭鏄庣‘璇嗗埆骞舵爣璁颁负涓嶆敮鎸併€?
+1.3 闈炵洰鏍囦笌杈圭晫
+鑼冨洿
+澶勭悊鍘熷垯
+Widevine / PlayReady / FairPlay 绛?DRM
+璇嗗埆涓?DRM 鎴栧彈淇濇姢娴侊紝鍋滄涓嬭浇閾捐矾锛涗笉瀹炵幇瀵嗛挜鎻愬彇銆佽鍙瘉缁曡繃鎴栬В瀵嗐€?
+绯荤粺绾?HTTPS 鎶撳寘
+棣栫増涓嶉噰鐢?WinDivert/WinPcap/浠ｇ悊 MITM锛涢伩鍏嶈瘉涔︽敞鍏ャ€丵UIC銆丠TTP/3 绛夊鏉傚害銆?
+缁曡繃鐧诲綍/璁㈤槄/浠樿垂鏉冮檺
+涓嶅疄鐜般€傝蒋浠朵粎澶嶇敤鐢ㄦ埛宸茬粡姝ｅ父鍙栧緱鐨勬祻瑙堜細璇濄€?
+鐩存挱褰曞埗
+涓嶅垪鍏ラ鐗堟牳蹇冮獙鏀讹紱鏋舵瀯淇濈暀鍚庣画鎵╁睍绌洪棿銆?
+璺ㄥ钩鍙?
+棣栫増浠?Windows銆?
+2. 鎬讳綋鏋舵瀯
+2.1 鏋舵瀯鍘熷垯
+娴忚鍣ㄥ眰鎺㈡祴浼樺厛锛氬熀浜?WebView2 + CDP锛屼笉浠庣綉鍗″眰鍋氱郴缁熸姄鍖呫€?
+鍙屾帰娴嬫簮锛欳DP 涓?WebResourceResponseReceived 鍚屾椂浣滀负姝ｅ紡鏉ユ簮锛岀粺涓€褰掍竴鍖栧苟鍘婚噸銆?
+璇锋眰涓婁笅鏂囪窡闅忚祫婧愶細Cookie/Referer/Origin/UA/Headers 灞炰簬 MediaResource锛屼笉鍏佽浣跨敤鍏ㄥ眬鍙彉涓嬭浇涓婁笅鏂囥€?
+缃戠粶璧勬簮涓庣敤鎴疯棰戝垎绂伙細MediaDetector 鍙瘑鍒祫婧愶紱MediaAggregator 灏嗗簳灞傝祫婧愬綊骞舵垚鐢ㄦ埛鍙悊瑙ｇ殑瑙嗛/娓呮櫚搴﹂泦鍚堛€?
+Core 涓嶄緷璧栧叿浣?UI銆乄ebView2銆丼QLite 鎴?FFmpeg锛涜繖浜涙斁鍏?Infrastructure銆?
+鐘舵€佹満椹卞姩涓嬭浇鐘舵€侊紝閬垮厤 UI銆丷epository銆丏ownloader 澶氭柟鐩存帴鍐欑姸鎬侀€犳垚璇箟鍐茬獊銆?
+I/O 鍏ㄥ紓姝ワ紝鎵€鏈夐暱浠诲姟鏀寔 CancellationToken銆?
+鏃ュ織涓嶅緱杈撳嚭瀹屾暣 Cookie銆丄uthorization銆佺鍚?Token銆?
+2.2 閫昏緫鏋舵瀯
+鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹愨攤                         VideoDownloader.UI                    鈹傗攤 WPF / MVVM / 鍦板潃鏍?/ WebView2 / 鍙戠幇鍒楄〃 / 涓嬭浇闃熷垪 / 璁剧疆 鈹傗敂鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                               鈹?Commands / Events鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈻尖攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹愨攤                        VideoDownloader.Core                   鈹傗攤 Models / Contracts / Detector / Aggregator / Resolver        鈹傗攤 Download State Machine / Domain Services                     鈹傗敂鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                               鈹?Interfaces鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈻尖攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹愨攤                  VideoDownloader.Infrastructure              鈹傗攤 WebView2 + CDP | HTTP | SQLite | FFmpeg | Logging | Config   鈹傗敂鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?
+2.3 绔埌绔富閾捐矾
+WebView2  鈹溾攢 CDP Network.*  鈹斺攢 WebResourceResponseReceived            鈹?           鈻?  NetworkEventNormalizer            鈹?           鈻?     MediaDetector            鈹?           鈻?    MediaCandidate            鈹?           鈻?    MediaAggregator       鈹溾攢 Direct MP4       鈹溾攢 HLS master/media playlist       鈹斺攢 DASH MPD            鈹?           鈻?   ManifestResolver            鈹?           鈻?    DetectedVideo + Variants            鈹?           鈻?     DownloadEngine       鈹溾攢 HttpClient Downloader       鈹斺攢 FFmpeg Adapter            鈹?           鈻?      File + SQLite State
+3. 瑙ｅ喅鏂规涓庨」鐩粨鏋?
+3.1 鎺ㄨ崘鐗╃悊缁撴瀯
+VideoDownloader.sln鈹溾攢 src/鈹? 鈹溾攢 VideoDownloader.UI/鈹? 鈹? 鈹溾攢 Views/鈹? 鈹? 鈹溾攢 ViewModels/鈹? 鈹? 鈹溾攢 Resources/鈹? 鈹? 鈹斺攢 App.xaml(.cs)鈹? 鈹溾攢 VideoDownloader.Core/鈹? 鈹? 鈹溾攢 Models/鈹? 鈹? 鈹溾攢 Contracts/鈹? 鈹? 鈹溾攢 Detection/鈹? 鈹? 鈹溾攢 Aggregation/鈹? 鈹? 鈹溾攢 Manifests/鈹? 鈹? 鈹溾攢 Download/鈹? 鈹? 鈹斺攢 Errors/鈹? 鈹斺攢 VideoDownloader.Infrastructure/鈹?    鈹溾攢 Browser/鈹?    鈹溾攢 Http/鈹?    鈹溾攢 Persistence/鈹?    鈹溾攢 Ffmpeg/鈹?    鈹溾攢 Logging/鈹?    鈹斺攢 Configuration/鈹溾攢 tests/鈹? 鈹溾攢 VideoDownloader.Core.Tests/鈹? 鈹溾攢 VideoDownloader.Infrastructure.Tests/鈹? 鈹斺攢 VideoDownloader.E2E.Tests/鈹斺攢 tools/   鈹斺攢 VideoDownloader.TestMediaServer/
+3.2 渚濊禆瑙勫垯
+椤圭洰
+鍏佽渚濊禆
+绂佹渚濊禆
+UI
+Core銆両nfrastructure
+涓嶅緱鐩存帴璁块棶 SQLite 鏂囦欢鎴栫洿鎺ュ惎鍔?FFmpeg
+Core
+.NET 鍩虹绫诲簱
+WebView2銆乄PF銆丼QLite銆丗Fmpeg 杩涚▼瀹炵幇
+Infrastructure
+Core銆佺涓夋柟搴?
+涓嶅緱鍙嶅悜渚濊禆 UI
+Tests
+琚祴椤圭洰
+鐢熶骇椤圭洰涓嶅緱渚濊禆 Tests
+3.3 鎶€鏈爤
+缁勪欢
+鎶€鏈?
+瑕佹眰
+杩愯鏃?
+.NET 10
+閲囩敤褰撳墠鍙楁敮鎸佺殑绋冲畾琛ヤ竵鐗堟湰
+璇█
+C#
+璺熼殢 .NET 10 SDK 榛樿绋冲畾璇█鐗堟湰锛屼笉鍐欐涓?C# 10
+UI
+WPF + MVVM
+棣栫増寮鸿皟鎴愮啛绋冲畾涓庡紑鍙戞晥鐜?
+娴忚鍣?
+Microsoft Edge WebView2
+浣跨敤鍥哄畾鐢ㄦ埛鏁版嵁鐩綍锛屾敮鎸佹甯哥櫥褰曟€?
+缃戠粶鎺㈡祴
+CDP + WebResourceResponseReceived
+鍙屾簮褰掍竴鍖栥€佸幓閲?
+HTTP
+HttpClient + SocketsHttpHandler
+璇锋眰绾т笂涓嬫枃锛沀seCookies=false锛汣ookie 鏄惧紡闅?HttpRequestMessage 鍙戦€侊紱绂佹璺ㄤ换鍔″叡浜彲鍙?CookieContainer
+鎸佷箙鍖?
+SQLite + Dapper
+浠诲姟銆佽祫婧愬揩鐓с€佸巻鍙茶褰?
+濯掍綋澶勭悊
+FFmpeg 澶栭儴杩涚▼閫傞厤鍣?
+浼樺厛 remux锛屼笉杞爜
+鏃ュ織
+Serilog
+缁撴瀯鍖栨棩蹇?+ 鑴辨晱
+娴嬭瘯
+xUnit + NSubstitute/Moq
+鏍稿績閫昏緫鍗曟祴 + 鏈湴濯掍綋鏈嶅姟 E2E
+4. 鏍稿績棰嗗煙妯″瀷
+4.1 RequestContext
+RequestContext 鏄湰绯荤粺鏈€閲嶈鐨勫畨鍏ㄤ笌姝ｇ‘鎬у绾︿箣涓€銆傝祫婧愯纭杩涘叆鍊欓€夊獟浣撴椂锛屽繀椤荤珛鍗冲褰撳墠 WebView2 浼氳瘽涓笌璇ヨ祫婧愭湁鍏崇殑 Cookie銆丷eferer銆丱rigin銆乁ser-Agent 鍜屽繀瑕?Header 鍋氭繁搴﹀鍒讹紝褰㈡垚涓嶅彲鍙樺揩鐓с€備笅杞戒换鍔″彧鑳戒娇鐢ㄨ嚜宸辩粦瀹氱殑蹇収鎴栧叾鍙楁帶鍒锋柊鐗堟湰锛涚姝㈠叏灞€ UpdateContext()銆佺姝㈠涓换鍔″叡浜苟瑕嗙洊鍙彉 Header/Cookie 鐘舵€併€?
+public sealed record RequestContext(    Guid ContextId,    int Version,    string? Referer,    string? Origin,    string? UserAgent,    IReadOnlyDictionary<string, string> Headers,    IReadOnlyList<BrowserCookie> Cookies,    DateTimeOffset CapturedAt);
+4.1.1 鐢熷懡鍛ㄦ湡涓庡彈鎺у埛鏂?
+鍒濆鎺㈡祴锛氬垱寤?Version=1 鐨勪笉鍙彉 RequestContext锛屽苟涓?MediaResource/MediaVariant 缁戝畾銆?
+涓嬭浇璇锋眰锛氫笉寰楅噸鏂颁粠鍏ㄥ眬 WebView2 鐘舵€佷复鏃舵嫾鎺ヤ笂涓嬫枃锛涙墍鏈夎璇佺浉鍏充俊鎭潵鑷换鍔＄粦瀹氱殑 Context銆?
+401/403锛氬厑璁歌Е鍙戜竴娆″彈鎺т笂涓嬫枃鍒锋柊銆傚埛鏂板繀椤讳粠褰撳墠 WebView2 閲嶆柊閲囬泦骞剁敓鎴?Version+1 鐨勬柊蹇収锛涙棫蹇収淇濈暀鐢ㄤ簬瀹¤/鍥為€€锛屼笉寰楀師鍦颁慨鏀广€?
+鍒锋柊鍚庝粛澶辫触锛氭寜鏄庣‘閿欒缁撴潫锛屼笉鍏佽鏃犻檺鍒锋柊銆佹棤闄?403 閲嶈瘯銆?
+鎸佷箙鍖栵細闈炴晱鎰熷厓鏁版嵁鍙槑鏂囦繚瀛橈紱Cookie銆丄uthorization銆佹晱鎰熺鍚嶇瓑蹇呴』浣跨敤 Windows DPAPI锛圕urrentUser锛変繚鎶ゅ悗钀界洏銆?
+4.2 MediaResource
+public sealed record MediaResource(    Guid ResourceId,    Uri Url,    MediaType MediaType,    string? MimeType,    string Method,    int? StatusCode,    long? ContentLength,    string? ResourceType,    string? Initiator,    Uri? PageUrl,    string? FrameId,    RequestContext RequestContext,    IReadOnlyDictionary<string,string> ResponseHeaders,    DateTimeOffset DetectedAt);
+4.3 MediaCandidate / DetectedVideo / MediaVariant
+public sealed record MediaCandidate(    MediaResource Resource,    CandidateKind Kind,    int Confidence,    string DetectionReason);public sealed record DetectedVideo(    Guid VideoId,    string DisplayTitle,    Uri PageUrl,    MediaFamily Family,    IReadOnlyList<MediaVariant> Variants,    bool IsDrmProtected);public sealed record MediaVariant(    string VariantId,    Uri SourceUrl,    int? Width,    int? Height,    long? Bandwidth,    string? VideoCodec,    string? AudioCodec,    string? Container,    RequestContext RequestContext);
+4.4 涓嬭浇浠诲姟
+public enum DownloadStatus{    Pending,    Preparing,    Downloading,    Paused,    Muxing,    Completed,    Failed,    Cancelled}public sealed class DownloadJob{    public Guid Id { get; init; }    public required string DisplayName { get; init; }    public required MediaVariant Variant { get; init; }    public required string TargetPath { get; init; }    public DownloadStatus Status { get; internal set; }    public long DownloadedBytes { get; internal set; }    public long? TotalBytes { get; internal set; }    public string? LastErrorCode { get; internal set; }    public DateTimeOffset UpdatedAt { get; internal set; }}
+5. 娴忚鍣ㄤ笌缃戠粶鎺㈡祴璁捐
+5.1 WebView2Host 鑱岃矗
+鍒涘缓 CoreWebView2Environment 涓庡浐瀹?UserDataFolder銆?
+璐熻矗瀵艰埅銆佸埛鏂般€佹墦寮€ DevTools锛堜粎寮€鍙戞ā寮忥級銆?
+寮€鍚?CDP Network 鍩熴€?
+娉ㄥ唽/娉ㄩ攢 CDP 涓?WebResourceResponseReceived 浜嬩欢銆?
+鍦ㄩ〉闈㈠垏鎹€乄ebView2 閿€姣佹椂纭繚浜嬩欢瑙ｇ粦銆?
+鍚戜笂灞傚彧鍙戝竷瑙勮寖鍖?NetworkEvent锛屼笉鐩存帴鎿嶄綔 UI 涓嬭浇鍒楄〃銆?
+5.2 鍙屾簮鎺㈡祴
+鏉ユ簮
+浼樺娍
+鐢ㄩ€?
+CDP Network.requestWillBeSent / responseReceived
+鏈?requestId銆乺esourceType銆乮nitiator銆乫rameId 绛変笂涓嬫枃
+涓绘帰娴嬫簮锛屽缓绔嬭姹?鍝嶅簲鍏宠仈
+WebResourceResponseReceived
+WebView2 姝ｅ紡璧勬簮鍝嶅簲浜嬩欢锛屽彲鎷垮埌瀹為檯璇锋眰/鍝嶅簲淇℃伅
+琛ュ伩婧愶紝闄嶄綆 CDP 杈圭紭涓㈠け鎴栧樊寮傞闄?
+5.3 NetworkEventNormalizer
+涓や釜鏉ユ簮浜х敓鐨勪簨浠跺繀椤诲厛杩涘叆 NetworkEventNormalizer锛屽啀閫?MediaDetector銆侰DP requestId 浠呬綔涓?CDP 鍐呴儴 requestWillBeSent/responseReceived 鍏宠仈涓婚敭锛屼笉浣滀负璺ㄦ潵婧愬敮涓€涓婚敭銆俉ebResourceResponseReceived 鏃?CDP requestId 鏃讹紝璺ㄦ潵婧愬幓閲嶉噰鐢ㄢ€滆鑼冨寲 URL + Method + FrameId锛堝彲鐢ㄦ椂锛? Range/Content-Range + 鐘舵€佺爜/鍝嶅簲鐗瑰緛 + 鏈夌晫鏃堕棿绐楀彛鈥濈殑缁勫悎鎸囩汗銆侼ormalizer 鍚屾椂璐熻矗 Header 澶у皬鍐欑粺涓€銆乁RL 瑙勮寖鍖栥€佽姹?鍝嶅簲鍚堝苟鍜屾椂闂存埑璁板綍銆?
+public interface INetworkEventNormalizer{    ValueTask<NormalizedNetworkEvent?> NormalizeAsync(        RawNetworkEvent input,        CancellationToken cancellationToken);}
+5.3.1 浜嬩欢閫氶亾銆佽儗鍘嬩笌缂撳瓨杈圭晫
+WebView2/CDP 鍥炶皟鍙彁鍙栨渶灏忓繀瑕佸瓧娈靛苟绔嬪嵆鍐欏叆鏈夌晫 Channel<RawNetworkEvent>锛涚姝㈠湪姣忎釜浜嬩欢鍥炶皟涓?Task.Run 鎵ц瀹屾暣瑙ｆ瀽銆?
+Channel 蹇呴』閰嶇疆瀹归噺涓婇檺鍜屾槑纭殑婊¤浇绛栫暐銆傚獟浣撲富璇锋眰銆丮anifest 鍜屽搷搴斿ご浜嬩欢涓嶅緱闈欓粯涓㈠純锛涗綆浠峰€奸噸澶嶅垎鐗囦簨浠跺厑璁稿湪鍘嬪姏涓嬩紭鍏堥檷绾с€?
+鍘婚噸缂撳瓨蹇呴』鍚屾椂璁剧疆鈥滄渶澶ф潯鐩暟 + TTL鈥濓紝浜岃€呬换涓€杈惧埌鍗虫窐姹帮紱涓嶅緱浠呬緷闈犲浐瀹?500 鏉¤€屾棤鏃堕棿娣樻卑銆傞粯璁ゅ€肩敱閰嶇疆缁欏嚭骞堕€氳繃鍘嬪姏娴嬭瘯纭畾銆?
+鍚庡彴鍗曟秷璐硅€呮垨鏈夐檺骞跺彂娑堣垂鑰呮墽琛?Normalize -> Detect -> Aggregate锛岀‘淇濅簨浠朵贡搴忓彲鎺с€佸唴瀛樹笉浼氬洜浜嬩欢娲嘲鏃犻檺澧為暱銆?
+5.4 鎺㈡祴杩囨护瑙勫垯
+瑙勫垯
+璇存槑
+URL 鍚庣紑
+.mp4/.webm/.m3u8/.mpd/.m4s/.ts 绛夛紝浠呬綔涓轰俊鍙蜂箣涓€
+Content-Type
+video/*銆乤udio/*銆乤pplication/vnd.apple.mpegurl銆乤pplication/dash+xml 绛?
+ResourceType
+Media銆乆HR銆丗etch 鍧囪瑙傚療锛涗笉鑳藉彧鐪?Media
+Content-Length
+鐢ㄤ簬杩囨护鏋佸皬璧勬簮銆佽绠楀€欓€夌疆淇″害锛屼笉浣滀负缁濆瑙勫垯
+Range/Content-Range
+鍒ゆ柇鍒嗘璇锋眰涓庡獟浣撳ぇ鏂囦欢
+Initiator/PageUrl
+鐢ㄤ簬褰掑苟鍜岃繃婊ゅ箍鍛?鏃佽矾璧勬簮
+blob:
+涓嶄綔涓哄彲涓嬭浇 URL锛涜拷韪叾搴曞眰璇锋眰
+6. 濯掍綋璇嗗埆涓庡綊骞惰璁?
+6.1 MediaDetector 鑱岃矗
+MediaDetector 鍙洖绛斺€滆繖涓綉缁滆祫婧愬儚浠€涔堚€濓紝涓嶈礋璐ｅ喅瀹氱敤鎴风晫闈㈡渶缁堟樉绀哄嚑鏉¤棰戙€侱etector 搴旇繑鍥炵被鍨嬨€佺疆淇″害鍜岃瘑鍒師鍥犮€?
+public interface IMediaDetector{    MediaCandidate? Detect(MediaResource resource);}
+6.2 寤鸿缃俊搴︽ā鍨?
+淇″彿
+绀轰緥鍒嗗€?
+Content-Type 鏄庣‘涓?HLS/DASH/MP4
++70
+URL 鍚庣紑鏄庣‘
+.m3u8/.mpd/.mp4锛?40
+ResourceType=Media
++20
+Content-Length > 1 MiB
++10
+鍚?PageUrl 涓嬮噸澶嶅垎鐗囧苟甯?Range
++10
+鍥剧墖/瀛椾綋/鑴氭湰绫诲瀷
+鐩存帴鎺掗櫎
+璧勬簮灏忎簬 64 KiB 涓旀棤濯掍綋 MIME
+闄嶄綆缃俊搴︽垨鎺掗櫎
+6.3 MediaAggregator 鑱岃矗
+MediaAggregator 灏?MediaCandidate 褰掑苟鎴?DetectedVideo銆傜敤鎴风湅鍒扮殑搴旀槸鈥滄煇瑙嗛 - 1080p/720p/480p鈥濓紝鑰屼笉鏄?master.m3u8銆佸涓瓙 playlist銆佸嚑鍗冧釜 ts/m4s 鍒嗙墖銆?
+HLS锛氫紭鍏堜互 master playlist 涓烘牴锛寁ariant playlist 涓烘竻鏅板害銆?
+DASH锛氫互 MPD 涓烘牴锛孯epresentation 缁勫悎鎴愭竻鏅板害涓庨煶杞ㄣ€?
+Direct MP4锛氱浉鍚?PageUrl銆佺浉杩戞椂闂淬€乁RL 浠?token 宸紓鐨勮祫婧愬彲鍋氬急褰掑苟锛屼絾涓嶅緱璇悎骞躲€?
+骞垮憡杩囨护锛氬彧鍋氬惎鍙戝紡锛屼笉浠ュ煙鍚嶉粦鍚嶅崟浣滀负鍞竴渚濇嵁銆?
+涓€鏃﹁瘑鍒?DRM锛孌etectedVideo 鏍囪 IsDrmProtected=true 骞剁姝㈣繘鍏ヤ笅杞姐€?
+7. HLS / DASH Manifest 瑙ｆ瀽
+7.1 HLS
+HLS Resolver 蹇呴』鏀寔 master playlist 涓?media playlist銆傞鐗堥噸鐐硅В鏋?EXT-X-STREAM-INF 涓殑 BANDWIDTH銆丷ESOLUTION銆丆ODECS 涓?URI锛涚浉瀵?URI 蹇呴』鍩轰簬 manifest URL 姝ｇ‘瑙ｆ瀽銆侲XT-X-KEY 鐨?METHOD=AES-128 鎴?SAMPLE-AES 鏈韩鍙槸鍔犲瘑淇″彿锛屼笉鑳藉崟鍑?METHOD 鐩存帴鍒ゅ畾涓?DRM锛涘繀椤荤粨鍚?KEYFORMAT銆並ey URI/璁稿彲璇佷氦浜掋€佹祻瑙堝櫒 EME/DRM 淇″彿绛夎繘涓€姝ュ垎绫汇€傛爣鍑?HLS AES-128 涓?Key 鍙湪鐢ㄦ埛鏃㈡湁鍚堟硶浼氳瘽涓寜鏍囧噯鏂瑰紡鑾峰彇鏃讹紝鍙氦鐢卞彈鏀寔鐨勫獟浣撳鐞嗛摼璺鐞嗭紱娑夊強 Widevine/PlayReady/FairPlay 绛夎鍙瘉浣撶郴鏃跺繀椤婚樆鏂€?
+public interface IManifestResolver{    Task<IReadOnlyList<MediaVariant>> ResolveHlsAsync(        MediaResource manifest,        CancellationToken ct);    Task<IReadOnlyList<MediaVariant>> ResolveDashAsync(        MediaResource manifest,        CancellationToken ct);}
+7.2 DASH
+瑙ｆ瀽 MPD 鏍瑰睘鎬с€丳eriod銆丄daptationSet銆丷epresentation銆?
+姝ｇ‘澶勭悊 BaseURL 灞傜骇缁ф壙銆?
+璇嗗埆瑙嗛杞ㄣ€侀煶棰戣建鍙婅瑷€銆?
+棣栫増鍙紭鍏堜氦缁?FFmpeg 瀹屾垚鐪熷疄鍒嗙墖鎷夊彇涓庨煶瑙嗛鍚堝苟锛屼絾 UI 浠嶈瑙ｆ瀽骞跺睍绀哄彲閫?Representation銆?
+鍙戠幇 ContentProtection / 鏄庣‘ DRM 鏍囪瘑鏃堕樆鏂笅杞姐€?
+7.3 DRM / 鍔犲瘑鍐呭鍒ゅ畾瑙勫垯
+DASH锛氬彂鐜?ContentProtection 鏃惰В鏋?schemeIdUri/value锛沇idevine銆丳layReady 绛夋槑纭?DRM Scheme 鐩存帴鏍囪 DRM_PROTECTED銆?
+HLS锛欵XT-X-KEY METHOD=AES-128/SAMPLE-AES 涓嶅緱鍗曠嫭浣滀负 DRM 缁撹锛涚粨鍚?KEYFORMAT銆佽鍙瘉绔偣銆丒ME 淇″彿鍜?Key 鑾峰彇鏂瑰紡缁煎悎鍒ゆ柇銆?
+涓€鏃︾‘璁ら渶瑕?DRM License/CDM 鎵嶈兘瑙ｅ瘑锛孌etectedVideo.IsDrmProtected=true锛孶I 涓嶅垱寤哄彲鎵ц涓嬭浇鎿嶄綔锛孌ownloadEngine 鎷掔粷鎺ユ敹浠诲姟銆?
+涓嶅緱瀹炵幇璁稿彲璇佹彁鍙栥€丆DM 璋冪敤缁曡繃銆佸瘑閽ュ鍑烘垨 DRM 瑙ｅ瘑閫昏緫銆?
+8. 涓嬭浇寮曟搸璁捐
+8.1 涓嬭浇绛栫暐
+濯掍綋绫诲瀷
+棣栫増涓嬭浇绛栫暐
+Direct MP4/WebM
+HttpClient锛涙敮鎸?Range 鏂偣缁紶锛?part 涓存椂鏂囦欢锛涘畬鎴愬悗鍘熷瓙鏀瑰悕
+HLS
+ManifestResolver 璐熻矗灞曠ず娓呮櫚搴︼紱瀹為檯鎷夊彇/鍚堝苟榛樿浜?FFmpeg Adapter
+DASH
+灞曠ず Representation锛涢粯璁や氦 FFmpeg Adapter 瀹屾垚杞ㄩ亾鑾峰彇涓?remux
+DRM
+涓嶅垱寤轰笅杞戒换鍔?
+8.2 鐘舵€佹満
+Pending -> Preparing -> Downloading -> Completed                       |                                    +-> Paused -> Downloading                       |                       +-> Muxing -> Completed                       |                       +-> FailedAny non-terminal -> Cancelled
+鐘舵€佹敼鍙樺彧鑳界粡 DownloadJobStateMachine銆侱ownloader銆丗Fmpeg Adapter銆乁I 鍜?Repository 鍙兘鎻愪氦浜嬩欢鎴栬皟鐢ㄧ姸鎬佹満鏂规硶锛屼笉寰楀悇鑷洿鎺ラ殢鎰忎慨鏀?Status銆?
+public interface IDownloadJobStateMachine{    void StartPreparing(DownloadJob job);    void StartDownloading(DownloadJob job);    void Pause(DownloadJob job);    void Resume(DownloadJob job);    void StartMuxing(DownloadJob job);    void Complete(DownloadJob job);    void Fail(DownloadJob job, string errorCode);    void Cancel(DownloadJob job);}
+8.3 鏂偣缁紶
+涓嬭浇鍒?<target>.part銆?
+浠诲姟鎸佷箙鍖?DownloadedBytes銆?
+鎭㈠鏃朵笉浠?HEAD/Accept-Ranges 浣滀负纭墠缃潯浠躲€傝嫢鏈湴瀛樺湪 .part 涓?offset>0锛岀洿鎺ュ彂閫?GET + Range锛涜嫢淇濆瓨鏈夊己 ETag 鎴?Last-Modified锛屽垯鍚屾椂浣跨敤 If-Range 绾︽潫瀹炰綋涓€鑷存€с€侶EAD 浠呭彲浣滀负浼樺寲鎬ч鎺㈡祴銆?
+鏀跺埌 206 Partial Content 鍚庡繀椤绘牎楠?Content-Range 璧风偣绛変簬鏈湴 offset锛汦Tag/Last-Modified 涓庝繚瀛樺揩鐓у啿绐侊紝鎴?Content-Range 涓嶅尮閰嶆椂锛岃繑鍥?RANGE_MISMATCH锛屾斁寮冩棫 .part 骞朵粠 0 閲嶅缓銆?
+offset>0 鏃惰嫢鏈嶅姟绔繑鍥?200 OK锛岃涓?Range 鏈敓鏁堟垨瀹炰綋鍙戠敓鍙樺寲锛氬繀椤绘埅鏂?.part 骞朵粠鍝嶅簲姝ｆ枃 0 寮€濮嬪啓鍏ワ紝缁濅笉杩藉姞銆?
+鏀跺埌 416 Range Not Satisfiable 鏃讹紝鏍规嵁 Content-Range */total 涓庢湰鍦?.part 闀垮害鍒ゆ柇锛氳嫢闀垮害宸茬瓑浜?total锛屽彲杩涘叆瀹屾暣鎬ф牎楠岋紱鍚﹀垯瑙嗕负鏂偣鏃犳晥骞朵粠 0 閲嶅缓銆傚畬鎴愬悗鏍￠獙鎬婚暱搴?鍙敤鏍￠獙淇℃伅锛屽啀鍘熷瓙鏀瑰悕銆?
+8.4 骞跺彂涓庨噸璇?
+椤圭洰
+榛樿鍊?绛栫暐
+鏈€澶у苟鍙戜换鍔?
+3锛屽彲閰嶇疆
+鍗?MP4 鍒嗗潡骞跺彂
+棣栫増鍙厛鍗曟祦锛涢樁娈典簩鍐嶅鍔犲绾跨▼鍒嗗潡
+缃戠粶閲嶈瘯
+鏈€澶?3 娆★紝鎸囨暟閫€閬?+ 鎶栧姩
+HTTP 4xx
+闄?408/429 澶栭粯璁や笉鐩茬洰閲嶈瘯锛?03 鍙Е鍙戜竴娆′笂涓嬫枃鍒锋柊
+HTTP 5xx
+鎸夐噸璇曠瓥鐣ュ鐞?
+纾佺洏涓嶈冻
+绔嬪嵆澶辫触骞剁粰鍑烘槑纭敊璇爜
+鍙栨秷
+蹇呴』浼犳挱 CancellationToken 骞剁粨鏉?FFmpeg 瀛愯繘绋?
+9. FFmpeg 闆嗘垚
+9.1 鍘熷垯
+FFmpeg 灏佽鍦?Infrastructure锛屼笉鍏佽 UI 鐩存帴 Process.Start銆?
+浼樺厛 remux锛?c copy锛夛紝涓嶉噸鏂扮紪鐮併€?
+鍙傛暟蹇呴』浣跨敤 ArgumentList 鎴栧畨鍏ㄨ浆涔夛紝涓嶆嫾鎺ユ湭缁忓鐞嗙殑鐢ㄦ埛鏂囨湰褰㈡垚鍛戒护琛屻€?
+鏃ュ織璁板綍鍛戒护妯℃澘涓庨潪鏁忔劅鍙傛暟锛汬eader/Cookie 蹇呴』鑴辨晱銆?
+杩涚▼閫€鍑虹爜銆乻tderr 灏鹃儴鎽樿鍜岃緭鍑烘枃浠跺瓨鍦ㄦ€у叡鍚屽喅瀹氭垚鍔熴€?
+FFmpeg 涓烘帶鍒跺彴杩涚▼锛屼笉渚濊禆 CloseMainWindow銆傚彇娑堟椂搴斿惎鐢?StandardInput锛屼紭鍏堝悜 FFmpeg stdin 鍙戦€佹甯搁€€鍑烘寚浠わ紙濡?q锛夊苟绛夊緟鐭殏瀹介檺鏈燂紱浠嶆湭閫€鍑烘椂璋冪敤 Kill(entireProcessTree:true)锛岄殢鍚庣瓑寰呬富杩涚▼缁撴潫骞舵竻鐞嗕复鏃舵枃浠?鏂囦欢閿併€?
+9.2 Header 浼犻€?
+HLS/DASH 鐨?FFmpeg 杈撳叆蹇呴』鑳藉鎼哄甫璧勬簮鑷繁鐨?RequestContext锛屼緥濡?User-Agent銆丷eferer銆丆ookie 涓庡繀瑕?Header銆傚疄鐜板眰搴旂敓鎴愭渶灏忓繀瑕?Header 闆嗗悎锛屼笉搴旀妸娴忚鍣ㄦ墍鏈夋晱鎰?Header 鏃犲樊鍒鍒躲€?
+9.3 杩涚▼涓庢棩蹇楀畨鍏?
+浣跨敤 ProcessStartInfo.ArgumentList 閫愬弬鏁版瀯閫犲懡浠わ紱绂佹灏?URL銆佹枃浠跺悕鎴?Header 鎷兼垚鏈浆涔夌殑鏁存鍛戒护瀛楃涓层€?
+RedirectStandardError=true锛屽苟鎸佺画寮傛娑堣垂 stderr锛岄伩鍏嶇閬撻樆濉烇紱鍐呭瓨鍙繚鐣欏浐瀹氬ぇ灏忕幆褰㈠熬閮紙寤鸿鏈€缁堣瘖鏂憳瑕?<= 2000 瀛楃锛夈€?
+FFmpeg 鍛戒护鍜?stderr 鍦ㄨ繘鍏ユ棩蹇楀墠蹇呴』缁忚繃缁熶竴 SanitizedLogger锛?headers 涓?Cookie/Authorization/token/signature 绛変笉寰楁槑鏂囪褰曘€?
+鍙栨秷/澶辫触鍚庢牎楠?FFmpeg 涓昏繘绋嬪拰瀛愯繘绋嬪凡閫€鍑猴紱鏈畬鎴愮殑涓存椂杈撳嚭涓嶅緱琚爣璁颁负 Completed銆?
+10. 鏁版嵁鎸佷箙鍖栦笌浠诲姟鎭㈠
+10.1 SQLite 琛?
+CREATE TABLE download_jobs (    id TEXT PRIMARY KEY,    display_name TEXT NOT NULL,    source_url TEXT NOT NULL,    target_path TEXT NOT NULL,    media_family INTEGER NOT NULL,    status INTEGER NOT NULL,    downloaded_bytes INTEGER NOT NULL DEFAULT 0,    total_bytes INTEGER NULL,    etag TEXT NULL,    last_modified TEXT NULL,    context_version INTEGER NOT NULL DEFAULT 1,    request_context_meta_json TEXT NOT NULL,    request_context_secret BLOB NULL, -- DPAPI(CurrentUser) 淇濇姢鍚庣殑 Cookie/Auth/鏁忔劅 Header    last_error_code TEXT NULL,    created_at TEXT NOT NULL,    updated_at TEXT NOT NULL);CREATE INDEX ix_download_jobs_status ON download_jobs(status);
+10.2 鎭㈠瑙勫垯
+鍚姩鍓嶇姸鎬?
+鍚姩鍚庡鐞?
+Pending
+鎭㈠ Pending
+Preparing
+鍥為€€鍒?Pending 閲嶆柊鍑嗗
+Downloading
+杞崲涓?Paused/Recoverable锛岀敤鎴峰彲鎭㈠锛涜嫢浜у搧鍐冲畾鑷姩鎭㈠椤绘湁璁剧疆椤?
+Muxing
+妫€鏌ヤ复鏃舵枃浠朵笌杈撳嚭锛涢粯璁ゅ洖閫€鍒?Failed(MUX_INTERRUPTED) 鎴栭噸鏂版墽琛?mux
+Completed
+淇濇寔
+Failed
+淇濇寔锛屽彲鎵嬪姩閲嶈瘯
+Cancelled
+淇濇寔
+11. UI 涓庝氦浜掕璁?
+11.1 涓荤晫闈?
+鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹愨攤 URL [________________________________________] [璁块棶] [鍒锋柊] 鈹傗敎鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹も攤                                                            鈹傗攤                        WebView2                             鈹傗攤                                                            鈹傗敎鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹も攤 宸插彂鐜拌棰?                                                 鈹傗攤 鏍囬            绫诲瀷     娓呮櫚搴?     澶у皬/甯﹀      鎿嶄綔     鈹傗攤 Example         HLS      1080p       5.2 Mbps      [涓嬭浇]   鈹傗攤                          720p        2.8 Mbps      [涓嬭浇]   鈹傗敎鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹も攤 涓嬭浇闃熷垪                                                    鈹傗攤 file.mp4  72%  4.8 MB/s   涓嬭浇涓?       [鏆傚仠] [鍙栨秷]       鈹傗敂鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?
+11.2 UX 瑙勫垯
+鐢ㄦ埛蹇呴』鍏堢湅鍒扳€滆棰戠粍鈥濓紝灞曞紑鍚庨€夋嫨娓呮櫚搴︼紱閬垮厤鎶?ts/m4s 鍒嗙墖鐩存帴鍒楀嚭銆?
+DRM 鍐呭鏄剧ず鈥滃彈 DRM 淇濇姢锛屼笉鏀寔涓嬭浇鈥濓紝涓嶆樉绀轰吉涓嬭浇鎸夐挳銆?
+403/浼氳瘽杩囨湡搴旀彁绀衡€滃埛鏂扮綉椤靛悗閲嶈瘯鈥濓紝骞跺厑璁镐粠褰撳墠 WebView2 鍒锋柊涓婁笅鏂囥€?
+涓嬭浇鍘嗗彶鍖哄垎 Completed / Failed / Cancelled銆?
+璁剧疆椤佃嚦灏戝寘鍚笅杞界洰褰曘€佹渶澶у苟鍙戙€丗Fmpeg 璺緞銆佹槸鍚﹁嚜鍔ㄦ仮澶嶄换鍔°€佹棩蹇楃骇鍒€?
+12. 閰嶇疆銆佹棩蹇椾笌瀹夊叏
+12.1 閰嶇疆绀轰緥
+{  "Download": {    "DefaultSavePath": "%USERPROFILE%\\Downloads",    "MaxConcurrentDownloads": 3,    "RetryCount": 3  },  "Browser": {    "UserDataFolder": "%LOCALAPPDATA%\\VideoDownloader\\WebView2Data"  },  "Ffmpeg": {    "ExecutablePath": "ffmpeg.exe"  },  "Database": {    "Path": "%LOCALAPPDATA%\\VideoDownloader\\data\\downloads.db"  },  "Logging": {    "MinimumLevel": "Information"  }}
+12.2 鏃ュ織鑴辨晱
+鏃ュ織鑴辨晱蹇呴』鍦ㄨ繘鍏?Serilog sink 涔嬪墠瀹屾垚锛屼笉鍏佽鈥滃厛钀界洏鍐嶆竻娲椻€濄€侶eader 鎸夐敭鍚嶇粨鏋勫寲鑴辨晱锛汣ookie銆丄uthorization銆丳roxy-Authorization銆丼et-Cookie 涓€寰嬩笉璁板綍鍊笺€?
+URL 鏌ヨ鍙傛暟蹇呴』閫氳繃 URI/query parser 鎸?deny-list锛坱oken銆乻ign銆乻ignature銆乤uth銆乲ey銆乻ession 绛夛級鏇挎崲涓?[REDACTED]锛涙鍒欎粎浣滀负鍏滃簳锛屼笉浣滀负鍞竴瀹炵幇銆?
+FFmpeg 鍛戒护銆乻tderr銆佸紓甯稿璞″拰璇婃柇蹇収缁熶竴缁忚繃 SanitizedLogger锛涜嚜鍔ㄥ寲娴嬭瘯蹇呴』鎵弿鏃ュ織鏂囦欢锛岄獙璇佹晱鎰熸祴璇曞€间笉瀛樺湪銆?
+淇℃伅
+鏃ュ織瑙勫垯
+Cookie
+绂佹瀹屾暣杈撳嚭锛涘彧璁板綍 cookie 鍚嶇О鏁伴噺鎴?[REDACTED]
+Authorization
+绂佹杈撳嚭鍊?
+URL token/query
+瀵?token/signature/auth/key 绛夋晱鎰熷弬鏁拌劚鏁?
+Referer/PageUrl
+鍙褰曪紝浣嗚嫢鍖呭惈鏁忔劅 query 鍚屾牱鑴辨晱
+FFmpeg stderr
+淇濈暀璇婃柇灏鹃儴锛屼絾鍦ㄨ惤鐩樺墠鍋氭晱鎰熶俊鎭繃婊?
+12.3 鏈湴鏁版嵁瀹夊叏
+WebView2 鐢ㄦ埛鏁版嵁鐩綍灞炰簬鏈湴鏁忔劅鏁版嵁锛屼笉涓婁紶閬ユ祴銆?
+RequestContext 涓渶瑕佽法閲嶅惎淇濆瓨鐨?Cookie銆丄uthorization銆佹晱鎰熺鍚?Header 蹇呴』浣跨敤 Windows DPAPI锛圖ataProtectionScope.CurrentUser锛夊姞瀵嗗悗淇濆瓨锛涙暟鎹簱鍙厑璁告槑鏂囦繚瀛橀潪鏁忔劅鍏冩暟鎹€傝В瀵嗗け璐ユ椂浠诲姟杩涘叆鍙仮澶嶅け璐ョ姸鎬侊紝涓嶅緱閫€鍖栦负鏄庢枃瀛樺偍銆?
+鍗歌浇绋嬪簭搴旇鐢ㄦ埛閫夋嫨鏄惁鍒犻櫎娴忚鍣ㄦ暟鎹€佷笅杞藉巻鍙插拰鏃ュ織銆?
+涓嬭浇鐩爣璺緞蹇呴』闃叉闈炴硶鏂囦欢鍚嶄笌璺緞绌胯秺銆?
+13. 鍏抽敭浠ｇ爜鏍蜂緥
+13.1 DI 娉ㄥ唽
+services.AddSingleton<INetworkEventNormalizer, NetworkEventNormalizer>();services.AddSingleton<IMediaDetector, MediaDetector>();services.AddSingleton<IMediaAggregator, MediaAggregator>();services.AddSingleton<IManifestResolver, ManifestResolver>();services.AddSingleton<IRequestMessageFactory, RequestMessageFactory>();services.AddSingleton<IDownloadEngine, DownloadEngine>();services.AddSingleton<IDownloadJobStateMachine, DownloadJobStateMachine>();services.AddSingleton<IFfmpegAdapter, FfmpegAdapter>();services.AddSingleton<IDownloadRepository, SqliteDownloadRepository>();services.AddSingleton<WebView2Host>();services.AddSingleton<CdpNetworkMonitor>();services.AddSingleton<WebResourceMonitor>();services.AddTransient<MainViewModel>();services.AddTransient<MainWindow>();
+13.2 CDP 璁㈤槄绀烘剰
+private readonly Channel<RawNetworkEvent> _events = Channel.CreateBounded<RawNetworkEvent>(    new BoundedChannelOptions(2048)    {        SingleReader = true,        FullMode = BoundedChannelFullMode.Wait    });private void OnCdpEvent(object? sender, CoreWebView2DevToolsProtocolEventReceivedEventArgs e){    // 鍥炶皟鍙鍒舵渶灏忓瓧娈碉紱涓嶅湪杩欓噷鎵ц Manifest 瑙ｆ瀽/鏁版嵁搴撳啓鍏?Task.Run銆?   var raw = RawNetworkEvent.FromCdp(e);    _events.Writer.TryWrite(raw);}private async Task ConsumeAsync(CancellationToken ct){    await foreach (var raw in _events.Reader.ReadAllAsync(ct))    {        var normalized = await _normalizer.NormalizeAsync(raw, ct);        if (normalized is null) continue;        await _pipeline.ProcessAsync(normalized, ct);    }}
+13.3 MediaDetector 绀轰緥
+public MediaCandidate? Detect(MediaResource r){    var url = r.Url.AbsolutePath.ToLowerInvariant();    var mime = r.MimeType?.ToLowerInvariant() ?? string.Empty;    if (mime.Contains("application/vnd.apple.mpegurl") ||        mime.Contains("application/x-mpegurl") || url.EndsWith(".m3u8"))        return Candidate(r, CandidateKind.HlsManifest, 95, "HLS MIME/extension");    if (mime.Contains("application/dash+xml") || url.EndsWith(".mpd"))        return Candidate(r, CandidateKind.DashManifest, 95, "DASH MIME/extension");    if (mime.StartsWith("video/") || url.EndsWith(".mp4") || url.EndsWith(".webm"))        return Candidate(r, CandidateKind.DirectMedia, 80, "Video MIME/extension");    return null;}
+13.4 璇锋眰鏋勯€?
+// 浼犺緭灞備娇鐢?SocketsHttpHandler(UseCookies=false)锛孋ookie 涓嶈繘鍏ュ叡浜?CookieContainer銆俻ublic HttpRequestMessage Create(MediaResource resource, HttpMethod method){    var request = new HttpRequestMessage(method, resource.Url);    var ctx = resource.RequestContext;    if (!string.IsNullOrWhiteSpace(ctx.UserAgent))        request.Headers.TryAddWithoutValidation("User-Agent", ctx.UserAgent);    if (!string.IsNullOrWhiteSpace(ctx.Referer))        request.Headers.Referrer = new Uri(ctx.Referer);    if (!string.IsNullOrWhiteSpace(ctx.Origin))        request.Headers.TryAddWithoutValidation("Origin", ctx.Origin);    foreach (var (name, value) in FilterSafeHeaders(ctx.Headers))        request.Headers.TryAddWithoutValidation(name, value);    var cookie = BuildCookieHeader(ctx.Cookies, resource.Url);    if (!string.IsNullOrEmpty(cookie))        request.Headers.TryAddWithoutValidation("Cookie", cookie);    return request;}
+13.5 MP4 鏂偣缁紶鏍稿績
+await using var file = new FileStream(    partPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read,    1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);var offset = file.Length;using var request = _requestFactory.Create(resource, HttpMethod.Get);if (offset > 0){    request.Headers.Range = new RangeHeaderValue(offset, null);    ApplyIfRange(request, job.ETag, job.LastModified);}using var response = await _client.SendAsync(    request, HttpCompletionOption.ResponseHeadersRead, ct);if (offset > 0 && response.StatusCode == HttpStatusCode.PartialContent){    ValidateContentRange(response.Content.Headers.ContentRange, offset);    file.Position = offset;}else if (offset > 0 && response.StatusCode == HttpStatusCode.OK){    // Range 鏈敓鏁堬細浠?0 閲嶅缓锛岀姝㈣拷鍔犮€?   file.SetLength(0);    file.Position = 0;}else if (offset > 0 && response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable){    if (!IsAlreadyComplete(response, file.Length))        throw new RangeMismatchException();}response.EnsureSuccessStatusCode();await using var input = await response.Content.ReadAsStreamAsync(ct);await input.CopyToAsync(file, 1024 * 1024, ct);
+13.6 FFmpeg Adapter 绀烘剰
+var psi = new ProcessStartInfo{    FileName = _options.ExecutablePath,    RedirectStandardInput = true,    RedirectStandardError = true,    RedirectStandardOutput = true,    UseShellExecute = false,    CreateNoWindow = true};psi.ArgumentList.Add("-y");AddSanitizedInputHeaders(psi.ArgumentList, resource.RequestContext);psi.ArgumentList.Add("-i");psi.ArgumentList.Add(inputUrl);psi.ArgumentList.Add("-c");psi.ArgumentList.Add("copy");psi.ArgumentList.Add(outputPath);using var process = Process.Start(psi)    ?? throw new InvalidOperationException("Unable to start FFmpeg.");using var reg = ct.Register(() => _ = RequestFfmpegStopAsync(process));await ConsumeStderrAsync(process, ct);await process.WaitForExitAsync(CancellationToken.None);if (process.ExitCode != 0 && !ct.IsCancellationRequested)    throw new FfmpegException(process.ExitCode, GetSanitizedErrorTail(2000));
+14. 寮€鍙戣鍒掍笌閲岀▼纰?
+璁″垝閲囩敤 4 涓袱鍛?Sprint锛屽叡 8 鍛ㄥ舰鎴愰涓?Beta銆傛帹鑽愰厤缃负 2-3 鍚嶅紑鍙?+ 1 鍚嶆祴璇曪細Sprint 1 鐢辨祻瑙堝櫒/鎺㈡祴涓庣綉缁?涓嬭浇鑷冲皯涓ゆ潯鎶€鏈嚎骞惰锛涘悗缁寜 Core/Infrastructure/UI 浜ゅ弶鍗忎綔銆傝嫢鍗曚汉寮€鍙戯紝閲岀▼纰戦『搴忎笉鍙橈紝宸ユ湡鎸夊疄闄呬骇鑳借皟鏁淬€傛瘡鍛ㄦ湯蹇呴』杩涜涓€娆″彲杩愯鐗堟湰婕旂ず鍜岄闄╁鐩橈紝Sprint 楠屾敹浠ユ湰鏂囩 16 绔犱负鍑嗭紝涓嶄互鈥滀唬鐮佸畬鎴愨€濅唬鏇垮彲楠屾敹浜や粯銆?
+14.1 Sprint 1锛堢 1-2 鍛級锛氶鏋?+ WebView2 + MP4
+宸ヤ綔鍖?
+涓昏鍐呭
+浜や粯
+S1.1 宸ョ▼楠ㄦ灦
+瑙ｅ喅鏂规銆丏I銆侀厤缃€佹棩蹇椼€丆ore/Infrastructure 杈圭晫
+鍙紪璇戣В鍐虫柟妗?
+S1.2 娴忚鍣?
+WebView2Host銆佺敤鎴锋暟鎹洰褰曘€佸湴鍧€鏍?瀵艰埅
+鍙祻瑙堝拰姝ｅ父鐧诲綍
+S1.3 鍙屾帰娴?
+CDP + WebResourceResponseReceived + Normalizer
+鑳借緭鍑鸿鑼冨寲浜嬩欢
+S1.4 MP4 Detector
+MIME/鍚庣紑/Range 鍩虹璇嗗埆
+鍙戠幇鍒楄〃鏄剧ず MP4
+S1.5 涓嬭浇
+鍗曟祦 MP4銆佽繘搴︺€佸彇娑堛€?part
+鍙畬鎴愮畝鍗?MP4 涓嬭浇
+S1.6 娴嬭瘯婧?
+鏈湴 TestMediaServer 鎻愪緵 public MP4/Range/Cookie 鍦烘櫙
+鍙噸澶嶈嚜鍔ㄩ獙鏀?
+14.2 Sprint 2锛堢 3-4 鍛級锛欻LS + 褰掑苟 + FFmpeg
+宸ヤ綔鍖?
+涓昏鍐呭
+浜や粯
+S2.1 Aggregator
+鎶?master/variant/segment 褰掑苟
+UI 涓嶅啀鏄剧ず鍒嗙墖鍣０
+S2.2 HLS Resolver
+瑙ｆ瀽 master playlist銆佹竻鏅板害銆佺浉瀵?URI
+鏄剧ず 1080p/720p 绛?variant
+S2.3 RequestContext
+璧勬簮绾?Cookie/Referer/Origin/UA/Headers
+鍙椾繚鎶や絾鍚堟硶浼氳瘽鍙户缁笅杞?
+S2.4 FFmpeg Adapter
+HLS remux銆佸彇娑堛€侀敊璇В鏋?
+HLS -> MP4
+S2.5 鎸佷箙鍖?v1
+SQLite 涓嬭浇浠诲姟鍩虹璁板綍
+鍘嗗彶鍙煡璇?
+14.3 Sprint 3锛堢 5-6 鍛級锛欴ASH + 鏂偣 + 闃熷垪
+宸ヤ綔鍖?
+涓昏鍐呭
+浜や粯
+S3.1 DASH Resolver
+MPD/Representation/BaseURL
+鏄剧ず瑙嗛/闊抽杞?
+S3.2 DRM 鏍囪瘑
+ContentProtection 绛夎瘑鍒?
+闃绘柇鍙椾繚鎶ゅ唴瀹?
+S3.3 Range Resume
+ETag/Last-Modified/Range 璇箟
+MP4 鍙彲闈犳仮澶?
+S3.4 闃熷垪
+鏆傚仠/鎭㈠/鍙栨秷/骞跺彂 3
+瀹屾暣浠诲姟绠＄悊
+S3.5 鍚姩鎭㈠
+SQLite 鐘舵€佹仮澶?
+寮傚父閫€鍑哄悗涓嶄涪浠诲姟
+14.4 Sprint 4锛堢 7-8 鍛級锛氱ǔ瀹氭€?+ Beta
+宸ヤ綔鍖?
+涓昏鍐呭
+浜や粯
+S4.1 閿欒涓庨噸璇?
+閿欒鐮併€?03 涓婁笅鏂囧埛鏂般€?xx/429 閲嶈瘯
+澶辫触鍙瘖鏂?
+S4.2 璁剧疆
+鐩綍銆佸苟鍙戙€丗Fmpeg銆佽嚜鍔ㄦ仮澶嶃€佹棩蹇?
+鍙厤缃?
+S4.3 瀹夊叏
+鏃ュ織鑴辨晱銆丷equestContext 淇濇姢銆佽矾寰勬牎楠?
+閫氳繃瀹夊叏妫€鏌?
+S4.4 鑷姩鍖栨祴璇?
+Core 鍗曟祴銆両nfrastructure 闆嗘垚銆佹湰鍦?E2E
+CI 鍙繍琛?
+S4.5 鍙戝竷
+瀹夎鍖呫€佺増鏈俊鎭€丷EADME銆佽鍙瘉璇存槑
+Beta 瀹夎鍖?
+15. 娴嬭瘯绛栫暐
+15.1 娴嬭瘯閲戝瓧濉?
+灞傜骇
+鑼冨洿
+瑕佹眰
+鍗曞厓娴嬭瘯
+Detector銆丯ormalizer銆丄ggregator銆丮anifestParser銆丼tateMachine銆乁RL/鏂囦欢鍚嶅伐鍏?
+鏍稿績閫昏緫瑕嗙洊鐜囩洰鏍?>= 80%
+闆嗘垚娴嬭瘯
+HttpClient Range銆丼QLite銆丗Fmpeg Adapter銆乄ebView2 浜嬩欢閫傞厤
+鍏抽敭璺緞蹇呴』鏈夎嚜鍔ㄥ寲
+E2E
+鏈湴 TestMediaServer + 瀹為檯 WPF/WebView2
+姣忎釜鍙戝竷鍊欓€夌増鏈墽琛?
+浜哄伐鍏煎娴嬭瘯
+鐪熷疄鍏紑闈?DRM 绔欑偣
+鐢ㄤ簬鍙戠幇鍏煎鎬э紝涓嶄綔涓哄敮涓€鍥炲綊鍩虹嚎
+15.2 TestMediaServer 蹇呴』瑕嗙洊鐨勬祴璇曡祫婧?
+缂栧彿
+鍦烘櫙
+鏈熸湜
+T01
+public.mp4 + Content-Length
+璇嗗埆骞朵笅杞戒竴鑷?
+T02
+鏀寔 Range 鐨?mp4
+鏆傚仠/鎭㈠鍚?hash 涓€鑷?
+T03
+蹇界暐 Range 杩斿洖 200
+瀹㈡埛绔嚜鍔ㄤ粠 0 閲嶄笅锛屼笉浜х敓鎹熷潖鎷兼帴
+T04
+瑕佹眰 Referer 鐨?mp4
+缁ф壙涓婁笅鏂囧悗鎴愬姛
+T05
+瑕佹眰 Cookie 鐨?mp4
+娴忚鍣ㄧ櫥褰?璁剧疆 cookie 鍚庢垚鍔?
+T06
+HLS master + 1080/720
+褰掑苟涓轰竴涓棰戜袱涓?variant
+T07
+HLS 澶ч噺 ts 鍒嗙墖
+鍙戠幇鍒楄〃涓嶆樉绀哄垎鐗囧櫔澹?
+T08
+DASH MPD 瑙嗛+闊抽
+瑙ｆ瀽骞剁敓鎴愬彲閫?variant
+T09
+DASH ContentProtection
+鏄剧ず DRM 涓嶆敮鎸侊紝绂佹鍒涘缓浠诲姟
+T10
+HTTP 403
+涓€娆′笂涓嬫枃鍒锋柊鍚庢寜缁撴灉鎴愬姛鎴栨槑纭け璐?
+T11
+HTTP 500 -> 200
+鎸夌瓥鐣ラ噸璇曟垚鍔?
+T12
+纾佺洏绌洪棿涓嶈冻
+绔嬪嵆澶辫触锛岄敊璇爜姝ｇ‘锛宲art 鏂囦欢绛栫暐涓€鑷?
+T13
+Range 杩斿洖 416 + Content-Range */total
+姝ｇ‘璇嗗埆宸插畬鏁存垨鏂偣澶辨晥锛屼笉鎹熷潖鏂囦欢
+T14
+鏂偣鏈熼棿 ETag/Last-Modified 鍙樺寲
+鏃?.part 涓嶄笌鏂板疄浣撴嫾鎺ワ紝浠?0 閲嶅缓
+T15
+302/307 閲嶅畾鍚戝悗鐨勫獟浣?
+鏈€缁堣祫婧愪粛鍙瘑鍒紝Context/Referer 澶勭悊绗﹀悎绛栫暐
+T16
+Cookie 杩囨湡鍚庨娆?403銆佸埛鏂板悗鎴愬姛
+浠呭彈鎺у埛鏂颁竴娆★紝Context Version 澧炲姞
+T17
+鎸佺画楂橀浜х敓缃戠粶/鍒嗙墖浜嬩欢
+鏈夌晫 Channel/缂撳瓨鐢熸晥锛孶I 涓嶉樆濉烇紝鍐呭瓨涓嶇嚎鎬у闀?
+T18
+A/B 涓よ祫婧愪娇鐢ㄤ笉鍚?Cookie/Authorization
+璇锋眰涓婁笅鏂囧畬鍏ㄩ殧绂伙紝鏃犱覆鎵?
+T19
+鏁忔劅娴嬭瘯 token/cookie/auth
+SQLite 鏄庢枃鍖哄拰鎵€鏈夋棩蹇椾腑鍧囨悳绱笉鍒版晱鎰熷€?
+T20
+HLS AES-128 涓庢槑纭?Widevine/PlayReady 鏍锋湰
+鏍囧噯鍔犲瘑涓?DRM 姝ｇ‘鍖哄垎锛汥RM 蹇呴』闃绘柇
+15.3 CI 鑷姩鍖栨渶浣庤姹?
+dotnet format --verify-no-changes -> Release build -> unit tests -> integration tests锛堝惎鍔?TestMediaServer锛?> coverage -> package銆?
+鏍稿績閫昏緫瑕嗙洊鐜囩洰鏍?>= 80%锛涜鐩栫巼涓嶅緱閫氳繃鎺掗櫎鏍稿績涓氬姟鏂囦欢浜轰负杈炬爣銆?
+闆嗘垚娴嬭瘯蹇呴』鍖呭惈 T02/T03/T13/T14/T16/T18/T19锛汧Fmpeg 浣跨敤 <10 MB 鏈湴鏍锋湰锛岄伩鍏嶄緷璧栧叕缃戙€?
+WPF E2E 棣栫増鍏佽浠ヤ汉宸ュ啋鐑熶负涓伙紱鑷姩鍖?UI 娴嬭瘯浣滀负 Beta 鍚庡寮洪」锛屼笉闃诲 Sprint 1銆?
+16. 楠屾敹鏍囧噯
+16.1 鎬讳綋楠屾敹闂ㄦ
+鎵€鏈?P0/P1 楠屾敹鐢ㄤ緥閫氳繃锛涗笉瀛樺湪浼氫骇鐢熸崯鍧忔枃浠躲€佷换鍔＄姸鎬侀敊涔辨垨娉勯湶鏁忔劅 Header 鐨勫凡鐭ョ己闄枫€?
+绋嬪簭鍦?Windows 10/11 x64 涓婂彲瀹夎銆佸惎鍔ㄣ€佸嵏杞斤紱棣栨鍚姩鏃犻澶栧紑鍙戠幆澧冧緷璧栥€?
+鏍稿績鍗曞厓娴嬭瘯瑕嗙洊鐜?>= 80%锛汣I 鏋勫缓鍜岃嚜鍔ㄦ祴璇曞叏缁裤€?
+WebView2 椤甸潰鍙甯稿鑸€佺櫥褰曪紝鍏抽棴/閲嶅紑搴旂敤鍚庣敤鎴锋暟鎹洰褰曡涓虹鍚堣璁°€?
+鏅€?MP4銆丠LS銆丏ASH 涓夌被闈?DRM 娴嬭瘯婧愬潎鍙畬鎴愮鍒扮娴佺▼銆?
+DRM 娴嬭瘯婧愬繀椤绘槑纭樆鏂紝涓嶅厑璁歌鎶ヤ负鍙笅杞姐€?
+涓嬭浇浠诲姟寮傚父閫€鍑哄悗鍙仮澶嶏紝涓嶅厑璁稿皢鏈畬鎴愪换鍔¤鏍?Completed銆?
+鏃ュ織缁忚繃鎶芥煡锛屼笉寰楀嚭鐜板畬鏁?Cookie銆丄uthorization 鎴栨晱鎰熺鍚嶅弬鏁般€?
+16.2 Sprint 1 楠屾敹
+缂栧彿
+楠屾敹椤?
+閫氳繃鏍囧噯
+A1-01
+WebView2 娴忚
+杈撳叆 URL 鍙闂祴璇曠珯鐐癸紱瀵艰埅/鍒锋柊姝ｅ父
+A1-02
+鍙屾帰娴嬫簮
+鑷冲皯鑳藉垎鍒褰?CDP 涓?WebResourceResponseReceived 浜嬩欢锛屽苟鐢?Normalizer 鍘婚噸
+A1-03
+MP4 璇嗗埆
+T01/T02/T04/T05 鍧囪瘑鍒负濯掍綋锛屼笉鎶婃櫘閫?jpg/js/css 璇姤
+A1-04
+MP4 涓嬭浇
+涓嬭浇鍚?SHA-256 涓庢湇鍔″櫒婧愭枃浠朵竴鑷?
+A1-05
+鍙栨秷
+鍙栨秷鍚庝换鍔＄姸鎬?Cancelled锛岀綉缁滆鍙栧仠姝紝UI 涓嶅啀澧為暱杩涘害
+A1-06
+璧勬簮涓婁笅鏂囬殧绂?
+骞惰涓や釜涓嶅悓 Cookie/Referer 璧勬簮鏃朵簰涓嶄覆鐢?
+A1-07
+浜嬩欢鑳屽帇
+楂橀浜嬩欢涓嬪洖璋冧笉鎵ц閲嶅瀷宸ヤ綔锛汣hannel/鍘婚噸缂撳瓨鍧囨湁鐣岋紝鎺㈡祴涓婚摼璺棤 UI 鍗℃
+16.3 Sprint 2 楠屾敹
+缂栧彿
+楠屾敹椤?
+閫氳繃鏍囧噯
+A2-01
+HLS master
+T06 姝ｇ‘鍒楀嚭 1080p/720p
+A2-02
+褰掑苟
+T07 鍒嗙墖涓嶅嚭鐜板湪鐢ㄦ埛鍙戠幇鍒楄〃
+A2-03
+HLS 涓嬭浇
+閫夋嫨浠讳竴 variant 鍚庤緭鍑?MP4 鍙挱鏀撅紝闊宠棰戝悓姝?
+A2-04
+Header 浼犻€?
+瑕佹眰 Cookie/Referer 鐨?HLS 鍙湪鍚堟硶浼氳瘽涓婁笅鏂囦笅涓嬭浇
+A2-05
+FFmpeg 鍙栨秷
+鍙栨秷鍚庡瓙杩涚▼鍦ㄩ檺瀹氭椂闂村唴閫€鍑猴紝鏃犲鍎胯繘绋?
+A2-06
+FFmpeg 閫€鍑轰笌鏃ュ織
+鍙栨秷鏃跺厛璇锋眰姝ｅ父閫€鍑猴紝蹇呰鏃?Kill 鏁存５杩涚▼鏍戯紱鏃犲鍎胯繘绋嬶紱stderr/鍛戒护涓棤鏁忔劅鏄庢枃
+16.4 Sprint 3 楠屾敹
+缂栧彿
+楠屾敹椤?
+閫氳繃鏍囧噯
+A3-01
+DASH 瑙ｆ瀽
+T08 姝ｇ‘璇嗗埆瑙嗛/闊抽 Representation
+A3-02
+DASH 涓嬭浇
+閫夋嫨娓呮櫚搴﹀悗杈撳嚭鍙挱鏀炬枃浠讹紝闊宠棰戞纭?
+A3-03
+DRM 闃绘柇
+T09 鏃犱笅杞芥寜閽垨鎸夐挳绂佺敤锛岃鏄庡師鍥?
+A3-04
+鏂偣缁紶
+T02 鍦?20%-80% 浠绘剰鐐规殏鍋滃苟閲嶅惎搴旂敤鍚庢仮澶嶏紝鏈€缁?SHA-256 涓€鑷?
+A3-05
+Range 寮傚父
+T03 涓嶈拷鍔犳崯鍧忓唴瀹?
+A3-06
+闃熷垪
+3 骞跺彂涓嬩换鍔＄姸鎬併€侀€熷害銆佹殏鍋滄仮澶嶄簰涓嶅共鎵?
+A3-07
+416 澶勭悊
+T13 鑳藉尯鍒嗏€滄湰鍦板凡瀹屾暣鈥濅笌鈥滄柇鐐规棤鏁堚€濓紝鍧囦笉浜х敓閿欒鎷兼帴
+A3-08
+瀹炰綋鐗堟湰鍙樺寲
+T14 涓?ETag/Last-Modified 鍙樺寲鍚庢斁寮冩棫鏂偣骞堕噸鏂颁笅杞斤紝鏈€缁?SHA-256 涓€鑷?
+A3-09
+鍔犲瘑/DRM 杈圭晫
+T20 涓嶅洜 AES-128 鏍囩鐩存帴璇垽 DRM锛涙槑纭?Widevine/PlayReady 鍐呭蹇呴』闃绘柇
+16.5 Sprint 4 / Beta 楠屾敹
+缂栧彿
+楠屾敹椤?
+閫氳繃鏍囧噯
+A4-01
+閲嶈瘯
+T11 鑷姩鎭㈠锛涢噸璇曟鏁扮鍚堥厤缃?
+A4-02
+403 浼氳瘽
+鍏佽鍒锋柊涓婁笅鏂囧啀閲嶈瘯锛屼笉鏃犻檺寰幆
+A4-03
+宕╂簝鎭㈠
+寮哄埗缁撴潫杩涚▼鍚庨噸鏂板惎鍔紝Downloading 涓嶈璇爣 Completed
+A4-04
+鏃ュ織鑴辨晱
+鎶芥煡 Cookie/Authorization/token 鍧囨湭鏄庢枃钀界洏
+A4-05
+闀挎湡杩愯
+杩炵画娴忚/鎺㈡祴 4 灏忔椂锛屽唴瀛樻棤鎸佺画绾挎€у闀匡紱浜嬩欢璁㈤槄鏃犻噸澶嶇疮绉?
+A4-06
+瀹夎鍖?
+骞插噣 Windows 鏈哄櫒瀹夎鍚庡彲杩愯锛岀己 FFmpeg 鏃舵彁绀烘槑纭紱鑻ラ殢鍖呭垎鍙戝垯璁稿彲璇佹潗鏂欓綈鍏?
+A4-07
+涓婁笅鏂囩増鏈埛鏂?
+T16 403 鍚庢渶澶氬彈鎺у埛鏂颁竴娆★紱鐢熸垚鏂?Context Version锛屼笉鍘熷湴淇敼鏃у揩鐓?
+A4-08
+鏁忔劅鎸佷箙鍖?
+T19 涓?Cookie/Authorization/Token 涓嶄互鏄庢枃瀛樺湪 SQLite銆佹棩蹇椼€丗Fmpeg 璇婃柇杈撳嚭
+A4-09
+闀挎湡浜嬩欢娲嘲
+T17 鍦ㄦ寔缁簨浠惰礋杞戒笅缂撳瓨/Channel 涓嶈秺鐣岋紝4 灏忔椂鍐呭唴瀛樻棤鎸佺画绾挎€у闀?
+16.6 鎬ц兘鍩哄噯
+鎸囨爣
+棣栫増楠屾敹鐩爣
+绌洪棽鍐呭瓨
+搴旂敤绋冲畾鍚庡缓璁?< 350 MB锛堜笉鍚閮?FFmpeg 宄板€硷級锛沇ebView2 椤甸潰澶嶆潅搴︿細褰卞搷缁撴灉
+鎺㈡祴寤惰繜
+娴嬭瘯鏈嶅姟鍣ㄥ獟浣撳搷搴斿嚭鐜板悗 2 绉掑唴鍑虹幇鍦ㄥ彂鐜板垪琛?
+UI 鍝嶅簲
+涓嬭浇杩囩▼涓?UI 鎿嶄綔鏃犳槑鏄惧崱姝伙紱涓荤嚎绋嬩笉寰楁墽琛岀綉缁?鏂囦欢澶?I/O
+涓嬭浇鍚炲悙
+鍗曟祦涓嬭浇涓嶅簲鏃犳晠浣庝簬鍚屾満 curl/娴忚鍣ㄧ洿杩炲悶鍚愮殑 80%锛堟帓闄ゆ湇鍔＄闄愰€燂級
+浠诲姟瑙勬ā
+鑷冲皯绋冲畾淇濆瓨 1000 鏉″巻鍙蹭换鍔★紝鍒楄〃鍒嗛〉/铏氭嫙鍖栧悗鍙敤
+浜嬩欢缂撳瓨
+Channel 鍜屽幓閲嶇紦瀛樺潎蹇呴』鏈夌晫锛涜揪鍒颁笂闄愭椂鎸夊畾涔夌殑鑳屽帇/闄嶇骇绛栫暐澶勭悊锛屼笉鍏佽鏃犻檺澧為暱
+鏁忔劅鏁版嵁
+鏃ュ織涓?SQLite 鏄庢枃鍖哄煙瀵规祴璇?Cookie/Authorization/token 鐨勬鍑烘暟蹇呴』涓?0
+17. 鍙戝竷涓庨儴缃?
+17.1 鍙戝竷鍖?
+Windows x64 瀹夎鍖咃紙MSIX/WiX/Inno Setup 涓夐€変竴锛屽洟闃熺粺涓€锛夈€?
+鏄庣‘ WebView2 Runtime 渚濊禆绛栫暐锛欵vergreen Runtime 妫€娴?寮曞銆?
+FFmpeg 閲囩敤鈥滅敤鎴锋寚瀹氳矾寰勨€濇垨鈥滈殢鍖呭垎鍙戔€濅簩閫変竴锛涢殢鍖呭垎鍙戞椂瀹屾垚鐩稿簲璁稿彲璇佸悎瑙勬潗鏂欍€?
+搴旂敤鏁版嵁榛樿鍐欏叆 %LOCALAPPDATA%\VideoDownloader锛涚敤鎴蜂笅杞界洰褰曞崟鐙厤缃€?
+鐗堟湰鍙烽噰鐢?SemVer锛屼緥濡?1.0.0-beta.1銆?
+17.2 CI/CD 鏈€浣庤姹?
+restore -> build Release -> unit tests -> integration tests        -> package -> smoke test -> artifact publish
+涓诲垎鏀繀椤诲彈淇濇姢锛涘悎骞跺墠鏋勫缓涓庢祴璇曢€氳繃銆侭eta 鍙戝竷搴旈檮 CHANGELOG銆佸凡鐭ラ棶棰樺拰瀹夎璇存槑銆?
+18. 椋庨櫓涓庡悗缁紨杩?
+椋庨櫓
+褰卞搷
+v1.1 瀵圭瓥
+绔欑偣鍗忚鍙樺寲/Token 鐭椂鏁?
+涓嬭浇 403
+璧勬簮绾?RequestContext + 鍙埛鏂颁笂涓嬫枃锛涗笉鍋氱珯鐐圭‖缂栫爜浼樺厛
+CDP/WebView2 API 宸紓
+婕忔帰娴?
+鍙屾帰娴嬫簮 + Normalizer
+HLS/DASH 澶嶆潅鍙樹綋
+閮ㄥ垎绔欑偣涓嶅吋瀹?
+Parser 鑱氱劍鏍囧噯璇箟锛涘鏉備笅杞戒氦 FFmpeg锛涘缓绔嬪洖褰掓牱鏈?
+FFmpeg 渚濊禆涓庤鍙瘉
+鍙戝竷椋庨櫓
+閫傞厤灞傞殧绂?+ 璁稿彲璇佸鏌?
+澶ч噺鍒嗙墖瀵艰嚧 UI 鍣０/鍐呭瓨澧為暱
+浣撻獙涓庣ǔ瀹氭€т笅闄?
+Aggregator + segment 鏃╄繃婊?+ 鏈夌晫 Channel + 瀹归噺/TTL 鍙岄檺鍒跺幓閲嶇紦瀛?
+Cookie/Token 娉勯湶
+瀹夊叏椋庨櫓
+涓嶅彲鍙?RequestContext + 璇锋眰绾?Cookie + DPAPI(CurrentUser) + 缁撴瀯鍖栨棩蹇楄劚鏁?
+DRM 璇垽
+娉曞緥/浜у搧椋庨櫓
+ContentProtection/KEYFORMAT/EME 绛夌患鍚堝垽瀹氾紱AES-128/SAMPLE-AES 涓嶅崟鐙瓑鍚?DRM锛涙槑纭?DRM 榛樿闃绘柇
+18.1 闃舵浜屽€欓€?
+MP4 澶氱嚎绋嬪垎鍧楀姞閫熴€?
+HLS/DASH 鍐呭缓涓嬭浇鍣紝鍑忓皯瀵?FFmpeg 缃戠粶涓嬭浇鐨勪緷璧栥€?
+鐩存挱褰曞埗涓庢椂绉汇€?
+Chrome/Edge 鎵╁睍锛屽皢澶栭儴娴忚鍣ㄨ祫婧愬彂閫佸埌妗岄潰瀹㈡埛绔€?
+绔欑偣閫傞厤鎻掍欢锛屼絾鎻掍欢鍙兘澧炲己璇嗗埆锛屼笉鍏佽缁曡繃 DRM/鏉冮檺銆?
+浠诲姟鏍囩銆佹壒閲忎笅杞姐€佷笅杞藉畬鎴愯嚜鍔ㄦ暣鐞嗐€?
+闄勫綍 A锛氱姸鎬佷笌閿欒鐮?
+閿欒鐮?
+鍚箟
+寤鸿 UI
+NET_TIMEOUT
+缃戠粶瓒呮椂
+缃戠粶瓒呮椂锛屽凡鎸夌瓥鐣ラ噸璇?
+HTTP_403
+璁块棶琚嫆缁?浼氳瘽杩囨湡
+鍒锋柊缃戦〉鍚庨噸璇?
+HTTP_404
+璧勬簮涓嶅瓨鍦?
+璧勬簮宸插け鏁?
+RANGE_MISMATCH
+Range/瀹炰綋鐗堟湰涓嶄竴鑷?
+宸叉斁寮冩棫鏂偣骞跺噯澶囬噸鏂颁笅杞?
+DISK_FULL
+纾佺洏绌洪棿涓嶈冻
+閲婃斁纾佺洏绌洪棿鎴栨洿鏀逛笅杞界洰褰?
+DRM_PROTECTED
+DRM 淇濇姢
+姝ゅ唴瀹瑰彈 DRM 淇濇姢锛屼笉鏀寔涓嬭浇
+FFMPEG_NOT_FOUND
+鏈壘鍒?FFmpeg
+璇烽厤缃?FFmpeg 璺緞
+FFMPEG_FAILED
+FFmpeg 澶勭悊澶辫触
+鏄剧ず鑴辨晱鍚庣殑璇婃柇鎽樿
+MUX_INTERRUPTED
+鍚堝苟杩囩▼琚腑鏂?
+鍙噸鏂版墽琛屽悎骞?
+CANCELLED
+鐢ㄦ埛鍙栨秷
+宸插彇娑?
+CONTEXT_EXPIRED
+璇锋眰涓婁笅鏂囧凡杩囨湡涓斿彈鎺у埛鏂板け璐?
+鍒锋柊缃戦〉鍚庨噸鏂版帰娴嬭瑙嗛
+RANGE_416
+Range 涓嶅彲婊¤冻涓旀湰鍦版枃浠跺苟闈炲畬鏁村疄浣?
+宸叉斁寮冩棤鏁堟柇鐐瑰苟鍑嗗閲嶆柊涓嬭浇
+闄勫綍 B锛氭渶缁堜氦浠樻竻鍗?
+绫诲埆
+蹇呴』浜や粯
+婧愮爜
+瀹屾暣瑙ｅ喅鏂规銆佸彲澶嶇幇鏋勫缓銆佹棤鏈満缁濆璺緞渚濊禆
+鏁版嵁搴?
+SQLite migration/init 鑴氭湰
+娴嬭瘯
+鍗曞厓/闆嗘垚/E2E 娴嬭瘯鍙?TestMediaServer
+鏂囨。
+README銆佹灦鏋勮鏄庛€佸紑鍙?楠屾敹瑙勮寖銆丆HANGELOG
+鍙戝竷
+Windows x64 瀹夎鍖呫€佺増鏈俊鎭€佷緷璧栬鏄?
+绗笁鏂?
+NuGet/FFmpeg 绛夌涓夋柟璁稿彲璇佹竻鍗?
+璐ㄩ噺
+CI 璁板綍銆佹祴璇曟姤鍛娿€佸凡鐭ラ棶棰樻竻鍗?
+瀹夊叏
+鏃ュ織鑴辨晱妫€鏌ャ€丏RM 闃绘柇妫€鏌ャ€佹晱鎰熸暟鎹寔涔呭寲璇存槑
+闄勫綍 C锛氬叧閿爣鍑嗕笌瀹樻柟瀹炵幇鍙傝€?
+HTTP Range锛歊FC 9110銆奌TTP Semantics銆嬶紝閲嶇偣鍏虫敞 Range銆丄ccept-Ranges銆丆ontent-Range銆両f-Range銆?06 涓?416 璇箟銆侫ccept-Ranges 浠呬负鑳藉姏鎻愮ず锛屼笉鏄鎴风鍙戦€?Range 鐨勭‖鍓嶇疆銆?
+HLS锛歊FC 8216銆奌TTP Live Streaming銆嬶紝EXT-X-KEY 瀹氫箟 NONE銆丄ES-128銆丼AMPLE-AES锛涘疄鐜颁笉寰椾粎渚濇嵁 METHOD 鍒ゆ柇 DRM銆?
+WebView2锛歁icrosoft WebView2 CoreWebView2.WebResourceResponseReceived 涓?CDP 鏂囨。锛沇ebResourceResponseReceived 鐢ㄤ簬瑙傚療宸插疄闄呭彂閫佺殑璇锋眰/鏀跺埌鐨勫搷搴旓紝璺ㄦ潵婧愪粛闇€鑷褰掍竴鍖栧幓閲嶃€?
+.NET HTTP锛歁icrosoft Learn銆奤se the IHttpClientFactory銆嬪強鏁呴殰鎺掓煡鏂囨。鏄庣‘鎻愮ず CookieContainer 鍙兘闅?Handler 姹犲叡浜紱鏈」鐩洜姝ら噰鐢ㄨ姹傜骇 Cookie銆乁seCookies=false銆?
+.NET Process锛歅rocess.CloseMainWindow 浠呴€傜敤浜庢湁鍥惧舰涓荤獥鍙ｇ殑杩涚▼锛汧Fmpeg 鍙栨秷浣跨敤 stdin 姝ｅ父閫€鍑?+ 瓒呮椂 Kill(entireProcessTree:true)銆?
+Windows DPAPI锛歋ystem.Security.Cryptography.ProtectedData锛屼粎 Windows 鏀寔锛涙湰椤圭洰浣跨敤 CurrentUser 淇濇姢闇€璺ㄩ噸鍚繚瀛樼殑鏁忔劅 RequestContext 瀛楁銆?
+鏈€缁?Definition of Done
+褰撲笖浠呭綋锛氭湰鏂囦欢绗?16 绔?Beta 楠屾敹鏉′欢閫氳繃銆佽嚜鍔ㄦ祴璇曢€氳繃銆乀02/T03/T13/T14/T16/T18/T19/T20 鍏抽敭鍦烘櫙閫氳繃銆佸彂甯冨寘鍦ㄥ共鍑€ Windows 鐜瀹屾垚鍐掔儫娴嬭瘯銆佹棤鏈叧闂?P0/P1 缂洪櫡銆佺涓夋柟璁稿彲璇佷笌瀹夊叏妫€鏌ュ畬鎴愶紝棣栦釜 Beta 鏂瑰彲瑙嗕负杈惧埌浜や粯鏉′欢銆備换浣曢€氳繃淇敼鏁版嵁搴撶姸鎬併€佺粫寮€鐘舵€佹満銆佺鐢ㄦ棩蹇楄劚鏁忔垨鍏抽棴 DRM 闃绘柇鏉モ€滈€氳繃娴嬭瘯鈥濈殑瀹炵幇鍧囪涓洪獙鏀跺け璐ャ€?

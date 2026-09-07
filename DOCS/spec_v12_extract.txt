@@ -1,0 +1,983 @@
+
+Video Downloader
+网页视频探测与下载软件
+完整开发设计、实施计划与验收规范
+版本：v1.2日期：2026-09-02适用对象：产品负责人、架构师、开发工程师、测试工程师、发布工程师
+
+0. 文档控制
+项目
+内容
+文档名称
+Video Downloader - 完整开发设计、实施计划与验收规范
+文档版本
+v1.2
+状态
+实施冻结基线
+技术基线
+.NET 10 / C# / WPF / WebView2 / CDP / HttpClient / SQLite / FFmpeg
+适用平台
+Windows 10/11 x64（首版）；Windows Server 不作为桌面客户端目标
+设计目标
+浏览器内探测用户有权访问的非 DRM 视频资源；重点兼容 YouTube/Bilibili/抖音/TikTok + 通用网站，并提供可恢复、可追踪、可降级的下载能力
+非目标
+不提供 DRM 绕过、付费授权绕过、账号权限绕过、系统级中间人解密抓包
+0.1 修订记录
+版本
+日期
+说明
+v1.0
+2026-09-02
+在原始开发框架基础上收敛架构边界，补齐 RequestContext、双探测源、MediaAggregator、状态机、验收标准与代码样例。
+v1.1
+2026-09-02
+修正并冻结双源去重、RequestContext 生命周期、HTTP 客户端/Cookie 隔离、Range/If-Range 续传、FFmpeg 取消、DRM 判定、日志脱敏、TestMediaServer 与验收矩阵。
+v1.2
+2026-09-02
+新增 YouTube / Bilibili / 抖音 / TikTok + 通用网站的可插拔站点适配架构；引入 SiteAdapterRouter、Generic fallback、可选 yt-dlp 外部解析后端；升级 MediaVariant 为多 Track 模型以支持音视频分离；新增重点站点开发计划、测试矩阵与发布验收。
+0.2 文档使用方式
+本文件是 v1.2 开发实施冻结基线。开发团队应以“模块职责、关键契约、状态语义、安全边界、站点适配边界、验收标准”作为不可随意改变的约束；代码样例为参考实现，可在不改变契约与行为的前提下优化。任何涉及数据模型、RequestContext、任务状态、探测链路、站点适配器、HTTP 续传语义、DRM 边界或敏感数据处理的变更，必须经过设计评审并同步更新本文档后方可实施。
+0.3 目录
+1. 产品目标与范围
+2. 总体架构
+3. 解决方案与项目结构
+4. 核心领域模型
+5. 浏览器与网络探测设计
+6. 媒体识别与归并设计
+7. HLS/DASH Manifest 解析
+8. 下载引擎设计
+9. FFmpeg 集成
+10. 数据持久化与任务恢复
+11. UI 与交互设计
+12. 配置、日志与安全
+13. 关键代码样例
+14. 开发计划与里程碑
+15. 测试策略
+16. 验收标准
+17. 发布与部署
+18. 风险与后续演进
+附录 A：状态与错误码
+附录 B：最终交付清单
+附录 C：关键标准与官方实现参考
+
+1. 产品目标与范围
+1.1 产品定位
+本软件定位为 Windows 桌面“网页视频探测 + 下载器”。软件内置 WebView2 浏览器，用户在正常浏览、登录和播放网页视频的过程中，程序从浏览器网络层观察实际 HTTP/HTTPS 请求，识别 MP4、HLS（m3u8）和 DASH（mpd）媒体资源，并在保留合法浏览会话所需请求上下文的前提下执行下载。
+1.2 核心目标
+网页无需提供“下载按钮”，只要浏览器实际请求到非 DRM 媒体资源，软件即可将其识别为候选资源。
+支持普通 MP4、HLS、DASH 三类核心媒体。
+处理 blob/MSE 场景：不下载 blob URL 本身，而是定位其底层媒体请求。
+自动关联 Cookie、Referer、Origin、User-Agent 及必要请求头，降低“浏览器能播放但下载 403”的概率。
+支持下载任务持久化、失败重试、暂停/恢复、取消和程序重启后的恢复。
+对用户展示“视频”而非大量底层分片请求；同一视频的不同清晰度应归并展示。
+首版重点兼容目标：YouTube、Bilibili、抖音、TikTok 与通用网页；重点站点采用独立适配器增强，适配失败时允许降级到通用 WebView2 嗅探链路。
+对 DRM 保护内容明确识别并标记为不支持。
+1.3 非目标与边界
+范围
+处理原则
+Widevine / PlayReady / FairPlay 等 DRM
+识别为 DRM 或受保护流，停止下载链路；不实现密钥提取、许可证绕过或解密。
+系统级 HTTPS 抓包
+首版不采用 WinDivert/WinPcap/代理 MITM；避免证书注入、QUIC、HTTP/3 等复杂度。
+绕过登录/订阅/付费权限
+不实现。软件仅复用用户已经正常取得的浏览会话。
+直播录制
+不列入首版核心验收；架构保留后续扩展空间。
+跨平台
+首版仅 Windows。
+2. 总体架构
+2.1 架构原则
+浏览器层探测优先：基于 WebView2 + CDP，不从网卡层做系统抓包。
+双探测源：CDP 与 WebResourceResponseReceived 同时作为正式来源，统一归一化并去重。
+请求上下文跟随资源：Cookie/Referer/Origin/UA/Headers 属于 MediaResource，不允许使用全局可变下载上下文。
+网络资源与用户视频分离：MediaDetector 只识别资源；MediaAggregator 将底层资源归并成用户可理解的视频/清晰度集合。
+Core 不依赖具体 UI、WebView2、SQLite 或 FFmpeg；这些放入 Infrastructure。
+状态机驱动下载状态，避免 UI、Repository、Downloader 多方直接写状态造成语义冲突。
+I/O 全异步，所有长任务支持 CancellationToken。
+日志不得输出完整 Cookie、Authorization、签名 Token。
+站点逻辑插件化：YouTube、Bilibili、Douyin、TikTok 的规则只存在于独立 ISiteAdapter 实现中，不得写入 MediaDetector、DownloadEngine 或 UI 条件分支。
+通用嗅探永远存在：站点适配器是增强层而非唯一入口；适配器失败、规则过期或被禁用时，可回退 Generic Adapter，对浏览器实际产生的 MP4/HLS/DASH/媒体轨继续探测。
+下载后端按能力路由：单轨 Direct HTTP、Manifest/多轨 FFmpeg 等通过统一 Backend Router 选择；站点适配器只负责识别、归并和补充元数据，不直接写文件。
+2.2 逻辑架构
+┌────────────────────────────────────────────────────────────────────┐│                         VideoDownloader.UI                         ││ WPF / MVVM / WebView2 / 发现列表 / 站点标识 / 下载队列 / 设置    │└────────────────────────────────┬───────────────────────────────────┘                                 │ Commands / Events┌────────────────────────────────▼───────────────────────────────────┐│                         VideoDownloader.Core                       ││ Models / Detector / Aggregator / Manifest / Site Adapter Contracts││ SiteAdapterRouter / DownloadBackendRouter / State Machine          │└────────────────────────────────┬───────────────────────────────────┘                                 │ Interfaces┌────────────────────────────────▼───────────────────────────────────┐│                   VideoDownloader.Infrastructure                   ││ WebView2+CDP | Generic | YouTube | Bilibili | Douyin | TikTok     ││ HTTP | optional yt-dlp resolver | SQLite | FFmpeg | Logging        │└────────────────────────────────────────────────────────────────────┘
+2.3 端到端主链路
+Page URL / WebView2 Session        │        ├──────────────► SiteAdapterRouter        │                 ├─ YouTubeAdapter        │                 ├─ BilibiliAdapter        │                 ├─ DouyinAdapter        │                 ├─ TikTokAdapter        │                 └─ GenericAdapter        │WebView2 ├─ CDP Network.*         └─ WebResourceResponseReceived                    │                    ▼           NetworkEventNormalizer                    │                    ▼       MediaDetector -> MediaAggregator -> ManifestResolver                    │                 │                    └──── merge/enrich┘                              ▼                 DetectedVideo + Variants + Tracks                              │                              ▼                   DownloadBackendRouter                    ├─ DirectHttpBackend                    └─ FfmpegBackend                              │                              ▼                       File + SQLite State规则：Site Adapter 成功时负责增强标题/内容ID/轨道配对；失败或无结果时自动降级 Generic，禁止因单一站点规则失效阻断通用探测。
+3. 解决方案与项目结构
+3.1 推荐物理结构
+VideoDownloader.sln├─ src/│  ├─ VideoDownloader.UI/│  │  ├─ Views/│  │  ├─ ViewModels/│  │  ├─ Resources/│  │  └─ App.xaml(.cs)│  ├─ VideoDownloader.Core/│  │  ├─ Models/│  │  ├─ Contracts/│  │  ├─ Detection/│  │  ├─ Aggregation/│  │  ├─ Manifests/│  │  ├─ Sites/                 # ISiteAdapter / Router / Site models│  │  ├─ Download/              # Backend contracts / State machine│  │  └─ Errors/│  └─ VideoDownloader.Infrastructure/│     ├─ Browser/│     ├─ Sites/│     │  ├─ Generic/│     │  ├─ YouTube/│     │  ├─ Bilibili/│     │  ├─ Douyin/│     │  ├─ TikTok/│     │  └─ ExternalResolvers/  # optional yt-dlp adapter│     ├─ Http/│     ├─ Persistence/│     ├─ Ffmpeg/│     ├─ Logging/│     └─ Configuration/├─ tests/│  ├─ VideoDownloader.Core.Tests/│  ├─ VideoDownloader.Infrastructure.Tests/│  └─ VideoDownloader.E2E.Tests/└─ tools/   └─ VideoDownloader.TestMediaServer/
+3.2 依赖规则
+项目
+允许依赖
+禁止依赖
+UI
+Core、Infrastructure
+不得直接访问 SQLite 文件或直接启动 FFmpeg
+Core
+.NET 基础类库
+WebView2、WPF、SQLite、FFmpeg 进程实现
+Infrastructure
+Core、第三方库
+不得反向依赖 UI
+Tests
+被测项目
+生产项目不得依赖 Tests
+3.3 技术栈
+组件
+技术
+要求
+运行时
+.NET 10
+采用当前受支持的稳定补丁版本
+语言
+C#
+跟随 .NET 10 SDK 默认稳定语言版本，不写死为 C# 10
+UI
+WPF + MVVM
+首版强调成熟稳定与开发效率
+浏览器
+Microsoft Edge WebView2
+使用固定用户数据目录，支持正常登录态
+网络探测
+CDP + WebResourceResponseReceived
+双源归一化、去重
+HTTP
+HttpClient + SocketsHttpHandler
+请求级上下文；UseCookies=false；Cookie 显式随 HttpRequestMessage 发送；禁止跨任务共享可变 CookieContainer
+持久化
+SQLite + Dapper
+任务、资源快照、历史记录
+媒体处理
+FFmpeg 外部进程适配器
+优先 remux，不转码
+日志
+Serilog
+结构化日志 + 脱敏
+测试
+xUnit + NSubstitute/Moq
+核心逻辑单测 + 本地媒体服务 E2E
+站点适配
+ISiteAdapter + SiteAdapterRouter
+YouTube/Bilibili/Douyin/TikTok 独立实现；Generic Adapter 永久可用；站点逻辑不得进入 Core 通用识别器
+外部站点解析（可选）
+yt-dlp 子进程适配器
+只作为重点站点增强/回退；固定并校验版本；失败必须可降级；不得把敏感 Cookie/Authorization 明文写入命令行或日志
+4. 核心领域模型
+4.1 RequestContext
+RequestContext 是本系统最重要的安全与正确性契约之一。资源被确认进入候选媒体时，必须立即对当前 WebView2 会话中与该资源有关的 Cookie、Referer、Origin、User-Agent 和必要 Header 做深度复制，形成不可变快照。下载任务只能使用自己绑定的快照或其受控刷新版本；禁止全局 UpdateContext()、禁止多个任务共享并覆盖可变 Header/Cookie 状态。
+public sealed record RequestContext(    Guid ContextId,    int Version,    string? Referer,    string? Origin,    string? UserAgent,    IReadOnlyDictionary<string, string> Headers,    IReadOnlyList<BrowserCookie> Cookies,    DateTimeOffset CapturedAt);
+4.1.1 生命周期与受控刷新
+初始探测：创建 Version=1 的不可变 RequestContext，并与 MediaResource/MediaVariant 绑定。
+下载请求：不得重新从全局 WebView2 状态临时拼接上下文；所有认证相关信息来自任务绑定的 Context。
+401/403：允许触发一次受控上下文刷新。刷新必须从当前 WebView2 重新采集并生成 Version+1 的新快照；旧快照保留用于审计/回退，不得原地修改。
+刷新后仍失败：按明确错误结束，不允许无限刷新、无限 403 重试。
+持久化：非敏感元数据可明文保存；Cookie、Authorization、敏感签名等必须使用 Windows DPAPI（CurrentUser）保护后落盘。
+4.2 MediaResource
+public sealed record MediaResource(    Guid ResourceId,    Uri Url,    MediaType MediaType,    string? MimeType,    string Method,    int? StatusCode,    long? ContentLength,    string? ResourceType,    string? Initiator,    Uri? PageUrl,    string? FrameId,    RequestContext RequestContext,    IReadOnlyDictionary<string,string> ResponseHeaders,    DateTimeOffset DetectedAt);
+4.3 MediaCandidate / DetectedVideo / MediaVariant
+public sealed record MediaCandidate(    MediaResource Resource,    CandidateKind Kind,    int Confidence,    string DetectionReason);public enum MediaTrackKind { Video, Audio, Combined }public sealed record MediaTrack(    string TrackId,    MediaTrackKind Kind,    Uri SourceUrl,    string? Codec,    string? Container,    long? Bandwidth,    RequestContext RequestContext);public sealed record DetectedVideo(    Guid VideoId,    string SiteId,              // generic / youtube / bilibili / douyin / tiktok    string? SiteContentId,    string DisplayTitle,    Uri PageUrl,    MediaFamily Family,    IReadOnlyList<MediaVariant> Variants,    bool IsDrmProtected);public sealed record MediaVariant(    string VariantId,    int? Width,    int? Height,    long? Bandwidth,    string? Container,    IReadOnlyList<MediaTrack> Tracks);
+MediaVariant 必须允许包含多个 MediaTrack。YouTube、Bilibili 及部分 DASH 高画质常见“视频轨 + 音频轨”分离；不得再以单一 SourceUrl 作为 Variant 的唯一表达。单轨 MP4 使用 Combined Track；分离媒体由 DownloadBackendRouter 下载/交给 FFmpeg remux。
+4.4 下载任务
+public enum DownloadStatus{    Pending,    Preparing,    Downloading,    Paused,    Muxing,    Completed,    Failed,    Cancelled}public sealed class DownloadJob{    public Guid Id { get; init; }    public required string DisplayName { get; init; }    public required MediaVariant Variant { get; init; }    public required string TargetPath { get; init; }    public DownloadStatus Status { get; internal set; }    public long DownloadedBytes { get; internal set; }    public long? TotalBytes { get; internal set; }    public string? LastErrorCode { get; internal set; }    public DateTimeOffset UpdatedAt { get; internal set; }}
+5. 浏览器与网络探测设计
+5.1 WebView2Host 职责
+创建 CoreWebView2Environment 与固定 UserDataFolder。
+负责导航、刷新、打开 DevTools（仅开发模式）。
+开启 CDP Network 域。
+注册/注销 CDP 与 WebResourceResponseReceived 事件。
+在页面切换、WebView2 销毁时确保事件解绑。
+向上层只发布规范化 NetworkEvent，不直接操作 UI 下载列表。
+5.2 双源探测
+来源
+优势
+用途
+CDP Network.requestWillBeSent / responseReceived
+有 requestId、resourceType、initiator、frameId 等上下文
+主探测源，建立请求-响应关联
+WebResourceResponseReceived
+WebView2 正式资源响应事件，可拿到实际请求/响应信息
+补偿源，降低 CDP 边缘丢失或差异风险
+5.3 NetworkEventNormalizer
+两个来源产生的事件必须先进入 NetworkEventNormalizer，再送 MediaDetector。CDP requestId 仅作为 CDP 内部 requestWillBeSent/responseReceived 关联主键，不作为跨来源唯一主键。WebResourceResponseReceived 无 CDP requestId 时，跨来源去重采用“规范化 URL + Method + FrameId（可用时）+ Range/Content-Range + 状态码/响应特征 + 有界时间窗口”的组合指纹。Normalizer 同时负责 Header 大小写统一、URL 规范化、请求/响应合并和时间戳记录。
+public interface INetworkEventNormalizer{    ValueTask<NormalizedNetworkEvent?> NormalizeAsync(        RawNetworkEvent input,        CancellationToken cancellationToken);}
+5.3.1 事件通道、背压与缓存边界
+WebView2/CDP 回调只提取最小必要字段并立即写入有界 Channel<RawNetworkEvent>；禁止在每个事件回调中 Task.Run 执行完整解析。
+Channel 必须配置容量上限和明确的满载策略。媒体主请求、Manifest 和响应头事件不得静默丢弃；低价值重复分片事件允许在压力下优先降级。
+去重缓存必须同时设置“最大条目数 + TTL”，二者任一达到即淘汰；不得仅依靠固定 500 条而无时间淘汰。默认值由配置给出并通过压力测试确定。
+后台单消费者或有限并发消费者执行 Normalize -> Detect -> Aggregate，确保事件乱序可控、内存不会因事件洪峰无限增长。
+5.4 探测过滤规则
+规则
+说明
+URL 后缀
+.mp4/.webm/.m3u8/.mpd/.m4s/.ts 等，仅作为信号之一
+Content-Type
+video/*、audio/*、application/vnd.apple.mpegurl、application/dash+xml 等
+ResourceType
+Media、XHR、Fetch 均要观察；不能只看 Media
+Content-Length
+用于过滤极小资源、计算候选置信度，不作为绝对规则
+Range/Content-Range
+判断分段请求与媒体大文件
+Initiator/PageUrl
+用于归并和过滤广告/旁路资源
+blob:
+不作为可下载 URL；追踪其底层请求
+6. 媒体识别与归并设计
+6.1 MediaDetector 职责
+MediaDetector 只回答“这个网络资源像什么”，不负责决定用户界面最终显示几条视频。Detector 应返回类型、置信度和识别原因。
+public interface IMediaDetector{    MediaCandidate? Detect(MediaResource resource);}
+6.2 建议置信度模型
+信号
+示例分值
+Content-Type 明确为 HLS/DASH/MP4
++70
+URL 后缀明确
+.m3u8/.mpd/.mp4：+40
+ResourceType=Media
++20
+Content-Length > 1 MiB
++10
+同 PageUrl 下重复分片并带 Range
++10
+图片/字体/脚本类型
+直接排除
+资源小于 64 KiB 且无媒体 MIME
+降低置信度或排除
+6.3 MediaAggregator 职责
+MediaAggregator 将 MediaCandidate 归并成 DetectedVideo。用户看到的应是“某视频 - 1080p/720p/480p”，而不是 master.m3u8、多个子 playlist、几千个 ts/m4s 分片。
+HLS：优先以 master playlist 为根，variant playlist 为清晰度。
+DASH：以 MPD 为根，Representation 组合成清晰度与音轨。
+Direct MP4：相同 PageUrl、相近时间、URL 仅 token 差异的资源可做弱归并，但不得误合并。
+广告过滤：只做启发式，不以域名黑名单作为唯一依据。
+一旦识别 DRM，DetectedVideo 标记 IsDrmProtected=true 并禁止进入下载。
+6.4 站点适配架构
+站点适配层用于提高重点平台的标题识别、内容 ID 识别、音视频轨配对、短时效 URL 处理和错误诊断成功率。它不替代通用网络嗅探，也不得拥有绕过 DRM、登录、订阅、付费、验证码或地区限制的能力。
+public interface ISiteAdapter{    string SiteId { get; }    int Priority { get; }    bool CanHandle(Uri pageUrl);    Task<SiteProbeResult> ProbeAsync(        SiteProbeContext context,        CancellationToken ct);}public sealed record SiteProbeContext(    Uri PageUrl,    string? PageTitle,    IReadOnlyList<MediaCandidate> GenericCandidates,    IReadOnlyList<NormalizedNetworkEvent> RecentNetworkEvents);public sealed record SiteProbeResult(    SiteProbeStatus Status,    string SiteId,    IReadOnlyList<DetectedVideo> Videos,    bool AllowGenericFallback,    string? ErrorCode);
+适配器执行规则：
+Router 依据 PageUrl 选择最高优先级匹配适配器；无匹配时直接使用 GenericAdapter。
+通用 Detector/Aggregator 始终运行。站点适配器可以合并、补充或修正 GenericCandidates，但不得吞掉原始候选而不给回退路径。
+适配器返回 Success 时，以 SiteId + SiteContentId + Track 特征与 Generic 结果去重；返回 RecoverableFailure/空结果且 AllowGenericFallback=true 时继续 Generic。
+站点签名 URL、Cookie、Context 仅作为短时效资源处理；403/410 可触发一次受控重新探测（re-probe），不得无限刷新或高频重试。
+可选 yt-dlp 外部解析器必须封装在 Infrastructure/ExternalResolvers；其输出必须转换为统一 DetectedVideo/MediaVariant/MediaTrack，不得让 yt-dlp 数据模型泄漏到 Core/UI。
+适配器可独立 Feature Flag 禁用。单一站点规则失效时，不得影响应用启动、Generic 网站或其他站点适配器。
+6.5 首版重点站点能力矩阵
+“支持某站点”的发布定义以本表验收范围为准，不等同于该平台全部页面类型、直播、会员/付费内容或未来协议永久兼容。网站规则会变化，因此站点适配器属于持续维护模块。
+站点
+Beta 必须支持
+首选路径
+回退路径
+首版明确不作为验收门槛
+YouTube
+公开普通 VOD、Shorts；分离音视频轨可合并
+YouTubeAdapter；可选 yt-dlp resolver 辅助元数据/格式解析
+WebView2 Generic 嗅探实际媒体请求
+直播录制、会员/付费/私密内容、DRM、播放列表批量
+Bilibili
+公开 BV/AV 普通视频、当前分P；DASH 视频+音频合并
+BilibiliAdapter + Generic network candidates
+Generic 嗅探 + DASH/FFmpeg
+番剧付费/受保护内容、批量多P、直播录制
+抖音 Douyin
+公开单条短视频；分享链接跳转后可识别
+DouyinAdapter + 浏览器会话
+Generic 嗅探实际 MP4/HLS 请求
+直播、批量主页下载、验证码/风控绕过
+TikTok
+公开单条短视频；标准分享/视频页
+TikTokAdapter + 浏览器会话；可选 yt-dlp resolver
+Generic 嗅探实际媒体请求
+直播、批量账号下载、地区/挑战绕过
+通用网站
+页面实际产生的非 DRM MP4/HLS/DASH
+GenericAdapter + Detector/Aggregator
+无站点特定依赖
+无法在浏览器正常播放的资源、DRM/权限绕过
+7. HLS / DASH Manifest 解析
+7.1 HLS
+HLS Resolver 必须支持 master playlist 与 media playlist。首版重点解析 EXT-X-STREAM-INF 中的 BANDWIDTH、RESOLUTION、CODECS 与 URI；相对 URI 必须基于 manifest URL 正确解析。EXT-X-KEY 的 METHOD=AES-128 或 SAMPLE-AES 本身只是加密信号，不能单凭 METHOD 直接判定为 DRM；必须结合 KEYFORMAT、Key URI/许可证交互、浏览器 EME/DRM 信号等进一步分类。标准 HLS AES-128 且 Key 可在用户既有合法会话中按标准方式获取时，可交由受支持的媒体处理链路处理；涉及 Widevine/PlayReady/FairPlay 等许可证体系时必须阻断。
+public interface IManifestResolver{    Task<IReadOnlyList<MediaVariant>> ResolveHlsAsync(        MediaResource manifest,        CancellationToken ct);    Task<IReadOnlyList<MediaVariant>> ResolveDashAsync(        MediaResource manifest,        CancellationToken ct);}
+7.2 DASH
+解析 MPD 根属性、Period、AdaptationSet、Representation。
+正确处理 BaseURL 层级继承。
+识别视频轨、音频轨及语言。
+首版可优先交给 FFmpeg 完成真实分片拉取与音视频合并，但 UI 仍要解析并展示可选 Representation。
+发现 ContentProtection / 明确 DRM 标识时阻断下载。
+7.3 DRM / 加密内容判定规则
+DASH：发现 ContentProtection 时解析 schemeIdUri/value；Widevine、PlayReady 等明确 DRM Scheme 直接标记 DRM_PROTECTED。
+HLS：EXT-X-KEY METHOD=AES-128/SAMPLE-AES 不得单独作为 DRM 结论；结合 KEYFORMAT、许可证端点、EME 信号和 Key 获取方式综合判断。
+一旦确认需要 DRM License/CDM 才能解密，DetectedVideo.IsDrmProtected=true，UI 不创建可执行下载操作，DownloadEngine 拒绝接收任务。
+不得实现许可证提取、CDM 调用绕过、密钥导出或 DRM 解密逻辑。
+8. 下载引擎设计
+8.1 下载策略
+媒体类型
+首版下载策略
+Direct MP4/WebM
+DirectHttpBackend；支持 Range 断点续传；.part 临时文件；完成后原子改名。若 Variant 为 Combined 单轨直接写最终媒体。
+HLS
+ManifestResolver 展示清晰度；Variant/Track 归一化后由 DownloadBackendRouter 默认选择 FFmpeg。
+DASH
+解析 Representation 并组成 Video/Audio Tracks；默认由 FFmpeg 获取/合并；站点 Adapter 可补充轨道配对。
+DRM
+不创建下载任务
+DownloadEngine 接收 MediaVariant（一个或多个 Track），通过 DownloadBackendRouter 选择后端：单个 Combined Track 优先 DirectHttpBackend；HLS/DASH Manifest 或 Video+Audio 多轨组合优先 FfmpegBackend。站点适配器不得自行实现文件写入或绕过状态机。
+public interface IDownloadBackend{    string BackendId { get; }    bool CanHandle(MediaVariant variant);    Task ExecuteAsync(DownloadJob job, CancellationToken ct);}
+8.2 状态机
+Pending -> Preparing -> Downloading -> Completed                       |                                    +-> Paused -> Downloading                       |                       +-> Muxing -> Completed                       |                       +-> FailedAny non-terminal -> Cancelled
+状态改变只能经 DownloadJobStateMachine。Downloader、FFmpeg Adapter、UI 和 Repository 只能提交事件或调用状态机方法，不得各自直接随意修改 Status。
+public interface IDownloadJobStateMachine{    void StartPreparing(DownloadJob job);    void StartDownloading(DownloadJob job);    void Pause(DownloadJob job);    void Resume(DownloadJob job);    void StartMuxing(DownloadJob job);    void Complete(DownloadJob job);    void Fail(DownloadJob job, string errorCode);    void Cancel(DownloadJob job);}
+8.3 断点续传
+下载到 <target>.part。
+任务持久化 DownloadedBytes。
+恢复时不以 HEAD/Accept-Ranges 作为硬前置条件。若本地存在 .part 且 offset>0，直接发送 GET + Range；若保存有强 ETag 或 Last-Modified，则同时使用 If-Range 约束实体一致性。HEAD 仅可作为优化性预探测。
+收到 206 Partial Content 后必须校验 Content-Range 起点等于本地 offset；ETag/Last-Modified 与保存快照冲突，或 Content-Range 不匹配时，返回 RANGE_MISMATCH，放弃旧 .part 并从 0 重建。
+offset>0 时若服务端返回 200 OK，视为 Range 未生效或实体发生变化：必须截断 .part 并从响应正文 0 开始写入，绝不追加。
+收到 416 Range Not Satisfiable 时，根据 Content-Range */total 与本地 .part 长度判断：若长度已等于 total，可进入完整性校验；否则视为断点无效并从 0 重建。完成后校验总长度/可用校验信息，再原子改名。
+8.4 并发与重试
+项目
+默认值/策略
+最大并发任务
+3，可配置
+单 MP4 分块并发
+首版可先单流；阶段二再增加多线程分块
+网络重试
+最多 3 次，指数退避 + 抖动
+HTTP 4xx
+除 408/429 外默认不盲目重试；403 可触发一次上下文刷新
+HTTP 5xx
+按重试策略处理
+磁盘不足
+立即失败并给出明确错误码
+取消
+必须传播 CancellationToken 并结束 FFmpeg 子进程
+9. FFmpeg 集成
+9.1 原则
+FFmpeg 封装在 Infrastructure，不允许 UI 直接 Process.Start。
+优先 remux（-c copy），不重新编码。
+参数必须使用 ArgumentList 或安全转义，不拼接未经处理的用户文本形成命令行。
+日志记录命令模板与非敏感参数；Header/Cookie 必须脱敏。
+进程退出码、stderr 尾部摘要和输出文件存在性共同决定成功。
+FFmpeg 为控制台进程，不依赖 CloseMainWindow。取消时应启用 StandardInput，优先向 FFmpeg stdin 发送正常退出指令（如 q）并等待短暂宽限期；仍未退出时调用 Kill(entireProcessTree:true)，随后等待主进程结束并清理临时文件/文件锁。
+9.2 Header 传递
+HLS/DASH 的 FFmpeg 输入必须能够携带资源自己的 RequestContext，例如 User-Agent、Referer、Cookie 与必要 Header。实现层应生成最小必要 Header 集合，不应把浏览器所有敏感 Header 无差别复制。
+9.3 进程与日志安全
+使用 ProcessStartInfo.ArgumentList 逐参数构造命令；禁止将 URL、文件名或 Header 拼成未转义的整段命令字符串。
+RedirectStandardError=true，并持续异步消费 stderr，避免管道阻塞；内存只保留固定大小环形尾部（建议最终诊断摘要 <= 2000 字符）。
+FFmpeg 命令和 stderr 在进入日志前必须经过统一 SanitizedLogger；-headers 中 Cookie/Authorization/token/signature 等不得明文记录。
+取消/失败后校验 FFmpeg 主进程和子进程已退出；未完成的临时输出不得被标记为 Completed。
+10. 数据持久化与任务恢复
+10.1 SQLite 表
+CREATE TABLE download_jobs (    id TEXT PRIMARY KEY,    display_name TEXT NOT NULL,    source_url TEXT NOT NULL,    target_path TEXT NOT NULL,    media_family INTEGER NOT NULL,    status INTEGER NOT NULL,    downloaded_bytes INTEGER NOT NULL DEFAULT 0,    total_bytes INTEGER NULL,    etag TEXT NULL,    last_modified TEXT NULL,    context_version INTEGER NOT NULL DEFAULT 1,    request_context_meta_json TEXT NOT NULL,    request_context_secret BLOB NULL, -- DPAPI(CurrentUser) 保护后的 Cookie/Auth/敏感 Header    last_error_code TEXT NULL,    created_at TEXT NOT NULL,    updated_at TEXT NOT NULL);CREATE INDEX ix_download_jobs_status ON download_jobs(status);
+10.2 恢复规则
+启动前状态
+启动后处理
+Pending
+恢复 Pending
+Preparing
+回退到 Pending 重新准备
+Downloading
+转换为 Paused/Recoverable，用户可恢复；若产品决定自动恢复须有设置项
+Muxing
+检查临时文件与输出；默认回退到 Failed(MUX_INTERRUPTED) 或重新执行 mux
+Completed
+保持
+Failed
+保持，可手动重试
+Cancelled
+保持
+11. UI 与交互设计
+11.1 主界面
+┌──────────────────────────────────────────────────────────────────┐│ URL [________________________________________] [访问] [刷新]     │├──────────────────────────────────────────────────────────────────┤│                                                                  ││                         WebView2                                  ││                                                                  │├──────────────────────────────────────────────────────────────────┤│ 已发现视频                                                       ││ 标题          站点       类型       清晰度/轨道        操作       ││ Example       YouTube    DASH       1080p + Audio      [下载]    ││ Example       Generic    HLS        720p               [下载]    │├──────────────────────────────────────────────────────────────────┤│ 下载队列                                                         ││ file.mp4  72%  4.8 MB/s   下载中             [暂停] [取消]      │└──────────────────────────────────────────────────────────────────┘
+11.2 UX 规则
+用户必须先看到“视频组”，展开后选择清晰度；避免把 ts/m4s 分片直接列出。
+DRM 内容显示“受 DRM 保护，不支持下载”，不显示伪下载按钮。
+403/会话过期应提示“刷新网页后重试”，并允许从当前 WebView2 刷新上下文。
+下载历史区分 Completed / Failed / Cancelled。
+发现列表显示 SiteId（YouTube/Bilibili/Douyin/TikTok/Generic）和当前路径状态（Adapter / Generic fallback），便于诊断站点规则失效。
+当重点站点 Adapter 失败但 Generic 成功时，UI 只需弱提示“已使用通用探测”，不得把可下载视频误报为站点不支持。
+设置页至少包含下载目录、最大并发、FFmpeg 路径、是否自动恢复任务、日志级别。
+12. 配置、日志与安全
+12.1 配置示例
+{  "Download": {    "DefaultSavePath": "%USERPROFILE%\Downloads",    "MaxConcurrentDownloads": 3,    "RetryCount": 3  },  "Browser": {    "UserDataFolder": "%LOCALAPPDATA%\VideoDownloader\WebView2Data"  },  "Sites": {    "PreferSiteAdapters": true,    "FallbackToGeneric": true,    "YouTube":  { "Enabled": true, "ExternalResolver": "yt-dlp" },    "Bilibili": { "Enabled": true },    "Douyin":   { "Enabled": true },    "TikTok":   { "Enabled": true, "ExternalResolver": "yt-dlp" }  },  "ExternalResolvers": {    "YtDlpPath": "yt-dlp.exe",    "Enabled": true  },  "Ffmpeg": {    "ExecutablePath": "ffmpeg.exe"  },  "Database": {    "Path": "%LOCALAPPDATA%\VideoDownloader\data\downloads.db"  },  "Logging": {    "MinimumLevel": "Information"  }}
+外部解析器原则：yt-dlp 为可选增强组件，不得成为应用启动硬依赖。启动时记录其版本（非敏感信息）；版本缺失/不兼容时禁用对应 ExternalResolver 并继续 Generic。任何 Cookie/Auth 传递必须使用受控临时文件/标准输入或安全 API，禁止把完整敏感值写入可被日志、进程列表或崩溃转储直接暴露的命令行参数。
+12.2 日志脱敏
+日志脱敏必须在进入 Serilog sink 之前完成，不允许“先落盘再清洗”。Header 按键名结构化脱敏；Cookie、Authorization、Proxy-Authorization、Set-Cookie 一律不记录值。
+URL 查询参数必须通过 URI/query parser 按 deny-list（token、sign、signature、auth、key、session 等）替换为 [REDACTED]；正则仅作为兜底，不作为唯一实现。
+FFmpeg 命令、stderr、异常对象和诊断快照统一经过 SanitizedLogger；自动化测试必须扫描日志文件，验证敏感测试值不存在。
+信息
+日志规则
+Cookie
+禁止完整输出；只记录 cookie 名称数量或 [REDACTED]
+Authorization
+禁止输出值
+URL token/query
+对 token/signature/auth/key 等敏感参数脱敏
+Referer/PageUrl
+可记录，但若包含敏感 query 同样脱敏
+FFmpeg stderr
+保留诊断尾部，但在落盘前做敏感信息过滤
+12.3 本地数据安全
+WebView2 用户数据目录属于本地敏感数据，不上传遥测。
+RequestContext 中需要跨重启保存的 Cookie、Authorization、敏感签名/Header 必须使用 Windows DPAPI（DataProtectionScope.CurrentUser）加密后保存；数据库只允许明文保存非敏感元数据。解密失败时任务进入可恢复失败状态，不得退化为明文存储。
+卸载程序应让用户选择是否删除浏览器数据、下载历史和日志。
+下载目标路径必须防止非法文件名与路径穿越。
+13. 关键代码样例
+13.1 DI 注册
+services.AddSingleton<INetworkEventNormalizer, NetworkEventNormalizer>();services.AddSingleton<IMediaDetector, MediaDetector>();services.AddSingleton<IMediaAggregator, MediaAggregator>();services.AddSingleton<IManifestResolver, ManifestResolver>();services.AddSingleton<ISiteAdapterRouter, SiteAdapterRouter>();services.AddSingleton<ISiteAdapter, GenericSiteAdapter>();services.AddSingleton<ISiteAdapter, YouTubeSiteAdapter>();services.AddSingleton<ISiteAdapter, BilibiliSiteAdapter>();services.AddSingleton<ISiteAdapter, DouyinSiteAdapter>();services.AddSingleton<ISiteAdapter, TikTokSiteAdapter>();services.AddSingleton<IExternalSiteResolver, YtDlpResolver>(); // optional/feature-flaggedservices.AddSingleton<IRequestMessageFactory, RequestMessageFactory>();services.AddSingleton<IDownloadBackendRouter, DownloadBackendRouter>();services.AddSingleton<IDownloadBackend, DirectHttpBackend>();services.AddSingleton<IDownloadBackend, FfmpegBackend>();services.AddSingleton<IDownloadEngine, DownloadEngine>();services.AddSingleton<IDownloadJobStateMachine, DownloadJobStateMachine>();services.AddSingleton<IDownloadRepository, SqliteDownloadRepository>();services.AddSingleton<WebView2Host>();services.AddSingleton<CdpNetworkMonitor>();services.AddSingleton<WebResourceMonitor>();services.AddTransient<MainViewModel>();services.AddTransient<MainWindow>();
+13.2 CDP 订阅示意
+private readonly Channel<RawNetworkEvent> _events = Channel.CreateBounded<RawNetworkEvent>(    new BoundedChannelOptions(2048)    {        SingleReader = true,        FullMode = BoundedChannelFullMode.Wait    });private void OnCdpEvent(object? sender, CoreWebView2DevToolsProtocolEventReceivedEventArgs e){    // 回调只复制最小字段；不在这里执行 Manifest 解析/数据库写入/Task.Run。    var raw = RawNetworkEvent.FromCdp(e);    _events.Writer.TryWrite(raw);}private async Task ConsumeAsync(CancellationToken ct){    await foreach (var raw in _events.Reader.ReadAllAsync(ct))    {        var normalized = await _normalizer.NormalizeAsync(raw, ct);        if (normalized is null) continue;        await _pipeline.ProcessAsync(normalized, ct);    }}
+13.3 MediaDetector 示例
+public MediaCandidate? Detect(MediaResource r){    var url = r.Url.AbsolutePath.ToLowerInvariant();    var mime = r.MimeType?.ToLowerInvariant() ?? string.Empty;    if (mime.Contains("application/vnd.apple.mpegurl") ||        mime.Contains("application/x-mpegurl") || url.EndsWith(".m3u8"))        return Candidate(r, CandidateKind.HlsManifest, 95, "HLS MIME/extension");    if (mime.Contains("application/dash+xml") || url.EndsWith(".mpd"))        return Candidate(r, CandidateKind.DashManifest, 95, "DASH MIME/extension");    if (mime.StartsWith("video/") || url.EndsWith(".mp4") || url.EndsWith(".webm"))        return Candidate(r, CandidateKind.DirectMedia, 80, "Video MIME/extension");    return null;}
+13.4 请求构造
+// 传输层使用 SocketsHttpHandler(UseCookies=false)，Cookie 不进入共享 CookieContainer。public HttpRequestMessage Create(MediaResource resource, HttpMethod method){    var request = new HttpRequestMessage(method, resource.Url);    var ctx = resource.RequestContext;    if (!string.IsNullOrWhiteSpace(ctx.UserAgent))        request.Headers.TryAddWithoutValidation("User-Agent", ctx.UserAgent);    if (!string.IsNullOrWhiteSpace(ctx.Referer))        request.Headers.Referrer = new Uri(ctx.Referer);    if (!string.IsNullOrWhiteSpace(ctx.Origin))        request.Headers.TryAddWithoutValidation("Origin", ctx.Origin);    foreach (var (name, value) in FilterSafeHeaders(ctx.Headers))        request.Headers.TryAddWithoutValidation(name, value);    var cookie = BuildCookieHeader(ctx.Cookies, resource.Url);    if (!string.IsNullOrEmpty(cookie))        request.Headers.TryAddWithoutValidation("Cookie", cookie);    return request;}
+13.5 MP4 断点续传核心
+await using var file = new FileStream(    partPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read,    1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);var offset = file.Length;using var request = _requestFactory.Create(resource, HttpMethod.Get);if (offset > 0){    request.Headers.Range = new RangeHeaderValue(offset, null);    ApplyIfRange(request, job.ETag, job.LastModified);}using var response = await _client.SendAsync(    request, HttpCompletionOption.ResponseHeadersRead, ct);if (offset > 0 && response.StatusCode == HttpStatusCode.PartialContent){    ValidateContentRange(response.Content.Headers.ContentRange, offset);    file.Position = offset;}else if (offset > 0 && response.StatusCode == HttpStatusCode.OK){    // Range 未生效：从 0 重建，禁止追加。    file.SetLength(0);    file.Position = 0;}else if (offset > 0 && response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable){    if (!IsAlreadyComplete(response, file.Length))        throw new RangeMismatchException();}response.EnsureSuccessStatusCode();await using var input = await response.Content.ReadAsStreamAsync(ct);await input.CopyToAsync(file, 1024 * 1024, ct);
+13.6 FFmpeg Adapter 示意
+var psi = new ProcessStartInfo{    FileName = _options.ExecutablePath,    RedirectStandardInput = true,    RedirectStandardError = true,    RedirectStandardOutput = true,    UseShellExecute = false,    CreateNoWindow = true};psi.ArgumentList.Add("-y");AddSanitizedInputHeaders(psi.ArgumentList, resource.RequestContext);psi.ArgumentList.Add("-i");psi.ArgumentList.Add(inputUrl);psi.ArgumentList.Add("-c");psi.ArgumentList.Add("copy");psi.ArgumentList.Add(outputPath);using var process = Process.Start(psi)    ?? throw new InvalidOperationException("Unable to start FFmpeg.");using var reg = ct.Register(() => _ = RequestFfmpegStopAsync(process));await ConsumeStderrAsync(process, ct);await process.WaitForExitAsync(CancellationToken.None);if (process.ExitCode != 0 && !ct.IsCancellationRequested)    throw new FfmpegException(process.ExitCode, GetSanitizedErrorTail(2000));
+13.7 SiteAdapter Router 示例
+public async Task<IReadOnlyList<DetectedVideo>> ProbeAsync(    SiteProbeContext context, CancellationToken ct){    var adapter = _adapters        .Where(x => x.CanHandle(context.PageUrl))        .OrderByDescending(x => x.Priority)        .FirstOrDefault() ?? _generic;    var siteResult = await adapter.ProbeAsync(context, ct);    if (siteResult.Status == SiteProbeStatus.Success && siteResult.Videos.Count > 0)        return MergeAndDeduplicate(siteResult.Videos, _genericCurrentResults);    if (siteResult.AllowGenericFallback)        return _genericCurrentResults;    return Array.Empty<DetectedVideo>();}
+13.8 站点适配器的禁止事项
+禁止 Adapter 直接改 DownloadJob.Status、直接写 SQLite 或直接创建最终文件；所有下载仍走 DownloadEngine/StateMachine。
+禁止自动绕过 CAPTCHA、登录、订阅、付费、地区限制或 DRM；遇到浏览器挑战由用户在 WebView2 正常完成，程序只继续观察合法会话请求。
+禁止长期持久化站点短时效签名 URL 作为可复用永久链接；恢复时若链接过期必须重新探测页面。
+禁止把 yt-dlp 或其他第三方工具的 stderr/命令行原样记录；统一经过 SanitizedLogger。
+14. 开发计划与里程碑
+计划采用 5 个两周 Sprint，共 10 周形成首个 Beta。推荐配置为 2-3 名开发 + 1 名测试：Sprint 1-3 完成通用探测/下载主链，Sprint 4 集中完成 YouTube/Bilibili/抖音/TikTok 站点适配，Sprint 5 完成稳定性、安全、真实站点兼容回归与发布。若单人开发，里程碑顺序不变，工期按实际产能调整。每周末必须进行一次可运行版本演示和风险复盘，Sprint 验收以本文第 16 章为准，不以“代码完成”代替可验收交付。
+14.1 Sprint 1（第 1-2 周）：骨架 + WebView2 + MP4
+工作包
+主要内容
+交付
+S1.1 工程骨架
+解决方案、DI、配置、日志、Core/Infrastructure 边界
+可编译解决方案
+S1.2 浏览器
+WebView2Host、用户数据目录、地址栏/导航
+可浏览和正常登录
+S1.3 双探测
+CDP + WebResourceResponseReceived + Normalizer
+能输出规范化事件
+S1.4 MP4 Detector
+MIME/后缀/Range 基础识别
+发现列表显示 MP4
+S1.5 下载
+单流 MP4、进度、取消、.part
+可完成简单 MP4 下载
+S1.6 测试源
+本地 TestMediaServer 提供 public MP4/Range/Cookie 场景
+可重复自动验收
+14.2 Sprint 2（第 3-4 周）：HLS + 归并 + FFmpeg
+工作包
+主要内容
+交付
+S2.1 Aggregator
+把 master/variant/segment 归并
+UI 不再显示分片噪声
+S2.2 HLS Resolver
+解析 master playlist、清晰度、相对 URI
+显示 1080p/720p 等 variant
+S2.3 RequestContext
+资源级 Cookie/Referer/Origin/UA/Headers
+受保护但合法会话可继续下载
+S2.4 FFmpeg Adapter
+HLS remux、取消、错误解析
+HLS -> MP4
+S2.5 持久化 v1
+SQLite 下载任务基础记录
+历史可查询
+14.3 Sprint 3（第 5-6 周）：DASH + 断点 + 队列
+工作包
+主要内容
+交付
+S3.1 DASH Resolver
+MPD/Representation/BaseURL；按 Video/Audio Track 建模
+显示视频/音频轨
+S3.2 DRM 标识
+ContentProtection 等识别
+阻断受保护内容
+S3.3 Range Resume
+ETag/Last-Modified/Range 语义
+MP4 可可靠恢复
+S3.4 队列
+暂停/恢复/取消/并发 3
+完整任务管理
+S3.5 启动恢复
+SQLite 状态恢复
+异常退出后不丢任务
+14.4 Sprint 4（第 7-8 周）：重点站点适配
+工作包
+主要内容
+交付
+S4.1 Adapter 基线
+ISiteAdapter、Router、Feature Flag、Generic fallback、结果去重
+站点规则与通用 Core 隔离
+S4.2 YouTube
+普通 VOD/Shorts、video+audio Track 配对、可选 yt-dlp resolver
+YouTube 单视频可验收
+S4.3 Bilibili
+BV/AV 当前分P、DASH 视频/音频配对、Referer/Context
+Bilibili 单视频可验收
+S4.4 Douyin
+分享跳转、公开短视频、短时效 URL 重新探测
+抖音单视频可验收
+S4.5 TikTok
+标准视频页/分享链接、公开短视频、Generic fallback
+TikTok 单视频可验收
+S4.6 兼容降级
+Adapter 失败/禁用/外部 resolver 缺失时 Generic 不受影响
+站点故障隔离完成
+14.5 Sprint 5（第 9-10 周）：稳定性 + Beta 发布
+工作包
+主要内容
+交付
+S5.1 错误与重试
+错误码、403/410 上下文刷新、站点 re-probe、5xx/429 重试
+失败可诊断且不无限重试
+S5.2 设置与兼容
+目录/并发/FFmpeg/站点开关/ExternalResolver 版本检查
+可配置、可禁用单站点
+S5.3 安全
+日志脱敏、DPAPI、外部进程参数、路径校验
+通过安全检查
+S5.4 自动化 + 真实站点回归
+Core/Infrastructure 自动测试 + 四站公开样本 RC 冒烟
+CI 全绿 + 兼容矩阵签字
+S5.5 发布
+安装包、README、第三方许可证、已知问题、站点兼容说明
+Beta 安装包
+15. 测试策略
+15.1 测试金字塔
+层级
+范围
+要求
+单元测试
+Detector、Normalizer、Aggregator、ManifestParser、StateMachine、URL/文件名工具
+核心逻辑覆盖率目标 >= 80%
+集成测试
+HttpClient Range、SQLite、FFmpeg Adapter、WebView2 事件适配
+关键路径必须有自动化
+E2E
+本地 TestMediaServer + 实际 WPF/WebView2
+每个发布候选版本执行
+人工兼容测试
+真实公开非 DRM 站点
+用于发现兼容性，不作为唯一回归基线
+15.2 TestMediaServer 必须覆盖的测试资源
+编号
+场景
+期望
+T01
+public.mp4 + Content-Length
+识别并下载一致
+T02
+支持 Range 的 mp4
+暂停/恢复后 hash 一致
+T03
+忽略 Range 返回 200
+客户端自动从 0 重下，不产生损坏拼接
+T04
+要求 Referer 的 mp4
+继承上下文后成功
+T05
+要求 Cookie 的 mp4
+浏览器登录/设置 cookie 后成功
+T06
+HLS master + 1080/720
+归并为一个视频两个 variant
+T07
+HLS 大量 ts 分片
+发现列表不显示分片噪声
+T08
+DASH MPD 视频+音频
+解析并生成可选 variant
+T09
+DASH ContentProtection
+显示 DRM 不支持，禁止创建任务
+T10
+HTTP 403
+一次上下文刷新后按结果成功或明确失败
+T11
+HTTP 500 -> 200
+按策略重试成功
+T12
+磁盘空间不足
+立即失败，错误码正确，part 文件策略一致
+T13
+Range 返回 416 + Content-Range */total
+正确识别已完整或断点失效，不损坏文件
+T14
+断点期间 ETag/Last-Modified 变化
+旧 .part 不与新实体拼接，从 0 重建
+T15
+302/307 重定向后的媒体
+最终资源仍可识别，Context/Referer 处理符合策略
+T16
+Cookie 过期后首次 403、刷新后成功
+仅受控刷新一次，Context Version 增加
+T17
+持续高频产生网络/分片事件
+有界 Channel/缓存生效，UI 不阻塞，内存不线性增长
+T18
+A/B 两资源使用不同 Cookie/Authorization
+请求上下文完全隔离，无串扰
+T19
+敏感测试 token/cookie/auth
+SQLite 明文区和所有日志中均搜索不到敏感值
+T20
+HLS AES-128 与明确 Widevine/PlayReady 样本
+标准加密与 DRM 正确区分；DRM 必须阻断
+T21
+YouTube 公开普通 VOD
+Adapter 或 Generic 得到可下载 Variant；若为分离音视频，输出合并后可播放
+T22
+YouTube Shorts
+可识别单条 Short，标题/内容ID合理，下载完成
+T23
+Bilibili 公开 BV/AV 当前分P
+识别 DASH 视频+音频轨并合并，最终文件可播放
+T24
+Douyin 公开单条短视频/分享跳转
+浏览器完成跳转后识别实际媒体；短时效 URL 过期时允许一次 re-probe
+T25
+TikTok 公开单条短视频
+识别并下载；Adapter 失败时 Generic fallback 可用
+T26
+站点 Adapter 人工失败/禁用
+对应站点仍可继续 Generic 探测，不影响其他站点与应用
+T27
+ExternalResolver 缺失/版本不兼容
+仅禁用外部 resolver；应用、Generic 与不依赖该 resolver 的 Adapter 继续工作
+T28
+站点挑战/CAPTCHA/权限页
+不自动绕过；提示用户在 WebView2 正常处理或报告不可访问
+T29
+站点媒体判定为 DRM
+统一 DRM_PROTECTED，禁止创建下载任务
+T30
+短时效签名 URL 返回 403/410
+最多一次站点 re-probe + 新 Context；仍失败则 SITE_REPROBE_FAILED
+15.3 CI 自动化最低要求
+dotnet format --verify-no-changes -> Release build -> unit tests -> integration tests（启动 TestMediaServer）-> coverage -> package。
+核心逻辑覆盖率目标 >= 80%；覆盖率不得通过排除核心业务文件人为达标。
+集成测试必须包含 T02/T03/T13/T14/T16/T18/T19；FFmpeg 使用 <10 MB 本地样本，避免依赖公网。
+WPF E2E 首版允许以人工冒烟为主；自动化 UI 测试作为 Beta 后增强项，不阻塞 Sprint 1。
+15.4 重点站点兼容性回归
+站点兼容性测试不依赖固定公网视频永久存在。测试负责人维护一组“当前可公开访问、非 DRM、体积适中”的 RC 测试 URL，并记录测试日期与内容 ID。
+PR/普通 CI 主要使用本地 fixture、录制后的脱敏响应和 TestMediaServer；真实 YouTube/Bilibili/Douyin/TikTok 回归至少在每个 Release Candidate 执行一次。
+重点站点任何一个 Beta 必验用例失败，必须区分 Core 回归、Adapter 失效、平台临时故障/地区限制；不得以“网站变化”为理由跳过诊断。
+公开站点测试必须遵循正常访问频率；不得通过自动验证码绕过、指纹规避、高频重试等方式制造通过结果。
+16. 验收标准
+16.1 总体验收门槛
+所有 P0/P1 验收用例通过；不存在会产生损坏文件、任务状态错乱或泄露敏感 Header 的已知缺陷。
+程序在 Windows 10/11 x64 上可安装、启动、卸载；首次启动无额外开发环境依赖。
+核心单元测试覆盖率 >= 80%；CI 构建和自动测试全绿。
+WebView2 页面可正常导航、登录，关闭/重开应用后用户数据目录行为符合设计。
+普通 MP4、HLS、DASH 三类非 DRM TestMediaServer 测试源均可完成端到端流程；同时通过 YouTube、Bilibili、抖音、TikTok 与通用网站的 v1.2 Beta 兼容矩阵。
+DRM 测试源必须明确阻断，不允许误报为可下载。
+下载任务异常退出后可恢复，不允许将未完成任务误标 Completed。
+日志经过抽查，不得出现完整 Cookie、Authorization 或敏感签名参数。
+16.2 Sprint 1 验收
+编号
+验收项
+通过标准
+A1-01
+WebView2 浏览
+输入 URL 可访问测试站点；导航/刷新正常
+A1-02
+双探测源
+至少能分别记录 CDP 与 WebResourceResponseReceived 事件，并由 Normalizer 去重
+A1-03
+MP4 识别
+T01/T02/T04/T05 均识别为媒体，不把普通 jpg/js/css 误报
+A1-04
+MP4 下载
+下载后 SHA-256 与服务器源文件一致
+A1-05
+取消
+取消后任务状态 Cancelled，网络读取停止，UI 不再增长进度
+A1-06
+资源上下文隔离
+并行两个不同 Cookie/Referer 资源时互不串用
+A1-07
+事件背压
+高频事件下回调不执行重型工作；Channel/去重缓存均有界，探测主链路无 UI 卡死
+16.3 Sprint 2 验收
+编号
+验收项
+通过标准
+A2-01
+HLS master
+T06 正确列出 1080p/720p
+A2-02
+归并
+T07 分片不出现在用户发现列表
+A2-03
+HLS 下载
+选择任一 variant 后输出 MP4 可播放，音视频同步
+A2-04
+Header 传递
+要求 Cookie/Referer 的 HLS 可在合法会话上下文下下载
+A2-05
+FFmpeg 取消
+取消后子进程在限定时间内退出，无孤儿进程
+A2-06
+FFmpeg 退出与日志
+取消时先请求正常退出，必要时 Kill 整棵进程树；无孤儿进程；stderr/命令中无敏感明文
+16.4 Sprint 3 验收
+编号
+验收项
+通过标准
+A3-01
+DASH 解析
+T08 正确识别视频/音频 Representation
+A3-02
+DASH 下载
+选择清晰度后输出可播放文件，音视频正确
+A3-03
+DRM 阻断
+T09 无下载按钮或按钮禁用，说明原因
+A3-04
+断点续传
+T02 在 20%-80% 任意点暂停并重启应用后恢复，最终 SHA-256 一致
+A3-05
+Range 异常
+T03 不追加损坏内容
+A3-06
+队列
+3 并发下任务状态、速度、暂停恢复互不干扰
+A3-07
+416 处理
+T13 能区分“本地已完整”与“断点无效”，均不产生错误拼接
+A3-08
+实体版本变化
+T14 中 ETag/Last-Modified 变化后放弃旧断点并重新下载，最终 SHA-256 一致
+A3-09
+加密/DRM 边界
+T20 不因 AES-128 标签直接误判 DRM；明确 Widevine/PlayReady 内容必须阻断
+16.5 重点站点兼容性验收
+编号
+验收项
+通过标准
+A5-01
+YouTube VOD
+T21 通过；可形成完整文件；分离音视频轨必须正确 remux，音画同步
+A5-02
+YouTube Shorts
+T22 通过；Adapter/Generic 结果无重复；标题和内容 ID 可追踪
+A5-03
+Bilibili
+T23 通过；当前分P DASH 视频/音频轨配对正确；Referer/Context 不串任务
+A5-04
+Douyin
+T24 通过；分享跳转和短时效 URL 可处理；无无限 403 重试
+A5-05
+TikTok
+T25 通过；Adapter 失败时 Generic fallback 符合设计
+A5-06
+通用网站
+非重点域名的标准 MP4/HLS/DASH 仍按 Generic 链路工作，不依赖任何站点 Adapter
+A5-07
+降级隔离
+T26/T27 通过；禁用任意一个站点 Adapter 后其他站点与 Generic 不受影响
+A5-08
+权限/挑战边界
+T28 不自动绕过 CAPTCHA/登录/地区/付费限制；UI 明确反馈
+A5-09
+DRM 边界
+T29 统一阻断；Adapter/ExternalResolver 不得绕过 Core DRM policy
+A5-10
+短时效资源
+T30 只允许一次 re-probe；新 URL/Context 形成新版本，旧值不原地覆盖
+16.6 Sprint 5 / Beta 验收
+编号
+验收项
+通过标准
+A6-01
+重试
+T11 自动恢复；重试次数符合配置
+A6-02
+403 会话
+允许刷新上下文再重试，不无限循环
+A6-03
+崩溃恢复
+强制结束进程后重新启动，Downloading 不被误标 Completed
+A6-04
+日志脱敏
+抽查 Cookie/Authorization/token 均未明文落盘
+A6-05
+长期运行
+连续浏览/探测 4 小时，内存无持续线性增长；事件订阅无重复累积
+A6-06
+安装包
+干净 Windows 机器安装后可运行，缺 FFmpeg 时提示明确；若随包分发则许可证材料齐全
+A6-07
+上下文版本刷新
+T16 403 后最多受控刷新一次；生成新 Context Version，不原地修改旧快照
+A6-08
+敏感持久化
+T19 中 Cookie/Authorization/Token 不以明文存在 SQLite、日志、FFmpeg 诊断输出
+A6-09
+长期事件洪峰
+T17 在持续事件负载下缓存/Channel 不越界，4 小时内内存无持续线性增长
+A6-10
+站点兼容矩阵
+T21-T25 当前 RC 全部通过；每条记录测试日期、页面 URL/内容 ID、Adapter/Generic 路径和输出结果
+A6-11
+站点故障隔离
+T26/T27 通过；单一 Adapter 或 yt-dlp 不可用不影响 Generic 与其他站点
+16.7 性能基准
+指标
+首版验收目标
+空闲内存
+应用稳定后建议 < 350 MB（不含外部 FFmpeg 峰值）；WebView2 页面复杂度会影响结果
+探测延迟
+测试服务器媒体响应出现后 2 秒内出现在发现列表
+UI 响应
+下载过程中 UI 操作无明显卡死；主线程不得执行网络/文件大 I/O
+下载吞吐
+单流下载不应无故低于同机 curl/浏览器直连吞吐的 80%（排除服务端限速）
+任务规模
+至少稳定保存 1000 条历史任务，列表分页/虚拟化后可用
+事件缓存
+Channel 和去重缓存均必须有界；达到上限时按定义的背压/降级策略处理，不允许无限增长
+敏感数据
+日志与 SQLite 明文区域对测试 Cookie/Authorization/token 的检出数必须为 0
+17. 发布与部署
+17.1 发布包
+Windows x64 安装包（MSIX/WiX/Inno Setup 三选一，团队统一）。
+明确 WebView2 Runtime 依赖策略：Evergreen Runtime 检测/引导。
+FFmpeg 采用“用户指定路径”或“随包分发”二选一；随包分发时完成相应许可证合规材料。
+yt-dlp 若作为可选 ExternalResolver 随包分发，必须固定版本、提供版本/许可证清单和升级策略；若不随包分发，缺失时不得阻塞应用启动。
+应用数据默认写入 %LOCALAPPDATA%\VideoDownloader；用户下载目录单独配置。
+版本号采用 SemVer，例如 1.0.0-beta.1。
+17.2 CI/CD 最低要求
+restore -> build Release -> unit tests -> integration tests        -> package -> smoke test -> artifact publish
+主分支必须受保护；合并前构建与测试通过。Beta 发布应附 CHANGELOG、已知问题和安装说明。
+18. 风险与后续演进
+风险
+影响
+v1.2 对策
+站点协议变化/Token 短时效
+下载 403
+独立 SiteAdapter + Generic fallback；短时效资源允许受控 re-probe；站点规则失效不得污染 Core/其他站点
+CDP/WebView2 API 差异
+漏探测
+双探测源 + Normalizer
+HLS/DASH 复杂变体
+部分站点不兼容
+Parser 聚焦标准语义；复杂下载交 FFmpeg；建立回归样本
+FFmpeg 依赖与许可证
+发布风险
+适配层隔离 + 许可证审查
+大量分片导致 UI 噪声/内存增长
+体验与稳定性下降
+Aggregator + segment 早过滤 + 有界 Channel + 容量/TTL 双限制去重缓存
+Cookie/Token 泄露
+安全风险
+不可变 RequestContext + 请求级 Cookie + DPAPI(CurrentUser) + 结构化日志脱敏
+DRM 误判
+法律/产品风险
+ContentProtection/KEYFORMAT/EME 等综合判定；AES-128/SAMPLE-AES 不单独等同 DRM；明确 DRM 默认阻断
+YouTube JS challenge / PO Token /站点规则变化
+部分格式缺失、Adapter 失败或 403
+Adapter 与 Core 隔离；Generic browser capture 永久保留；可选 yt-dlp 固定版本并可升级；不实现平台 Token/挑战绕过
+Douyin/TikTok 短时效签名、跳转、地区/风控挑战
+URL 很快过期、403/410、页面不可访问
+URL 视为临时资源；最多一次 re-probe；由用户在 WebView2 正常完成挑战；不做 CAPTCHA/指纹/地区限制绕过
+Bilibili DASH/API/页面结构变化
+轨道配对或元数据解析失效
+独立 BilibiliAdapter + Generic network fallback；Adapter 测试使用脱敏 fixture + RC 真实站点回归
+外部解析器版本/许可/行为变化
+构建或站点兼容风险
+ExternalResolver 可选、版本探测、受控升级；统一输出模型；第三方许可证纳入发布清单
+18.1 阶段二候选
+MP4 多线程分块加速。
+HLS/DASH 内建下载器，减少对 FFmpeg 网络下载的依赖。
+直播录制与时移。
+Chrome/Edge 扩展，将外部浏览器资源发送到桌面客户端。
+站点适配器独立热更新/插件包（首版先随应用发布）；插件只能增强识别，不允许绕过 DRM/权限。
+重点站点扩展：YouTube 播放列表、Bilibili 多P批量、Douyin/TikTok 作者页批量等，必须另行评审速率、权限与交互，不纳入 v1.2 Beta。
+任务标签、批量下载、下载完成自动整理。
+附录 A：状态与错误码
+错误码
+含义
+建议 UI
+NET_TIMEOUT
+网络超时
+网络超时，已按策略重试
+HTTP_403
+访问被拒绝/会话过期
+刷新网页后重试
+HTTP_404
+资源不存在
+资源已失效
+RANGE_MISMATCH
+Range/实体版本不一致
+已放弃旧断点并准备重新下载
+DISK_FULL
+磁盘空间不足
+释放磁盘空间或更改下载目录
+DRM_PROTECTED
+DRM 保护
+此内容受 DRM 保护，不支持下载
+FFMPEG_NOT_FOUND
+未找到 FFmpeg
+请配置 FFmpeg 路径
+FFMPEG_FAILED
+FFmpeg 处理失败
+显示脱敏后的诊断摘要
+MUX_INTERRUPTED
+合并过程被中断
+可重新执行合并
+CANCELLED
+用户取消
+已取消
+CONTEXT_EXPIRED
+请求上下文已过期且受控刷新失败
+刷新网页后重新探测该视频
+RANGE_416
+Range 不可满足且本地文件并非完整实体
+已放弃无效断点并准备重新下载
+SITE_ADAPTER_FAILED
+站点适配器执行失败
+已尝试通用探测；必要时更新适配器
+SITE_REPROBE_FAILED
+短时效资源重新探测仍失败
+刷新页面后重新播放并探测
+EXTERNAL_RESOLVER_UNAVAILABLE
+yt-dlp 等可选解析器缺失/版本不兼容
+继续使用浏览器通用探测；可在设置中修复解析器
+SITE_CHALLENGE_REQUIRED
+站点需要用户登录/验证码/挑战
+请在内置浏览器中正常完成后重试
+附录 B：最终交付清单
+类别
+必须交付
+源码
+完整解决方案、可复现构建、无本机绝对路径依赖
+数据库
+SQLite migration/init 脚本
+测试
+单元/集成/E2E 测试及 TestMediaServer
+文档
+README、架构说明、开发/验收规范、CHANGELOG
+发布
+Windows x64 安装包、版本信息、依赖说明
+第三方
+NuGet/FFmpeg 等第三方许可证清单
+质量
+CI 记录、测试报告、已知问题清单
+安全
+日志脱敏检查、DRM 阻断检查、敏感数据持久化说明
+站点兼容
+YouTube/Bilibili/Douyin/TikTok Adapter、Generic fallback、RC 兼容矩阵与当前测试记录
+可选工具
+若启用 yt-dlp：固定版本、版本探测、许可证与升级说明；缺失/失败降级验证
+附录 C：关键标准与官方实现参考
+HTTP Range：RFC 9110《HTTP Semantics》，重点关注 Range、Accept-Ranges、Content-Range、If-Range、206 与 416 语义。Accept-Ranges 仅为能力提示，不是客户端发送 Range 的硬前置。
+HLS：RFC 8216《HTTP Live Streaming》，EXT-X-KEY 定义 NONE、AES-128、SAMPLE-AES；实现不得仅依据 METHOD 判断 DRM。
+WebView2：Microsoft WebView2 CoreWebView2.WebResourceResponseReceived 与 CDP 文档；WebResourceResponseReceived 用于观察已实际发送的请求/收到的响应，跨来源仍需自行归一化去重。
+.NET HTTP：Microsoft Learn《Use the IHttpClientFactory》及故障排查文档明确提示 CookieContainer 可能随 Handler 池共享；本项目因此采用请求级 Cookie、UseCookies=false。
+.NET Process：Process.CloseMainWindow 仅适用于有图形主窗口的进程；FFmpeg 取消使用 stdin 正常退出 + 超时 Kill(entireProcessTree:true)。
+Windows DPAPI：System.Security.Cryptography.ProtectedData，仅 Windows 支持；本项目使用 CurrentUser 保护需跨重启保存的敏感 RequestContext 字段。
+站点兼容参考：yt-dlp 官方 Supported sites/Extractors 用于评估站点解析变化；其存在不构成产品兼容保证。YouTube 等站点会持续调整 JS challenge/访问策略，发布验收必须以当前真实测试为准。
+参考项目（仅作为实现/回归研究）：yt-dlp（站点 Extractor 与 Generic fallback）、N_m3u8DL-RE（HLS/DASH 下载实现参考）。第三方代码是否直接复用须单独做许可证和集成评审。
+最终 Definition of Done
+v1.2 额外冻结条件：YouTube、Bilibili、Douyin、TikTok 四个 Adapter 与 Generic fallback 必须互相隔离；MediaVariant 多 Track 契约不得退化为单 URL；A5 系列站点验收和 A6 Beta 验收全部通过后方可发布。
+当且仅当：本文件第 16 章 Beta 验收条件通过、自动测试通过、T02/T03/T13/T14/T16/T18/T19/T20 关键场景通过、发布包在干净 Windows 环境完成冒烟测试、无未关闭 P0/P1 缺陷、第三方许可证与安全检查完成，首个 Beta 方可视为达到交付条件。任何通过修改数据库状态、绕开状态机、禁用日志脱敏或关闭 DRM 阻断来“通过测试”的实现均视为验收失败。

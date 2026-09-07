@@ -1,0 +1,50 @@
+<Window x:Class="VideoDownloader.UI.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="{Binding L.SettingsTitle}"
+        Height="420"
+        Width="520"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="140"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding L.SettingsSavePath}" VerticalAlignment="Center" Margin="0,0,8,8"/>
+        <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding SavePath, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,8"/>
+
+        <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding L.SettingsMaxConcurrent}" VerticalAlignment="Center" Margin="0,0,8,8"/>
+        <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding MaxConcurrentText, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,8"/>
+
+        <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding L.SettingsRetry}" VerticalAlignment="Center" Margin="0,0,8,8"/>
+        <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding RetryCountText, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,8"/>
+
+        <TextBlock Grid.Row="4" Grid.Column="0" Text="{Binding L.SettingsLogLevel}" VerticalAlignment="Center" Margin="0,0,8,8"/>
+        <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding LogLevel}" Margin="0,0,0,8"
+                 ToolTip="Debug / Information / Warning / Error"/>
+
+        <CheckBox Grid.Row="5" Grid.Column="1" Content="{Binding L.SettingsAutoRecover}"
+                  IsChecked="{Binding AutoRecover}" Margin="0,0,0,8"/>
+
+        <TextBlock Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="2"
+                   Text="{Binding StatusMessage}" Foreground="#047857" Margin="0,8,0,8"/>
+
+        <StackPanel Grid.Row="8" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="{Binding L.SettingsSave}" Command="{Binding SaveCommand}" Width="80" Height="32" Margin="0,0,8,0"/>
+            <Button Content="{Binding L.SettingsClose}" Width="80" Height="32" IsCancel="True"/>
+        </StackPanel>
+    </Grid>
+</Window>
