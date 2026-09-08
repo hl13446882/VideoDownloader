@@ -13,6 +13,7 @@ using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Download;
+using VideoDownloader.Core.Sites;
 
 namespace VideoDownloader.Infrastructure.Detection;
 
@@ -123,13 +124,24 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         }
     }
 
+    private readonly VideoDownloader.Infrastructure.Http.MediaAvailabilityValidator? _availability;
+    private readonly ILogger<UnifiedMediaPipeline> _logger;
+    private readonly ISiteMediaAdapterResolver? _siteAdapters;
+    private readonly ICandidateDecisionPolicy _candidatePolicy;
+
+    public event EventHandler<DetectedVideo>? VideoDetected;
+    public event EventHandler<DetectedVideo>? VideoUpdated;
+    public event EventHandler<IReadOnlyList<DetectedVideo>>? PageProbed;
+
     public UnifiedMediaPipeline(
         IRequestMessageFactory requests,
         IEnumerable<IExternalSiteResolver> externals,
         IOptions<AppOptions> options,
         IManifestResolver? manifests = null,
         VideoDownloader.Infrastructure.Http.MediaAvailabilityValidator? availability = null,
-        ILogger<UnifiedMediaPipeline>? logger = null)
+        ILogger<UnifiedMediaPipeline>? logger = null,
+        ISiteMediaAdapterResolver? siteAdapters = null,
+        ICandidateDecisionPolicy? candidatePolicy = null)
     {
         _requests = requests;
         _externals = (externals ?? []).ToArray();
@@ -137,14 +149,9 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         _manifests = manifests;
         _availability = availability;
         _logger = logger ?? NullLogger<UnifiedMediaPipeline>.Instance;
+        _siteAdapters = siteAdapters;
+        _candidatePolicy = candidatePolicy ?? new CandidateDecisionPolicy();
     }
-
-    private readonly VideoDownloader.Infrastructure.Http.MediaAvailabilityValidator? _availability;
-    private readonly ILogger<UnifiedMediaPipeline> _logger;
-
-    public event EventHandler<DetectedVideo>? VideoDetected;
-    public event EventHandler<DetectedVideo>? VideoUpdated;
-    public event EventHandler<IReadOnlyList<DetectedVideo>>? PageProbed;
 
     public void Clear()
     {
@@ -200,40 +207,99 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         // Bind page early so subsequent events in this cycle have a fallback.
         _page ??= page;
 
-        // YouTube SABR adaptive streaming URLs are not progressive downloads,
-        // but keep non-SABR googlevideo /videoplayback candidates.
-        if (e.Url.AbsoluteUri.Contains("sabr=1", StringComparison.OrdinalIgnoreCase) &&
-            !e.Url.AbsoluteUri.Contains("mime=video", StringComparison.OrdinalIgnoreCase) &&
-            !e.Url.AbsoluteUri.Contains("mime=audio", StringComparison.OrdinalIgnoreCase))
-            return Task.CompletedTask;
-
+        var pageContext = new PageMediaContext(page, _title, _observedIdentity, SessionId, _author);
+        var siteAdapter = _siteAdapters?.Resolve(page) ?? _siteAdapters?.Generic;
+        var genericAdapter = _siteAdapters?.Generic;
         var browserPlay = IsBrowserPlayEvidence(e);
 
-        // Segments thrash the 3 ffprobe slots and almost never yield a displayable item.
-        // Browser Media/200/206 play evidence overrides segment morphology (TikTok Range playAddr).
-        if (MediaUrlNormalizer.IsLikelySegment(e.Url) && !browserPlay)
+        NetworkCandidateDecision siteDecision = new(NetworkCandidateDecisionKind.Default, siteAdapter?.Name ?? "none");
+        NetworkCandidateDecision genericDecision = new(NetworkCandidateDecisionKind.Default, genericAdapter?.Name ?? "generic");
+        if (siteAdapter is not null)
+            siteDecision = siteAdapter.EvaluateNetworkCandidate(e, pageContext);
+        if (genericAdapter is not null)
+            genericDecision = genericAdapter.EvaluateNetworkCandidate(e, pageContext);
+        else
+        {
+            // Fallback when adapters are not injected (unit tests / legacy ctor).
+            if (e.Url.AbsoluteUri.Contains("sabr=1", StringComparison.OrdinalIgnoreCase) &&
+                !e.Url.AbsoluteUri.Contains("mime=video", StringComparison.OrdinalIgnoreCase) &&
+                !e.Url.AbsoluteUri.Contains("mime=audio", StringComparison.OrdinalIgnoreCase))
+            {
+                genericDecision = new(NetworkCandidateDecisionKind.Reject, "legacy", "sabr");
+            }
+            else if (IsCandidate(e.Url, e.MimeType, e.ResourceType, e.ContentLength) || browserPlay)
+            {
+                genericDecision = new(
+                    browserPlay ? NetworkCandidateDecisionKind.StrongAccept : NetworkCandidateDecisionKind.Accept,
+                    "legacy",
+                    browserPlay ? "browser_play" : "morphology",
+                    browserPlay ? MediaEvidence.BrowserObserved : MediaEvidence.Heuristic);
+            }
+            else
+            {
+                genericDecision = new(NetworkCandidateDecisionKind.Reject, "legacy", "not_candidate");
+            }
+        }
+
+        var finalDecision = _candidatePolicy.Combine(siteDecision, genericDecision);
+        if (finalDecision.Kind is NetworkCandidateDecisionKind.StrongAccept or NetworkCandidateDecisionKind.Accept ||
+            siteDecision.Kind != NetworkCandidateDecisionKind.Default)
+        {
+            _logger.LogInformation(
+                "CandidateDecision site={Site} adapter={Adapter} page={Page} contentIdentity={Identity} host={Host} resourceType={Type} mime={Mime} status={Status} contentLength={Length} siteDecision={SiteDec} genericDecision={GenDec} finalDecision={Final} evidence={Evidence} reason={Reason}",
+                siteAdapter?.Name ?? "none",
+                finalDecision.AdapterName,
+                page.AbsolutePath,
+                pageContext.ObservedIdentity,
+                e.Url.Host,
+                e.ResourceType,
+                e.MimeType,
+                e.StatusCode,
+                e.ContentLength,
+                siteDecision.Kind,
+                genericDecision.Kind,
+                finalDecision.Kind,
+                finalDecision.Evidence,
+                finalDecision.Reason);
+        }
+
+        if (finalDecision.Kind == NetworkCandidateDecisionKind.Reject)
             return Task.CompletedTask;
 
-        if (!IsCandidate(e.Url, e.MimeType, e.ResourceType, e.ContentLength) && !browserPlay)
+        // Segments thrash the 3 ffprobe slots unless a site StrongAccept / browser play overrides.
+        var allowSegment = browserPlay ||
+                           finalDecision.Kind == NetworkCandidateDecisionKind.StrongAccept ||
+                           finalDecision.Evidence == MediaEvidence.BrowserObserved;
+        if (MediaUrlNormalizer.IsLikelySegment(e.Url) && !allowSegment)
             return Task.CompletedTask;
 
-        if (browserPlay)
+        // StrongAccept from TikTok (etc.) must not be dropped by morphology alone.
+        if (finalDecision.Kind is not (NetworkCandidateDecisionKind.StrongAccept or NetworkCandidateDecisionKind.Accept) &&
+            !IsCandidate(e.Url, e.MimeType, e.ResourceType, e.ContentLength) &&
+            !browserPlay)
+            return Task.CompletedTask;
+
+        if (browserPlay || finalDecision.Evidence == MediaEvidence.BrowserObserved)
         {
             var key = MediaUrlNormalizer.Normalize(e.Url);
+            var ctx = AttachRequestCookie(e.RequestContext, e.RequestHeaders, e.Url);
+            if (siteAdapter is not null)
+                ctx = siteAdapter.EnrichRequestContext(ctx, e.Url, pageContext);
             _browserObserved[key] = new BrowserObservedMedia(
                 e.Url,
                 e.MimeType,
                 InferKindFromMime(e.MimeType),
-                AttachRequestCookie(e.RequestContext, e.RequestHeaders, e.Url));
+                ctx);
             RecordDecision(new("network", KindLabel(InferKindFromMime(e.MimeType)), MediaOwnership.ForPage(page, _observedIdentity),
-                "accepted", "browser_observed", e.Url.Host,
-                $"status={e.StatusCode};type={e.ResourceType};mime={e.MimeType}"));
+                "accepted", finalDecision.Reason ?? "browser_observed", e.Url.Host,
+                $"adapter={finalDecision.AdapterName};status={e.StatusCode};type={e.ResourceType};mime={e.MimeType}"));
             _logger.LogInformation(
-                "Browser-observed media session={Session} host={Host} status={Status} type={Type} mime={Mime}",
-                e.SessionId, e.Url.Host, e.StatusCode, e.ResourceType, e.MimeType);
+                "Browser-observed media session={Session} host={Host} status={Status} type={Type} mime={Mime} adapter={Adapter}",
+                e.SessionId, e.Url.Host, e.StatusCode, e.ResourceType, e.MimeType, finalDecision.AdapterName);
         }
 
-        Queue(e.Url, page, e.RequestContext, e.ContentLength, ct, e.MimeType, browserObserved: browserPlay);
+        Queue(e.Url, page, e.RequestContext, e.ContentLength, ct, e.MimeType,
+            browserObserved: browserPlay || finalDecision.Evidence == MediaEvidence.BrowserObserved);
         return Task.CompletedTask;
     }
 
@@ -364,7 +430,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             }
             else
             {
-                var resolveUrl = ResolveExternalPageUrl(pageUrl, _observedIdentity);
+                var resolveUrl = ResolveExternalPageUrlCore(pageUrl, _observedIdentity);
                 await TryExternalResolveAsync(pageUrl, context, ct, resolveUrl);
             }
         }
@@ -388,11 +454,12 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
 
     private static Uri ResolveExternalPageUrl(Uri pageUrl, string? observedIdentity)
     {
+        // Kept for call sites without adapter injection; prefer instance ResolveExternalPageUrlCore.
         if (string.IsNullOrWhiteSpace(observedIdentity))
             return pageUrl;
 
         var match = System.Text.RegularExpressions.Regex.Match(
-            observedIdentity, @"content:(\d{10,}|BV[\w]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            observedIdentity, @"content:(?:tiktok:)?(\d{10,}|BV[\w]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         if (!match.Success)
             return pageUrl;
 
@@ -405,14 +472,26 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         if (!isFeedRoot)
             return pageUrl;
 
-            if (host.Contains("tiktok", StringComparison.OrdinalIgnoreCase))
-                // Bare /video/{id} 404s on www; yt-dlp accepts the @user/video form with a placeholder user.
-                return new Uri($"https://www.tiktok.com/@i/video/{id}");
-            if (host.Contains("douyin", StringComparison.OrdinalIgnoreCase) ||
-                host.Contains("iesdouyin", StringComparison.OrdinalIgnoreCase))
-                return new Uri($"https://www.douyin.com/video/{id}");
+        if (host.Contains("tiktok", StringComparison.OrdinalIgnoreCase))
+            return new Uri($"https://www.tiktok.com/@i/video/{id}");
+        if (host.Contains("douyin", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("iesdouyin", StringComparison.OrdinalIgnoreCase))
+            return new Uri($"https://www.douyin.com/video/{id}");
 
         return pageUrl;
+    }
+
+    private Uri ResolveExternalPageUrlCore(Uri pageUrl, string? observedIdentity)
+    {
+        if (_siteAdapters is not null)
+        {
+            var adapter = _siteAdapters.Resolve(pageUrl);
+            var rewritten = adapter.CanonicalizeExternalPageUrl(pageUrl, observedIdentity);
+            if (rewritten is not null)
+                return rewritten;
+        }
+
+        return ResolveExternalPageUrl(pageUrl, observedIdentity);
     }
 
     /// <summary>
@@ -641,7 +720,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             evidence.Context)
         {
             IsValidated = true,
-            BrowserObserved = true
+            BrowserObserved = true,
+            Evidence = MediaEvidence.BrowserObserved
         };
         return new Probed(page, track, 0, null);
     }
@@ -1424,6 +1504,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 {
                     IsValidated = true,
                     BrowserObserved = true,
+                    Evidence = MediaEvidence.BrowserObserved,
                     // Prefer the CDP request context that already succeeded.
                     RequestContext = evidence.Context
                 };
@@ -1476,6 +1557,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             {
                 IsValidated = true,
                 BrowserObserved = true,
+                Evidence = MediaEvidence.BrowserObserved,
                 ContentIdentity = video.SiteContentId is null ? null : "id:" + video.SiteContentId
             };
             injected.Add(MediaVariant.FromTracks(

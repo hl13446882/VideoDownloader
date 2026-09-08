@@ -27,6 +27,9 @@ public sealed record MediaTrack(
     /// </summary>
     public bool BrowserObserved { get; init; }
 
+    /// <summary>How strongly we trust this track as playable media.</summary>
+    public MediaEvidence Evidence { get; init; }
+
     /// <summary>
     /// Present only for clear-key encrypted HLS media playlists. Null for all other media.
     /// </summary>
