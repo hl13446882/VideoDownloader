@@ -32,6 +32,10 @@
         <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding L.SettingsRetry}" VerticalAlignment="Center" Margin="0,0,8,8"/>
         <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding RetryCountText, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,8"/>
 
+        <TextBlock Grid.Row="3" Grid.Column="0" Text="{Binding L.SettingsFailedRetryInterval}" VerticalAlignment="Center" Margin="0,0,8,8"/>
+        <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding FailedRetryIntervalText, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,8"
+                 ToolTip="{Binding L.SettingsFailedRetryIntervalTip}"/>
+
         <TextBlock Grid.Row="4" Grid.Column="0" Text="{Binding L.SettingsLogLevel}" VerticalAlignment="Center" Margin="0,0,8,8"/>
         <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding LogLevel}" Margin="0,0,0,8"
                  ToolTip="Debug / Information / Warning / Error"/>

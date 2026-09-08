@@ -94,6 +94,8 @@ public sealed partial class LocalizationService : ObservableObject
         OnPropertyChanged(nameof(SettingsSavePath));
         OnPropertyChanged(nameof(SettingsMaxConcurrent));
         OnPropertyChanged(nameof(SettingsRetry));
+        OnPropertyChanged(nameof(SettingsFailedRetryInterval));
+        OnPropertyChanged(nameof(SettingsFailedRetryIntervalTip));
         OnPropertyChanged(nameof(SettingsLogLevel));
         OnPropertyChanged(nameof(SettingsAutoRecover));
         OnPropertyChanged(nameof(SettingsSave));
@@ -134,6 +136,8 @@ public sealed partial class LocalizationService : ObservableObject
     public string SettingsSavePath => T("settings.savePath");
     public string SettingsMaxConcurrent => T("settings.maxConcurrent");
     public string SettingsRetry => T("settings.retry");
+    public string SettingsFailedRetryInterval => T("settings.failedRetryInterval");
+    public string SettingsFailedRetryIntervalTip => T("settings.failedRetryIntervalTip");
     public string SettingsLogLevel => T("settings.logLevel");
     public string SettingsAutoRecover => T("settings.autoRecover");
     public string SettingsSave => T("settings.save");
@@ -176,6 +180,9 @@ public sealed partial class LocalizationService : ObservableObject
         ["settings.savePath"] = ("保存目录", "Save folder"),
         ["settings.maxConcurrent"] = ("最大并发", "Max concurrent"),
         ["settings.retry"] = ("重试次数", "Retry count"),
+        ["settings.failedRetryInterval"] = ("失败捞起间隔(秒)", "Failed retry interval (sec)"),
+        ["settings.failedRetryIntervalTip"] = ("失败任务每隔多少秒自动恢复；0 关闭。默认 10。",
+            "Seconds between auto-resume of failed jobs; 0 disables. Default 10."),
         ["settings.logLevel"] = ("日志级别", "Log level"),
         ["settings.autoRecover"] = ("启动时自动恢复已暂停的下载", "Auto-resume paused downloads on startup"),
         ["settings.save"] = ("保存", "Save"),
@@ -183,6 +190,7 @@ public sealed partial class LocalizationService : ObservableObject
         ["settings.invalidPath"] = ("保存目录无效，请填写绝对路径。", "Invalid save folder. Use an absolute path."),
         ["settings.invalidConcurrent"] = ("最大并发必须是数字。", "Max concurrent must be a number."),
         ["settings.invalidRetry"] = ("重试次数必须是数字。", "Retry count must be a number."),
+        ["settings.invalidFailedRetryInterval"] = ("失败捞起间隔必须是数字。", "Failed retry interval must be a number."),
         ["settings.saved"] = ("设置已保存。并发数变更需重启应用后生效。", "Settings saved. Concurrent changes need an app restart."),
         ["dialog.title"] = ("提示", "Notice"),
         ["dialog.removeTitle"] = ("移除下载任务", "Remove download"),

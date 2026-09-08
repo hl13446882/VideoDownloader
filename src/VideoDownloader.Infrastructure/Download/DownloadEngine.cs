@@ -33,6 +33,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _runLocks = new();
     private readonly SemaphoreSlim _concurrency;
     private readonly object _targetPathSync = new();
+    private readonly CancellationTokenSource _lifetime = new();
+    private readonly Task _failedRetryLoop;
 
     public DownloadEngine(
         HttpMediaDownloader httpDownloader,
@@ -61,6 +63,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         _resolvers = (resolvers ?? []).ToArray();
         _availability = availability;
         _concurrency = new SemaphoreSlim(_options.Download.MaxConcurrentDownloads);
+        _failedRetryLoop = Task.Run(() => FailedRetryLoopAsync(_lifetime.Token));
     }
 
     public async Task EnqueueAsync(
@@ -916,8 +919,58 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         return string.IsNullOrWhiteSpace(cleaned) ? "download" : cleaned;
     }
 
+    /// <summary>
+    /// Periodically resumes Failed queue items after <see cref="DownloadOptions.FailedRetryIntervalSeconds"/>.
+    /// </summary>
+    private async Task FailedRetryLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1), ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+
+            PickupFailedJobs();
+        }
+    }
+
+    private void PickupFailedJobs()
+    {
+        var intervalSeconds = _options.Download.FailedRetryIntervalSeconds;
+        if (intervalSeconds <= 0)
+            return;
+
+        var minAge = TimeSpan.FromSeconds(intervalSeconds);
+        var now = DateTimeOffset.UtcNow;
+        foreach (var job in _jobs.Values)
+        {
+            if (job.Status != DownloadStatus.Failed)
+                continue;
+            if (_removedJobs.ContainsKey(job.Id) || _ctsMap.ContainsKey(job.Id))
+                continue;
+            if (now - job.UpdatedAt < minAge)
+                continue;
+
+            _logger.LogInformation(
+                "Auto-picking failed job {JobId} after {Seconds}s (error={Error})",
+                job.Id,
+                intervalSeconds,
+                job.LastErrorCode);
+            _ = ResumeAsync(job.Id);
+        }
+    }
+
     public void Dispose()
     {
+        _lifetime.Cancel();
+        try { _failedRetryLoop.Wait(TimeSpan.FromSeconds(2)); }
+        catch { /* shutting down */ }
+        _lifetime.Dispose();
         _concurrency.Dispose();
         foreach (var cts in _ctsMap.Values)
             cts.Dispose();

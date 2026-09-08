@@ -42,6 +42,11 @@ public sealed class DownloadOptions
     public int MaxConcurrentDownloads { get; set; } = 3;
     public int RetryCount { get; set; } = 3;
     public bool AutoRecoverDownloads { get; set; } = false;
+
+    /// <summary>
+    /// Seconds between automatic Resume attempts for Failed queue items. 0 disables.
+    /// </summary>
+    public int FailedRetryIntervalSeconds { get; set; } = 10;
 }
 
 public sealed class BrowserOptions

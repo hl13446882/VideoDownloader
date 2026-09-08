@@ -71,7 +71,8 @@ public sealed class UserSettingsStore
             DefaultSavePath = source.Download.DefaultSavePath,
             MaxConcurrentDownloads = source.Download.MaxConcurrentDownloads,
             RetryCount = source.Download.RetryCount,
-            AutoRecoverDownloads = source.Download.AutoRecoverDownloads
+            AutoRecoverDownloads = source.Download.AutoRecoverDownloads,
+            FailedRetryIntervalSeconds = source.Download.FailedRetryIntervalSeconds
         },
         Browser = new BrowserOptions
         {

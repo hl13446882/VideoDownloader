@@ -22,6 +22,9 @@ public sealed partial class SettingsViewModel : ObservableObject
     private string _retryCountText;
 
     [ObservableProperty]
+    private string _failedRetryIntervalText;
+
+    [ObservableProperty]
     private bool _autoRecover;
 
     [ObservableProperty]
@@ -40,6 +43,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         _savePath = options.Download.DefaultSavePath;
         _maxConcurrentText = options.Download.MaxConcurrentDownloads.ToString();
         _retryCountText = options.Download.RetryCount.ToString();
+        _failedRetryIntervalText = options.Download.FailedRetryIntervalSeconds.ToString();
         _autoRecover = options.Download.AutoRecoverDownloads;
         _logLevel = options.Logging.MinimumLevel;
         _loc.LanguageChanged += (_, _) => OnPropertyChanged(nameof(L));
@@ -66,9 +70,16 @@ public sealed partial class SettingsViewModel : ObservableObject
             return;
         }
 
+        if (!int.TryParse(FailedRetryIntervalText, out var failedRetryInterval))
+        {
+            StatusMessage = _loc.T("settings.invalidFailedRetryInterval");
+            return;
+        }
+
         _options.Download.DefaultSavePath = SavePath.Trim();
         _options.Download.MaxConcurrentDownloads = Math.Clamp(maxConcurrent, 1, 10);
         _options.Download.RetryCount = Math.Clamp(retryCount, 0, 10);
+        _options.Download.FailedRetryIntervalSeconds = Math.Clamp(failedRetryInterval, 0, 3600);
         _options.Download.AutoRecoverDownloads = AutoRecover;
         _options.Logging.MinimumLevel = LogLevel.Trim();
         _options.Ui.Language = _loc.LanguageCode;
