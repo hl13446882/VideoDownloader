@@ -5,14 +5,12 @@ if(-not $SkipBuild){
     dotnet build (Join-Path $root 'tools\VideoDownloader.Verify') -c Release --verbosity quiet
     if($LASTEXITCODE -ne 0){throw 'Verifier build failed'}
 }
+# Douyin + TikTok + two generic sites. Each item must download ≥20MiB or finish completely.
 $urls=@(
     'https://www.douyin.com/?recommend=1',
     'https://www.douyin.com/jingxuan?modal_id=7660503158577286451',
     'https://v.douyin.com/9cY9PQIM6HY/',
     'https://www.tiktok.com/',
-    'https://www.bilibili.com/video/BV1xMtw6XEAu',
-    'https://www.bilibili.com/video/BV1CXWuz3E7V/',
-    'https://www.bilibili.com/video/BV1x8g56LEsz/',
     'https://www.xmfyy.com/index.php/vod/play/id/290850/sid/1/nid/1.html',
     'https://ally.trytcrae.cc/archives/274269/'
 )

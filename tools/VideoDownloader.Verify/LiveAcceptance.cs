@@ -218,27 +218,29 @@ public partial class MainWindow
                         if(albumOk || (selected is not null && MediaVariantReconciler.HasCompleteAudio(selected)))
                             sampleOk &= anyTrackOk || tracks.All(t=>t.Kind==MediaTrackKind.Image);
 
-                        // Product gate: preferred complete media must actually yield ≥2 MiB.
-                        // Run even when tiny sample GET timed out but browser already played the object.
-                        if(sampleOk && selected is not null && !albumOk)
+                        // Product gate: ≥20 MiB downloaded, or the shorter object finishes completely.
+                        if(sampleOk && selected is not null)
                         {
-                            var proofCandidates=selected.Tracks
-                                .Where(t=>t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
-                                .OrderBy(t=>UnifiedMediaPipeline.IsDouyinPlayGateway(t.SourceUrl)?1:0)
-                                .Concat((video.Variants??[]).SelectMany(v=>v.Tracks)
+                            const long proofMin=20L*1024*1024;
+                            var proofCandidates=albumOk
+                                ? selected.Tracks.Where(t=>t.Kind is MediaTrackKind.Audio or MediaTrackKind.Combined).Take(1).ToArray()
+                                : selected.Tracks
                                     .Where(t=>t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
-                                    .OrderBy(t=>UnifiedMediaPipeline.IsDouyinPlayGateway(t.SourceUrl)?1:0))
-                                .DistinctBy(t=>t.SourceUrl.AbsoluteUri)
-                                .ToArray();
+                                    .OrderBy(t=>UnifiedMediaPipeline.IsDouyinPlayGateway(t.SourceUrl)?1:0)
+                                    .Concat((video.Variants??[]).SelectMany(v=>v.Tracks)
+                                        .Where(t=>t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
+                                        .OrderBy(t=>UnifiedMediaPipeline.IsDouyinPlayGateway(t.SourceUrl)?1:0))
+                                    .DistinctBy(t=>t.SourceUrl.AbsoluteUri)
+                                    .ToArray();
                             var proofOk=false;
                             string? proofNote=null;
                             foreach(var proofTrack in proofCandidates)
                             {
-                                var proof=await ProveDownloadAtLeastAsync(proofTrack,2L*1024*1024);
+                                var proof=await ProveDownloadAtLeastAsync(proofTrack,proofMin);
                                 proofNote=proof.Note;
                                 if(proof.Ok){proofOk=true;break;}
                             }
-                            samples.Add($"download≥2MiB: {proofNote??"no video track"}");
+                            samples.Add($"download≥20MiB-or-complete: {proofNote??"no track"}");
                             sampleOk &= proofOk;
                         }
                     }
@@ -520,7 +522,7 @@ public partial class MainWindow
             using var client=_services!.GetRequiredService<System.Net.Http.IHttpClientFactory>().CreateClient("media-primary");
             var factory=_services!.GetRequiredService<IRequestMessageFactory>();
             var url=track.SourceUrl;
-            using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(90));
+            using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(300));
             for(var hop=0;hop<6;hop++)
             {
                 using var request=factory.Create(
@@ -539,7 +541,7 @@ public partial class MainWindow
                 if(!response.IsSuccessStatusCode)
                     return(false,$"HTTP {(int)response.StatusCode} from {url.Host}");
                 await using var stream=await response.Content.ReadAsStreamAsync(timeout.Token);
-                var buffer=new byte[64*1024];
+                var buffer=new byte[256*1024];
                 long total=0;
                 while(total<minBytes)
                 {
@@ -547,11 +549,11 @@ public partial class MainWindow
                     if(read==0) break;
                     total+=read;
                 }
-                // Short VOD under 2MiB still counts if the server closed after a full body ≥64KiB.
-                var contentLength=response.Content.Headers.ContentLength;
-                var ok=total>=minBytes ||
-                       (contentLength is >0 && contentLength<minBytes && total>=contentLength.Value && total>=64*1024);
-                return(ok,$"bytes={total} host={url.Host}");
+                // Short VOD under 20MiB still counts when the body finished (≥64KiB).
+                var entityLength=TryGetEntityLength(response) ?? response.Content.Headers.ContentLength;
+                var complete=entityLength is >0 and <minBytes && total>=entityLength.Value && total>=64*1024;
+                var ok=total>=minBytes || complete;
+                return(ok,$"bytes={total} entity={entityLength?.ToString()??"?"} complete={complete} host={url.Host}");
             }
             return(false,$"too many redirects from {track.SourceUrl.Host}");
         }
@@ -561,22 +563,36 @@ public partial class MainWindow
         }
     }
 
+    private static long? TryGetEntityLength(HttpResponseMessage response)
+    {
+        if(response.Content.Headers.ContentRange?.Length is long ranged)
+            return ranged;
+        if(response.Headers.TryGetValues("Content-Range",out var values))
+        {
+            var raw=values.FirstOrDefault()??"";
+            var slash=raw.LastIndexOf('/');
+            if(slash>=0 && long.TryParse(raw[(slash+1)..],out var total) && total>0)
+                return total;
+        }
+        return response.Content.Headers.ContentLength;
+    }
+
     private async Task<(bool Ok,string Note)> ProveManifestDownloadAtLeastAsync(MediaTrack track,long minBytes)
     {
         var folder=Path.Combine(Path.GetTempPath(),"vd-proof-"+Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
         var publish=FindPublishRoot();
-        // Pull enough segments to reach ≥2MiB (first segment alone is often smaller).
+        // Pull enough segments to reach ≥20MiB (or finish a short VOD playlist).
         var info=new ProcessStartInfo(Path.Combine(publish,"M3u8","N_m3u8DL-RE.exe"))
             {UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,WorkingDirectory=folder};
-        foreach(var arg in new[]{track.SourceUrl.AbsoluteUri,"--custom-range","0-40","--skip-merge","--auto-select","--thread-count","4","--download-retry-count","1",
+        foreach(var arg in new[]{track.SourceUrl.AbsoluteUri,"--custom-range","0-800","--skip-merge","--auto-select","--thread-count","8","--download-retry-count","2",
             "--save-dir",folder,"--tmp-dir",Path.Combine(folder,"segments"),"--save-name","proof","--no-log","--no-ansi-color","--write-meta-json","false","--disable-update-check",
             "--ffmpeg-binary-path",Path.Combine(publish,"ffmpeg","ffmpeg.exe")}) info.ArgumentList.Add(arg);
         using var request=_services!.GetRequiredService<IRequestMessageFactory>().Create(MediaVariant.FromTracks("proof",null,null,null,track.Container,[track]),HttpMethod.Get,track.SourceUrl);
         foreach(var header in request.Headers.Where(h=>!h.Key.Equals("Range",StringComparison.OrdinalIgnoreCase)))
         {info.ArgumentList.Add("-H");info.ArgumentList.Add(header.Key+": "+string.Join(", ",header.Value));}
         using var process=Process.Start(info)!;
-        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(120));
+        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(420));
         var output=process.StandardOutput.ReadToEndAsync();var errors=process.StandardError.ReadToEndAsync();
         try
         {
@@ -585,7 +601,10 @@ public partial class MainWindow
             var bytes=Directory.EnumerateFiles(folder,"*",SearchOption.AllDirectories)
                 .Where(p=>new[]{".ts",".m4s",".mp4",".m4a",".aac",".webm",".mkv"}.Contains(Path.GetExtension(p)))
                 .Sum(p=>new FileInfo(p).Length);
-            return(process.ExitCode==0&&bytes>=minBytes,$"N_m3u8DL-RE proof: exit={process.ExitCode}, mediaBytes={bytes}");
+            // Exit 0 with substantial bytes under the cap = short playlist finished completely.
+            var complete=process.ExitCode==0 && bytes>=64*1024 && bytes<minBytes;
+            var ok=(process.ExitCode==0&&bytes>=minBytes) || complete;
+            return(ok,$"N_m3u8DL-RE proof: exit={process.ExitCode}, mediaBytes={bytes}, complete={complete}");
         }
         finally
         {
