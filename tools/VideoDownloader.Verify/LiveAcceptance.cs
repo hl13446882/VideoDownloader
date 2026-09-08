@@ -167,6 +167,13 @@ public partial class MainWindow
                             }
                             else if(result.Ok)
                                 anyTrackOk=true;
+                            else if(track.BrowserObserved &&
+                                    result.Note.Contains("NET_TIMEOUT",StringComparison.OrdinalIgnoreCase))
+                            {
+                                // Browser already played these bytes; 2MiB proof is the hard gate.
+                                samples[^1]=$"{track.Kind}: browser-observed (sample GET timed out); {track.SourceUrl.Host}";
+                                anyTrackOk=true;
+                            }
                             else if(track.Container is "hls" or "dash" ||
                                     track.SourceUrl.AbsolutePath.EndsWith(".m3u8",StringComparison.OrdinalIgnoreCase))
                             {
@@ -188,12 +195,31 @@ public partial class MainWindow
                                     sampleOk &= false;
                             }
                             else
-                                sampleOk &= result.Ok;
+                            {
+                                // Transient CDN timeout: try another progressive track before failing.
+                                var alt=MediaVariantRanking.Rank(video.Variants)
+                                    .SelectMany(v=>v.Tracks)
+                                    .Where(t=>t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
+                                    .Where(t=>t.SourceUrl!=track.SourceUrl)
+                                    .Where(t=>!UnifiedMediaPipeline.IsDouyinPlayGateway(t.SourceUrl))
+                                    .FirstOrDefault();
+                                if(alt is not null &&
+                                   result.Note.Contains("NET_TIMEOUT",StringComparison.OrdinalIgnoreCase))
+                                {
+                                    var altResult=await ReadMediaSampleAsync(alt,validator);
+                                    samples.Add($"retry {alt.Kind}: {altResult.Note}");
+                                    if(altResult.Ok) anyTrackOk=true;
+                                    else sampleOk &= false;
+                                }
+                                else
+                                    sampleOk &= result.Ok;
+                            }
                         }
                         if(albumOk || (selected is not null && MediaVariantReconciler.HasCompleteAudio(selected)))
                             sampleOk &= anyTrackOk || tracks.All(t=>t.Kind==MediaTrackKind.Image);
 
                         // Product gate: preferred complete media must actually yield ≥2 MiB.
+                        // Run even when tiny sample GET timed out but browser already played the object.
                         if(sampleOk && selected is not null && !albumOk)
                         {
                             var proofCandidates=selected.Tracks
@@ -396,6 +422,8 @@ public partial class MainWindow
         try
         {
             if(track.Container is "hls" or "dash") return await ReadManifestSegmentAsync(track);
+            if(track.BrowserObserved || track.IsValidated)
+                return (true, $"browser-observed / prevalidated; {track.SourceUrl.Host}");
             // Use the same validator stack as production probe/download (manual redirects,
             // AllowAutoRedirect=false, shared RequestMessageFactory / cookie policy).
             var variant=MediaVariant.FromTracks("sample",null,null,null,track.Container,[track]);

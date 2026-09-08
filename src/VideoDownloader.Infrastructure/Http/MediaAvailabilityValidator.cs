@@ -13,11 +13,14 @@ public sealed class MediaAvailabilityValidator(IHttpClientFactory clients, IRequ
     public async Task ValidateAsync(MediaVariant variant, CancellationToken ct)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(TimeSpan.FromSeconds(20));
+        timeout.CancelAfter(TimeSpan.FromSeconds(35));
         foreach (var track in variant.Tracks.DistinctBy(t => t.SourceUrl))
         {
             // Manifest backends validate initialization/segments; binary sniffing is for direct resources only.
             if (track.Container is "hls" or "dash") continue;
+            // CDP already delivered these bytes to the playing document — do not re-GET flaky CDN URLs.
+            if (track.BrowserObserved || track.IsValidated)
+                continue;
             try { await ReadMediaAsync(track, track.SourceUrl, 0, timeout.Token); }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             { throw new DownloadException(ErrorCodes.NetTimeout, "Media sample validation timed out."); }
