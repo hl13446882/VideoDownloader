@@ -39,12 +39,13 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
     private ConcurrentDictionary<string, DetectedVideo> _externalVideos = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>Normalized URL → browser-observed progressive media (CDP Media/200/206).</summary>
     private ConcurrentDictionary<string, BrowserObservedMedia> _browserObserved = new(StringComparer.OrdinalIgnoreCase);
-    private DetectedVideo? _lastBuilt;
+    private IReadOnlyList<DetectedVideo>? _lastBuilt;
     private CancellationTokenSource _generation = new();
     private CancellationTokenSource _validationBudget = new();
     private bool _validationStarted;
     private Uri? _page;
     private string? _title;
+    private bool _titleFromCaption;
     private string? _author;
     private string? _observedIdentity;
     private List<Uri> _albumImages = [];
@@ -59,6 +60,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             // Do not let transport filenames overwrite a real caption / page title.
             if (IsWeakCaption(caption) && !IsWeakCaption(_title)) return;
             _title=caption.Trim();
+            _titleFromCaption = true;
             Publish(_generation.Token, forceEmit: true);
         }
     }
@@ -122,7 +124,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         {
             if (_session.Phase != DetectionPhase.Completed)
                 return;
-            if (_lastBuilt is not null)
+            if (_lastBuilt is { Count: > 0 })
                 EmitBuilt(_lastBuilt);
             else
                 PublishCore(_generation.Token, forceEmit: true);
@@ -181,6 +183,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         while (_probeDecisions.TryTake(out _)) { }
         _page = null;
         _title = null;
+        _titleFromCaption = false;
         _author = null;
         _observedIdentity = null;
         _lastBuilt = null;
@@ -524,7 +527,10 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                     {
                         var text = title.GetString()!.Trim();
                         if (!IsWeakCaption(text))
+                        {
                             _title = text;
+                            _titleFromCaption = true;
+                        }
                         break;
                     }
                 }
@@ -1280,11 +1286,18 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         lock (_gate) PublishCore(generation, forceEmit);
     }
 
-    private void EmitBuilt(DetectedVideo merged)
+    private void EmitBuilt(IReadOnlyList<DetectedVideo> videos)
     {
-        VideoDetected?.Invoke(this, merged);
-        VideoUpdated?.Invoke(this, merged);
-        PageProbed?.Invoke(this, [merged]);
+        if (videos.Count == 0)
+            return;
+
+        foreach (var video in videos)
+        {
+            VideoDetected?.Invoke(this, video);
+            VideoUpdated?.Invoke(this, video);
+        }
+
+        PageProbed?.Invoke(this, videos);
     }
 
     private void PublishCore(CancellationToken generation, bool forceEmit = false)
@@ -1366,33 +1379,36 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         if (generation.IsCancellationRequested)
             return;
 
-        // Stable id per page so UI replaces in place instead of stacking historical cards.
-        if (page is not null)
+        var recovery = page is null
+            ? null
+            : VideoDownloader.Infrastructure.Download.MediaAddressRenewal.RecoveryAddress(page, owner);
+
+        // Stamp page/item ownership onto variants before split so V/A siblings share one card.
+        if (owner is not null)
         {
-            merged = merged with { VideoId = _session.Id, SessionId = _session.Id };
-            var recovery = VideoDownloader.Infrastructure.Download.MediaAddressRenewal.RecoveryAddress(page, owner);
-            var candidates = merged.Variants;
-            merged = merged with { Variants = candidates.Select(v => v with
+            merged = merged with
             {
-                ContentIdentity = owner,
-                RecoveryPageUrl = recovery,
-                Alternatives = owner is null ? [] : v.Alternatives.Concat(candidates.Where(a => a != v &&
-                    VideoDownloader.Infrastructure.Download.MediaAddressRenewal.Compatible(v, a))
-                    ).DistinctBy(a => string.Join('|', a.Tracks.Select(t => t.SourceUrl.AbsoluteUri)))
-                    .Take(4).Select(a => a with { ContentIdentity = owner, RecoveryPageUrl = recovery, Alternatives = [] }).ToArray()
-            }).ToArray() };
+                Variants = merged.Variants.Select(v => v with
+                {
+                    ContentIdentity = v.ContentIdentity ?? owner,
+                    Tracks = v.Tracks.Select(t => t with
+                    {
+                        ContentIdentity = t.ContentIdentity ?? owner
+                    }).ToArray()
+                }).ToArray()
+            };
         }
 
-        if (!string.IsNullOrWhiteSpace(_title))
-            merged = merged with { DisplayTitle = _title };
+        var built = SplitByMediaGroup(merged, page, owner, recovery);
+        // Keep PreferDisplayTitle / UpdateCaption results — do not flatten back to document.title.
 
-        _lastBuilt = merged;
+        _lastBuilt = built;
 
         // Defer UI emission until discovery completes so the list shows the final fact set once.
         if (!forceEmit && _session.Phase != DetectionPhase.Completed)
             return;
 
-        EmitBuilt(merged);
+        EmitBuilt(built);
     }
 
     private DetectedVideo BuildAggregatedVideo(IReadOnlyList<Probed> all, string? extractedCaption)
@@ -1401,11 +1417,13 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         var sourceName = Path.GetFileName(all.Select(a => a.Track.SourceUrl.AbsolutePath)
             .FirstOrDefault(path => !string.IsNullOrWhiteSpace(path) &&
                                     !IsWeakCaption(Path.GetFileName(path))) ?? "");
-        // Caption only (document.title allowed). Filename fallback is DownloadFileNameBuilder.Build — not here.
-        var title = !IsWeakCaption(_title)
+        // Caption only. Prefer player/JSON caption, then external extract, then document.title.
+        var title = _titleFromCaption && !IsWeakCaption(_title)
             ? _title!
             : !IsWeakCaption(extractedCaption)
                 ? extractedCaption!
+            : !IsWeakCaption(_title)
+                ? _title!
             : IsDirectMediaPage(page) && !IsWeakCaption(sourceName)
                 ? sourceName!
                 : !IsWeakCaption(sourceName) ? sourceName! : "视频";
@@ -1487,7 +1505,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         foreach (var item in videos)
         {
             var bestAudio = audios
-                .Where(audio => CanPair(item, audio))
+                .Where(audio => CanPair(item, audio) && SameMediaGroup(item.Track, audio.Track))
                 .OrderBy(audio => MediaVariantRanking.IsFlvLike(audio.Track) ? 1 : 0)
                 .ThenBy(audio => IsDouyinLiveStream(audio.Track.SourceUrl) ? 1 : 0)
                 .ThenByDescending(audio => IsLikelyVodAudioUrl(audio.Track.SourceUrl) ? 1 : 0)
@@ -1552,14 +1570,15 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 [audio.Track]));
         }
 
-        // Deduplicate: keep best variant per mode + height bucket (avoid ABR history pile-up).
+        // Deduplicate ABR history within the same media group only — never collapse distinct videos.
         variants = variants
             .GroupBy(v =>
             {
                 var audioOnly = v.Tracks.Count > 0 && v.Tracks.All(t => t.Kind == MediaTrackKind.Audio);
+                var group = VariantMediaGroupKey(v);
                 return audioOnly
-                    ? $"a|{v.Container}|{v.SourceUrl.AbsoluteUri}"
-                    : $"v|{v.Height ?? 0}|{v.Container}|{v.VideoCodec}|{v.AudioCodec}|{string.Join(',',v.Tracks.Where(t=>t.Kind==MediaTrackKind.Audio).Select(t=>t.TrackId))}";
+                    ? $"a|{group}|{v.Container}|{v.SourceUrl.AbsoluteUri}"
+                    : $"v|{group}|{v.Height ?? 0}|{v.Container}|{v.VideoCodec}|{v.AudioCodec}|{string.Join(',',v.Tracks.Where(t=>t.Kind==MediaTrackKind.Audio).Select(t=>t.TrackId))}";
             }, StringComparer.OrdinalIgnoreCase)
             .Select(g =>
             {
@@ -1593,6 +1612,181 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             Metadata: string.IsNullOrWhiteSpace(_author)
                 ? null
                 : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["author"] = _author });
+    }
+
+    /// <summary>
+    /// Split one page aggregate into one DetectedVideo per independent media group so the UI can
+    /// select each video with matching video/audio dropdowns.
+    /// </summary>
+    private IReadOnlyList<DetectedVideo> SplitByMediaGroup(
+        DetectedVideo merged,
+        Uri? page,
+        string? owner,
+        Uri? recovery)
+    {
+        var videoVariants = merged.Variants
+            .Where(v => v.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined or MediaTrackKind.Image))
+            .ToArray();
+        var audioOnlyVariants = merged.Variants
+            .Where(v => v.Tracks.Count > 0 && v.Tracks.All(t => t.Kind == MediaTrackKind.Audio))
+            .ToArray();
+
+        // Prefer explicit item ContentIdentity (Douyin V/A siblings). Fall back to URL session so
+        // multi-player pages without per-item ids keep each stream as its own card.
+        var bags = videoVariants
+            .GroupBy(VariantSplitKey, StringComparer.OrdinalIgnoreCase)
+            .Select(g => new MediaGroupBag(g.Key, g.ToList()))
+            .ToList();
+
+        foreach (var audio in audioOnlyVariants)
+        {
+            var home = bags.FirstOrDefault(b => AudioBelongsToGroup(audio, b.Variants))
+                       ?? bags.FirstOrDefault(b => string.Equals(b.Key, VariantSplitKey(audio), StringComparison.OrdinalIgnoreCase));
+            if (home is null)
+            {
+                home = new MediaGroupBag(VariantSplitKey(audio), []);
+                bags.Add(home);
+            }
+
+            home.Variants.Add(audio);
+        }
+
+        if (bags.Count == 0)
+            return [];
+
+        var ordered = bags
+            .OrderByDescending(b => b.Variants.Max(v => v.TotalContentLength ?? v.Bandwidth ?? 0))
+            .ThenByDescending(b => b.Variants.Max(v => v.Height ?? 0))
+            .ToArray();
+
+        var results = new List<DetectedVideo>(ordered.Length);
+        for (var i = 0; i < ordered.Length; i++)
+        {
+            var bag = ordered[i];
+            var groupKey = bag.Key;
+            var groupVariants = bag.Variants.ToArray();
+            var stamped = groupVariants.Select(v => v with
+            {
+                ContentIdentity = owner ?? v.ContentIdentity,
+                RecoveryPageUrl = recovery ?? v.RecoveryPageUrl,
+                // Keep same-group ABR alternatives only — never pull another video's tracks here.
+                Alternatives = v.Alternatives
+                    .Where(a => groupVariants.Any(g =>
+                        string.Equals(
+                            MediaUrlNormalizer.SessionKey(PrimaryMediaTrack(g).SourceUrl),
+                            MediaUrlNormalizer.SessionKey(PrimaryMediaTrack(a).SourceUrl),
+                            StringComparison.OrdinalIgnoreCase)))
+                    .Concat(groupVariants.Where(a => a != v &&
+                        VideoDownloader.Infrastructure.Download.MediaAddressRenewal.Compatible(v, a)))
+                    .DistinctBy(a => string.Join('|', a.Tracks.Select(t => t.SourceUrl.AbsoluteUri)))
+                    .Take(4)
+                    .Select(a => a with
+                    {
+                        ContentIdentity = owner ?? a.ContentIdentity,
+                        RecoveryPageUrl = recovery ?? a.RecoveryPageUrl,
+                        Alternatives = []
+                    })
+                    .ToArray()
+            }).ToArray();
+
+            var pageUri = page ?? merged.PageUrl;
+            var stable = "page:" + pageUri.AbsoluteUri + "|media:" + groupKey;
+            var videoId = new Guid(SHA256.HashData(Encoding.UTF8.GetBytes(stable)).AsSpan(0, 16));
+            var title = ordered.Length > 1
+                ? (IsWeakCaption(merged.DisplayTitle) ? $"视频 {i + 1}" : $"{merged.DisplayTitle} · {i + 1}")
+                : merged.DisplayTitle;
+
+            results.Add(merged with
+            {
+                VideoId = videoId,
+                SessionId = _session.Id,
+                SiteContentId = merged.SiteContentId ?? (ordered.Length > 1 ? $"part:{i + 1}" : null),
+                DisplayTitle = title,
+                Variants = stamped,
+                Family = stamped.Any(v => v.Tracks.Any(t => t.Container == "hls")) ? MediaFamily.Hls
+                    : stamped.Any(v => v.Tracks.Any(t => t.Container == "dash")) ? MediaFamily.Dash
+                    : merged.Family
+            });
+        }
+
+        return results;
+    }
+
+    private sealed class MediaGroupBag(string key, List<MediaVariant> variants)
+    {
+        public string Key { get; } = key;
+        public List<MediaVariant> Variants { get; } = variants;
+    }
+
+    private static bool AudioBelongsToGroup(MediaVariant audio, IReadOnlyList<MediaVariant> groupVariants)
+    {
+        var audioTrack = audio.Tracks[0];
+        var audioId = NormalizeContentId(audioTrack.ContentIdentity);
+        var audioSession = MediaUrlNormalizer.SessionKey(audioTrack.SourceUrl);
+        foreach (var variant in groupVariants)
+        {
+            foreach (var track in variant.Tracks)
+            {
+                var trackId = NormalizeContentId(track.ContentIdentity);
+                if (audioId is not null && trackId is not null &&
+                    string.Equals(audioId, trackId, StringComparison.OrdinalIgnoreCase))
+                    return true;
+                if (string.Equals(audioSession, MediaUrlNormalizer.SessionKey(track.SourceUrl), StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    internal static MediaTrack PrimaryMediaTrack(MediaVariant variant) =>
+        variant.Tracks.FirstOrDefault(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined or MediaTrackKind.Image)
+        ?? variant.Tracks.FirstOrDefault(t => t.Kind == MediaTrackKind.Audio)
+        ?? variant.Tracks[0];
+
+    /// <summary>Stable key for tests / diagnostics: item id when present, else video session URL.</summary>
+    internal static string VariantMediaGroupKey(MediaVariant variant) => VariantSplitKey(variant);
+
+    internal static string VariantSplitKey(MediaVariant variant)
+    {
+        var variantId = NormalizeContentId(variant.ContentIdentity);
+        if (variantId is not null)
+            return "id:" + variantId;
+
+        foreach (var track in variant.Tracks)
+        {
+            var id = NormalizeContentId(track.ContentIdentity);
+            if (id is not null)
+                return "id:" + id;
+        }
+
+        var primary = PrimaryMediaTrack(variant);
+        return "url:" + MediaUrlNormalizer.SessionKey(primary.SourceUrl);
+    }
+
+    internal static string MediaGroupKey(MediaTrack track)
+    {
+        var id = NormalizeContentId(track.ContentIdentity);
+        if (id is not null)
+            return "id:" + id;
+        return "url:" + MediaUrlNormalizer.SessionKey(track.SourceUrl);
+    }
+
+    /// <summary>
+    /// Pairing helper: same content id (Douyin V/A) or same URL session (extract from same Combined).
+    /// </summary>
+    internal static bool SameMediaGroup(MediaTrack left, MediaTrack right)
+    {
+        var leftId = NormalizeContentId(left.ContentIdentity);
+        var rightId = NormalizeContentId(right.ContentIdentity);
+        if (leftId is not null && rightId is not null &&
+            string.Equals(leftId, rightId, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return string.Equals(
+            MediaUrlNormalizer.SessionKey(left.SourceUrl),
+            MediaUrlNormalizer.SessionKey(right.SourceUrl),
+            StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsDirectMediaPage(Uri page)

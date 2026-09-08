@@ -456,6 +456,7 @@ public sealed partial class MainViewModel : ObservableObject
         _loc = loc;
 
         _pipeline.VideoDetected += OnVideoDetected;
+        _pipeline.PageProbed += OnPageProbed;
         _loc.LanguageChanged += OnLanguageChanged;
         RebuildAddressPresets();
     }
@@ -1302,35 +1303,79 @@ public sealed partial class MainViewModel : ObservableObject
             if (video.Variants.Count == 0)
                 return;
 
-            // Drop other cards for the same page (old VideoId / stale publishes).
-            PruneOtherVideosForPage(video.PageUrl, video.VideoId);
+            UpsertDetectedVideo(video, focus: SelectedDetectedVideo is null);
+        }, System.Windows.Threading.DispatcherPriority.Background);
+    }
 
-            if (_videoMap.TryGetValue(video.VideoId, out var existing))
-            {
-                var force = _forceReplaceResults;
-                if (!force && IsEquivalentDetection(video, existing.Video))
-                    return;
-                if (!force && IsWeakerDetection(video, existing.Video))
-                    return;
-
-                existing.Update(video);
-                existing.ReplaceVariants(video);
-                _forceReplaceResults = false;
-                FocusLargestVideoVariant(existing);
-                SetStatusKey(_pipeline.IsCompleted ? "status.probeDone" : "status.probeFound", DetectedVideos.Count);
+    private void OnPageProbed(object? sender, IReadOnlyList<DetectedVideo> videos)
+    {
+        _ = Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            var relevant = videos
+                .Where(v => v.Variants.Count > 0)
+                .Where(v => v.SessionId == Guid.Empty || v.SessionId == _pipeline.SessionId)
+                .Where(IsVideoRelevantToCurrentPage)
+                .ToArray();
+            if (relevant.Length == 0)
                 return;
+
+            var pageKey = BuildPageIdentity(relevant[0].PageUrl);
+            var keepIds = relevant.Select(v => v.VideoId).ToHashSet();
+
+            // Drop stale cards for this page that are no longer in the final probe set.
+            for (var i = DetectedVideos.Count - 1; i >= 0; i--)
+            {
+                var item = DetectedVideos[i];
+                if (!string.Equals(BuildPageIdentity(item.Video.PageUrl), pageKey, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (keepIds.Contains(item.Video.VideoId))
+                    continue;
+
+                DetectedVideos.RemoveAt(i);
+                _videoMap.Remove(item.Video.VideoId);
+                if (ReferenceEquals(SelectedDetectedVideo, item))
+                    SelectedDetectedVideo = null;
             }
 
-            var vm = new DetectedVideoViewModel();
-            vm.BindLocalization(_loc);
-            vm.Update(video);
-            vm.ReplaceVariants(video);
-            _videoMap[video.VideoId] = vm;
-            InsertDetectedVideo(vm);
+            foreach (var video in relevant)
+                UpsertDetectedVideo(video, focus: false);
+
+            if (SelectedDetectedVideo is null && DetectedVideos.Count > 0)
+                FocusLargestVideoVariant(DetectedVideos[0]);
+
             _forceReplaceResults = false;
-            FocusLargestVideoVariant(vm);
             SetStatusKey(_pipeline.IsCompleted ? "status.probeDone" : "status.probeFound", DetectedVideos.Count);
         }, System.Windows.Threading.DispatcherPriority.Background);
+    }
+
+    private void UpsertDetectedVideo(DetectedVideo video, bool focus)
+    {
+        if (_videoMap.TryGetValue(video.VideoId, out var existing))
+        {
+            var force = _forceReplaceResults;
+            if (!force && IsEquivalentDetection(video, existing.Video))
+                return;
+            if (!force && IsWeakerDetection(video, existing.Video))
+                return;
+
+            existing.Update(video);
+            existing.ReplaceVariants(video);
+            RepositionDetectedVideo(existing);
+            if (focus)
+                FocusLargestVideoVariant(existing);
+            SetStatusKey(_pipeline.IsCompleted ? "status.probeDone" : "status.probeFound", DetectedVideos.Count);
+            return;
+        }
+
+        var vm = new DetectedVideoViewModel();
+        vm.BindLocalization(_loc);
+        vm.Update(video);
+        vm.ReplaceVariants(video);
+        _videoMap[video.VideoId] = vm;
+        InsertDetectedVideo(vm);
+        if (focus)
+            FocusLargestVideoVariant(vm);
+        SetStatusKey(_pipeline.IsCompleted ? "status.probeDone" : "status.probeFound", DetectedVideos.Count);
     }
 
     private void FocusLargestVideoVariant(DetectedVideoViewModel vm)
