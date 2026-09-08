@@ -6,6 +6,7 @@ using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Web.WebView2.Core;
 using VideoDownloader.Core.Contracts;
+using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Infrastructure.Detection;
 
@@ -86,23 +87,24 @@ public partial class MainWindow
                     var sampleOk=video is not null && video.Variants.Count>0;
                     if(video is not null)
                     {
-                        var selected=video.Variants.Where(v=>v.Tracks.Any(t=>t.Kind is MediaTrackKind.Combined or MediaTrackKind.Video))
-                            .OrderByDescending(v=>v.Height??0).FirstOrDefault();
-                        var audio=video.Variants.FirstOrDefault(v=>v.Tracks.All(t=>t.Kind==MediaTrackKind.Audio));
-                        sampleOk &= selected is not null && audio is not null;
-                        // Prefer distinct playable bytes for video vs audio; fall back to Combined once.
+                        // Same ranking as MainViewModel.FocusLargestVideoVariant / download pick.
+                        var selected=MediaVariantRanking.SelectPreferredVideo(video.Variants);
+                        var audio=MediaVariantRanking.SelectPreferredAudio(video.Variants);
+                        sampleOk &= selected is not null && (audio is not null || selected.Tracks.Any(t=>t.Kind==MediaTrackKind.Combined));
+                        if(selected is not null && MediaVariantRanking.IsFlvLike(selected))
+                            sampleOk=false;
                         var tracks=selected is not null && audio is not null &&
                                    selected.Tracks.Any(t=>t.Kind==MediaTrackKind.Combined) &&
                                    audio.Tracks.All(t=>selected.Tracks.Any(s=>s.SourceUrl==t.SourceUrl))
                             ? selected.Tracks.Where(t=>t.Kind==MediaTrackKind.Combined).Take(1).ToArray()
                             : (selected?.Tracks??[]).Concat(audio?.Tracks??[]).DistinctBy(t=>t.SourceUrl).ToArray();
+                        var validator=_services!.GetRequiredService<VideoDownloader.Infrastructure.Http.MediaAvailabilityValidator>();
                         foreach(var track in tracks)
                         {
-                            var result=await ReadMediaSampleAsync(track);
+                            var result=await ReadMediaSampleAsync(track,validator);
                             samples.Add($"{track.Kind}: {result.Note}");
-                            // FLV progressive pipes are live-style streams, not fixed-length VOD samples.
-                            if(result.Note.Contains("video/x-flv",StringComparison.OrdinalIgnoreCase) ||
-                               track.SourceUrl.AbsolutePath.Contains(".flv",StringComparison.OrdinalIgnoreCase))
+                            if(MediaVariantRanking.IsFlvLike(track) ||
+                               result.Note.Contains("video/x-flv",StringComparison.OrdinalIgnoreCase))
                                 sampleOk=false;
                             else
                                 sampleOk &= result.Ok;
@@ -232,35 +234,20 @@ public partial class MainWindow
         await File.WriteAllTextAsync(Path.Combine(rootReportDir,"latest.txt"),runId+Environment.NewLine);
     }
 
-    private async Task<(bool Ok,string Note)> ReadMediaSampleAsync(MediaTrack track)
+    private async Task<(bool Ok,string Note)> ReadMediaSampleAsync(
+        MediaTrack track,
+        VideoDownloader.Infrastructure.Http.MediaAvailabilityValidator validator)
     {
         try
         {
             if(track.Container is "hls" or "dash") return await ReadManifestSegmentAsync(track);
-            using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(40));
-            // Acceptance sample follows redirects like a browser GET; production downloaders keep
-            // AllowAutoRedirect=false and renew addresses separately.
-            using var handler=new HttpClientHandler
-            {
-                AllowAutoRedirect=true,
-                MaxAutomaticRedirections=8,
-                UseCookies=false,
-                AutomaticDecompression=System.Net.DecompressionMethods.All
-            };
-            using var client=new HttpClient(handler){Timeout=TimeSpan.FromSeconds(40)};
-            var factory=_services!.GetRequiredService<IRequestMessageFactory>();
+            // Use the same validator stack as production probe/download (manual redirects,
+            // AllowAutoRedirect=false, shared RequestMessageFactory / cookie policy).
             var variant=MediaVariant.FromTracks("sample",null,null,null,track.Container,[track]);
-            using var request=factory.Create(variant,HttpMethod.Get,track.SourceUrl);
-            request.Headers.Range=new RangeHeaderValue(0,65535);
-            using var response=await client.SendAsync(request,HttpCompletionOption.ResponseHeadersRead,timeout.Token);
-            if(!response.IsSuccessStatusCode) return(false,$"HTTP {(int)response.StatusCode}");
-            var mime=response.Content.Headers.ContentType?.MediaType??"";
-            if(mime.Contains("html")||mime.Contains("json")||mime.StartsWith("image/")) return(false,"Non-media response: "+mime);
-            await using var stream=await response.Content.ReadAsStreamAsync(timeout.Token);
-            var buffer=new byte[65536];
-            var count=await stream.ReadAtLeastAsync(buffer,Math.Min(buffer.Length,(int)Math.Min(response.Content.Headers.ContentLength??65536,65536)),false,timeout.Token);
-            return(count>0,$"HTTP {(int)response.StatusCode}; {count} actual media bytes; {mime}");
+            await validator.ValidateAsync(variant, CancellationToken.None);
+            return (true, $"validated via MediaAvailabilityValidator; {track.SourceUrl.Host}");
         }
+        catch(DownloadException ex){return(false,ex.ErrorCode+": "+ex.Message);}
         catch(Exception ex){return(false,ex.GetType().Name+": "+ex.Message);}
     }
 

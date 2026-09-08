@@ -789,7 +789,9 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             if (cookies.Count == 0 || string.IsNullOrWhiteSpace(userAgent))
             {
                 var fresh = _contextProvider.CaptureCurrentContext(pageUrl, variant.SourceUrl);
-                if (cookies.Count == 0 && fresh.Cookies.Count > 0)
+                // T3: never pull live cookies when capture is disabled.
+                if (_options.Browser.CaptureCookies &&
+                    cookies.Count == 0 && fresh.Cookies.Count > 0)
                 {
                     cookies = fresh.Cookies;
                     changed = true;

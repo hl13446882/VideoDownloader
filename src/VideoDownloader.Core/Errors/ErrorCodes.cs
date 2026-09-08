@@ -20,4 +20,7 @@ public static class ErrorCodes
     public const string PermissionDenied = "PERMISSION_DENIED";
     public const string InvalidFormat = "INVALID_FORMAT";
     public const string Unexpected = "UNEXPECTED_ERROR";
+    public const string HumanVerification = "HUMAN_VERIFICATION";
+    public const string VideoDenied = "VIDEO_DENIED";
+    public const string AudioOnly = "AUDIO_ONLY";
 }

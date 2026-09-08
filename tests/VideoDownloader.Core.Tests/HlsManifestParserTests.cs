@@ -52,7 +52,8 @@ public class HlsManifestParserTests
     {
         const string playlist = """
             #EXTM3U
-            #EXT-X-KEY:METHOD=AES-128,URI="https://example.com/key.bin"
+            #EXT-X-MEDIA-SEQUENCE:0
+            #EXT-X-KEY:METHOD=AES-128,URI="https://example.com/key.bin",IV=0x00000000000000000000000000000000
             #EXTINF:6.0,
             seg001.ts
             """;
@@ -63,6 +64,73 @@ public class HlsManifestParserTests
             RequestContext.CreateEmpty());
 
         Assert.False(result.IsDrmProtected);
+        var track = Assert.Single(Assert.Single(result.Variants).Tracks);
+        Assert.Equal(MediaTrackKind.Combined, track.Kind);
+        Assert.NotNull(track.Hls);
+        Assert.True(track.Hls!.HasClearKeyEncryption);
+        Assert.Equal("AES-128", track.Hls.Encryption!.Method);
+        Assert.Equal(new Uri("https://example.com/key.bin"), track.Hls.Encryption.KeyUri);
+        Assert.Equal("00000000000000000000000000000000", track.Hls.Encryption.IvHex);
+        Assert.Equal(new Uri("http://localhost/hls/seg001.ts"), Assert.Single(track.Hls.Segments));
+    }
+
+    [Fact]
+    public void Parse_Aes128RelativeKey_ResolvesAgainstPlaylist()
+    {
+        const string playlist = """
+            #EXTM3U
+            #EXT-X-KEY:METHOD=AES-128,URI="enc.key",IV=0x00000000000000000000000000000000
+            #EXTINF:6.0,
+            seg0.ts
+            """;
+
+        var result = HlsManifestParser.Parse(
+            playlist,
+            new Uri("https://vv.example.com/play/abc/index.m3u8"),
+            RequestContext.CreateEmpty());
+
+        var hls = Assert.Single(Assert.Single(result.Variants).Tracks).Hls;
+        Assert.NotNull(hls);
+        Assert.Equal(new Uri("https://vv.example.com/play/abc/enc.key"), hls!.Encryption!.KeyUri);
+    }
+
+    [Fact]
+    public void Parse_PlainMediaPlaylist_DoesNotAttachHlsMedia()
+    {
+        const string playlist = """
+            #EXTM3U
+            #EXTINF:6.0,
+            seg001.ts
+            #EXT-X-ENDLIST
+            """;
+
+        var result = HlsManifestParser.Parse(
+            playlist,
+            new Uri("http://localhost/hls/media.m3u8"),
+            RequestContext.CreateEmpty());
+
+        var track = Assert.Single(Assert.Single(result.Variants).Tracks);
+        Assert.Equal(MediaTrackKind.Unknown, track.Kind);
+        Assert.Null(track.Hls);
+    }
+
+    [Fact]
+    public void Parse_Widevine_DoesNotAttachClearKeyHlsMedia()
+    {
+        const string playlist = """
+            #EXTM3U
+            #EXT-X-KEY:METHOD=SAMPLE-AES,KEYFORMAT="com.widevine",URI="https://example.com/key"
+            #EXTINF:6.0,
+            seg001.ts
+            """;
+
+        var result = HlsManifestParser.Parse(
+            playlist,
+            new Uri("http://localhost/hls/media.m3u8"),
+            RequestContext.CreateEmpty());
+
+        Assert.True(result.IsDrmProtected);
+        Assert.Null(Assert.Single(Assert.Single(result.Variants).Tracks).Hls);
     }
 }
 

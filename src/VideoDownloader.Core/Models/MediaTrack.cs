@@ -20,4 +20,9 @@ public sealed record MediaTrack(
 {
     public string? ContentIdentity { get; init; }
     public bool IsValidated { get; init; }
+
+    /// <summary>
+    /// Present only for clear-key encrypted HLS media playlists. Null for all other media.
+    /// </summary>
+    public HlsMedia? Hls { get; init; }
 }

@@ -14,4 +14,7 @@ public sealed record DetectedVideo(
     IReadOnlyDictionary<string, string>? Metadata = null)
 {
     public Guid SessionId { get; init; }
+
+    /// <summary>Complete A/V vs audio-only / video-denied partial results (T2).</summary>
+    public MediaAvailabilityKind Availability { get; init; } = MediaAvailabilityKind.Complete;
 }

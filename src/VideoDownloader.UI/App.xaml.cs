@@ -65,20 +65,7 @@ public partial class App : Application
 
         try
         {
-            var settingsStore = new UserSettingsStore();
-            var options = settingsStore.Load(new AppOptions());
-            Directory.CreateDirectory(PathExpander.Expand(options.Browser.UserDataFolder));
-            Directory.CreateDirectory(PathExpander.Expand(options.Download.DefaultSavePath));
-
-            var services = new ServiceCollection();
-            services.AddSingleton(settingsStore);
-            services.AddVideoDownloaderInfrastructure(options);
-            services.AddSingleton<VideoDownloader.UI.Localization.LocalizationService>();
-            services.AddTransient<MainViewModel>();
-            services.AddTransient<SettingsViewModel>();
-            services.AddTransient<MainWindow>();
-
-            _services = services.BuildServiceProvider();
+            _services = AppServiceComposition.Build();
             await _services.InitializeInfrastructureAsync();
 
             var license = _services.GetRequiredService<LicenseService>().Current;
@@ -92,7 +79,7 @@ public partial class App : Application
                     MessageBoxImage.Information);
             }
 
-            var mainWindow = _services.GetRequiredService<MainWindow>();
+            var mainWindow = new MainWindow(_services.GetRequiredService<MainViewModel>());
             MainWindow = mainWindow;
             mainWindow.Show();
             UpdateLicenseTitle(mainWindow, license, loc);

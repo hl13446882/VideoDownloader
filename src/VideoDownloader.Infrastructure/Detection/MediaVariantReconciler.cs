@@ -17,7 +17,11 @@ public static class MediaVariantReconciler
     {
         var all = variants.ToArray();
         var complete = all.Where(HasCompleteAudio).SelectMany(VideoKeys).ToHashSet(StringComparer.Ordinal);
-        return all.Where(v => HasCompleteAudio(v) || !VideoKeys(v).Any(complete.Contains)).ToArray();
+        var pruned = all.Where(v => HasCompleteAudio(v) || !VideoKeys(v).Any(complete.Contains)).ToArray();
+        // Prefer progressive/adaptive VOD over FLV live-style pipes when both exist.
+        if (pruned.Any(v => MediaVariantRanking.HasVideo(v) && !MediaVariantRanking.IsFlvLike(v)))
+            pruned = pruned.Where(v => !MediaVariantRanking.IsFlvLike(v) || !MediaVariantRanking.HasVideo(v)).ToArray();
+        return pruned;
     }
 
     public static bool HasAudioCompletion(DetectedVideo candidate, DetectedVideo current)

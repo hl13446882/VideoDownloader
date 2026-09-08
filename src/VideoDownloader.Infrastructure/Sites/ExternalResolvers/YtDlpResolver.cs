@@ -24,6 +24,8 @@ public sealed class YtDlpResolver : IExternalSiteResolver
 
     public string? LastError { get; private set; }
 
+    public bool LastFailureIsHumanVerification { get; private set; }
+
     public bool IsAvailable
     {
         get
@@ -42,6 +44,7 @@ public sealed class YtDlpResolver : IExternalSiteResolver
     {
         ct.ThrowIfCancellationRequested();
         LastError = null;
+        LastFailureIsHumanVerification = false;
         if (!IsAvailable)
         {
             LastError = "yt-dlp 不可用";
@@ -118,17 +121,31 @@ public sealed class YtDlpResolver : IExternalSiteResolver
                             if (HasCompleteAdaptiveSet(videos))
                             {
                                 LastError = null;
+                                LastFailureIsHumanVerification = false;
                                 return videos;
                             }
                         }
+
+                        // Y1: human verification is definitive for this page context —
+                        // further player_client swaps in the same context are wasted work.
+                        if (LastFailureIsHumanVerification)
+                        {
+                            _logger.LogInformation(
+                                "yt-dlp stopped client polling after human-verification for {SiteId}",
+                                siteId);
+                            goto Done;
+                        }
+
                         if (cookies is not null && !string.IsNullOrWhiteSpace(LastError))
                             authenticatedError ??= LastError;
                     }
                 }
 
+            Done:
                 if (bestResult is not null)
                 {
                     LastError = null;
+                    LastFailureIsHumanVerification = false;
                     return bestResult;
                 }
 
@@ -147,6 +164,7 @@ public sealed class YtDlpResolver : IExternalSiteResolver
         catch (Exception ex)
         {
             LastError = ex.Message;
+            LastFailureIsHumanVerification = IsHumanVerificationError(ex.Message);
             _logger.LogInformation(ex, "yt-dlp resolve failed for {Url}", SanitizedLogger.SanitizeUrl(pageUrl.ToString()));
             return [];
         }
@@ -237,19 +255,14 @@ public sealed class YtDlpResolver : IExternalSiteResolver
         if (process.ExitCode != 0)
         {
             LastError = TrimYtDlpError(error);
-            if (cookieFile is null &&
-                (LastError.Contains("bot", StringComparison.OrdinalIgnoreCase) ||
-                 LastError.Contains("412", StringComparison.OrdinalIgnoreCase) ||
-                 LastError.Contains("Sign in", StringComparison.OrdinalIgnoreCase)))
-            {
-                LastError += "（请先在内置浏览器登录该站点后再点探测）";
-            }
-
+            LastFailureIsHumanVerification = IsHumanVerificationError(LastError);
+            // Do not attribute human verification to missing cookies (Y1 / shared constraint).
             _logger.LogInformation(
-                "yt-dlp resolver returned exit code {ExitCode} for {SiteId}: {Error}",
+                "yt-dlp resolver returned exit code {ExitCode} for {SiteId}: {Error} humanVerification={Human}",
                 process.ExitCode,
                 siteId,
-                SanitizedLogger.SanitizeMessage(error));
+                SanitizedLogger.SanitizeMessage(error),
+                LastFailureIsHumanVerification);
             return [];
         }
 
@@ -672,7 +685,7 @@ public sealed class YtDlpResolver : IExternalSiteResolver
         codec.ValueKind == JsonValueKind.String &&
         (allowNone ? codec.GetString() == "none" : codec.GetString() is not "none" and not null);
 
-    private static bool TryBuildAudioTrack(JsonElement format, RequestContext fallback, out MediaTrack track)
+    private bool TryBuildAudioTrack(JsonElement format, RequestContext fallback, out MediaTrack track)
     {
         var url = GetFormatUrl(format);
         if (string.IsNullOrWhiteSpace(url))
@@ -709,11 +722,11 @@ public sealed class YtDlpResolver : IExternalSiteResolver
     private static long? SumBitrate(long? left, long? right) =>
         left is null && right is null ? null : (left ?? 0) + (right ?? 0);
 
-    private static RequestContext BuildRequestContext(JsonElement format, RequestContext fallback)
+    private RequestContext BuildRequestContext(JsonElement format, RequestContext fallback)
     {
         if (!format.TryGetProperty("http_headers", out var headersElement) ||
             headersElement.ValueKind != JsonValueKind.Object)
-            return fallback;
+            return StripCookiesIfDisabled(fallback);
 
         var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var header in headersElement.EnumerateObject())
@@ -721,6 +734,9 @@ public sealed class YtDlpResolver : IExternalSiteResolver
             if (header.Value.ValueKind == JsonValueKind.String &&
                 !string.IsNullOrWhiteSpace(header.Value.GetString()))
             {
+                // T3: never promote raw Cookie headers from extractor JSON into the typed context.
+                if (header.Name.Equals("Cookie", StringComparison.OrdinalIgnoreCase))
+                    continue;
                 headers[header.Name] = header.Value.GetString()!;
             }
         }
@@ -729,7 +745,7 @@ public sealed class YtDlpResolver : IExternalSiteResolver
         var origin = headers.TryGetValue("Origin", out var o) ? o : fallback.Origin;
         var userAgent = headers.TryGetValue("User-Agent", out var ua) ? ua : fallback.UserAgent;
 
-        return new RequestContext(
+        return StripCookiesIfDisabled(new RequestContext(
             Guid.NewGuid(),
             fallback.Version + 1,
             referer,
@@ -737,7 +753,42 @@ public sealed class YtDlpResolver : IExternalSiteResolver
             userAgent,
             headers,
             fallback.Cookies,
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow));
+    }
+
+    /// <summary>
+    /// When browser cookie capture is disabled, tracks must not carry or send cookies (T3).
+    /// </summary>
+    private RequestContext StripCookiesIfDisabled(RequestContext context)
+    {
+        if (_options.Browser.CaptureCookies && _options.ExternalResolvers.UseBrowserCookies)
+            return context;
+
+        if (context.Cookies.Count == 0 &&
+            !context.Headers.Keys.Any(k => k.Equals("Cookie", StringComparison.OrdinalIgnoreCase)))
+            return context;
+
+        var headers = context.Headers
+            .Where(h => !h.Key.Equals("Cookie", StringComparison.OrdinalIgnoreCase))
+            .ToDictionary(h => h.Key, h => h.Value, StringComparer.OrdinalIgnoreCase);
+        return context with { Cookies = Array.Empty<BrowserCookie>(), Headers = headers };
+    }
+
+    internal static bool IsHumanVerificationError(string? error)
+    {
+        if (string.IsNullOrWhiteSpace(error))
+            return false;
+        return error.Contains("confirm you're not a bot", StringComparison.OrdinalIgnoreCase) ||
+               error.Contains("confirm you are not a bot", StringComparison.OrdinalIgnoreCase) ||
+               error.Contains("not a bot", StringComparison.OrdinalIgnoreCase) ||
+               error.Contains("captcha", StringComparison.OrdinalIgnoreCase) ||
+               error.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase) ||
+               error.Contains("please sign in", StringComparison.OrdinalIgnoreCase) ||
+               error.Contains("HTTP Error 412", StringComparison.OrdinalIgnoreCase) ||
+               (error.Contains("412", StringComparison.OrdinalIgnoreCase) &&
+                error.Contains("Precondition", StringComparison.OrdinalIgnoreCase)) ||
+               error.Contains("bot check", StringComparison.OrdinalIgnoreCase) ||
+               error.Contains("unusual traffic", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ResolveOutputContainer(string? videoContainer, string? audioContainer)

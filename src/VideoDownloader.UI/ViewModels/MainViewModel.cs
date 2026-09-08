@@ -905,8 +905,16 @@ public sealed partial class MainViewModel : ObservableObject
                     }
 
                     var found = false;
-                    await Application.Current.Dispatcher.InvokeAsync(() => found = DetectedVideos.Count > 0);
-                    if (found)
+                    var videoDenied = false;
+                    await Application.Current.Dispatcher.InvokeAsync(() =>
+                    {
+                        found = DetectedVideos.Count > 0;
+                        var availability = SelectedDetectedVideo?.Video.Availability;
+                        videoDenied = availability is MediaAvailabilityKind.AudioOnly
+                            or MediaAvailabilityKind.VideoDenied;
+                    });
+                    // Audio-only / video-denied is not a finished VOD discovery — keep probing DOM/network.
+                    if (found && !videoDenied)
                         break;
 
                     await Task.Delay(TimeSpan.FromSeconds(1.5), token);
@@ -997,6 +1005,15 @@ public sealed partial class MainViewModel : ObservableObject
                 // Run external (yt-dlp) exactly when requested for this pass.
                 if (runExternal)
                     await _pipeline.ProbePageAsync(pageUrl, pageTitle, null, context, token, runExternal: true);
+
+                // Late playAddr / network video often arrives after yt-dlp returns audio-only.
+                // One more DOM ingest before sealing discovery keeps app and verifier aligned.
+                if (runExternal && tab?.IsInitialized == true)
+                {
+                    try { await tab.Host.ProbeCurrentPageAsync(token); }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested) { return; }
+                    catch { /* enrichment only */ }
+                }
             },
             System.Windows.Threading.DispatcherPriority.Background).Task.Unwrap();
         token.ThrowIfCancellationRequested();
@@ -1323,12 +1340,16 @@ public sealed partial class MainViewModel : ObservableObject
         var hasVideo = vm.AllVariants.Any(v => DetectedVideoViewModel.MatchesMode(v.Variant, videoLabel));
         vm.SelectedMode = hasVideo ? videoLabel : audioLabel;
         vm.ApplyModeFilter();
-        vm.SelectedVariant = vm.Variants
-            .OrderByDescending(v => v.Variant.TotalContentLength ?? 0)
-            .ThenByDescending(v => v.Variant.Bandwidth ?? 0)
-            .ThenByDescending(v => v.Variant.Height ?? 0)
-            .FirstOrDefault()
-            ?? vm.Variants.FirstOrDefault();
+        var preferred = VideoDownloader.Infrastructure.Detection.MediaVariantRanking
+            .SelectPreferredVideo(vm.Variants.Select(v => v.Variant))
+            ?? VideoDownloader.Infrastructure.Detection.MediaVariantRanking
+                .SelectPreferredAudio(vm.Variants.Select(v => v.Variant));
+        vm.SelectedVariant = preferred is null
+            ? vm.Variants.FirstOrDefault()
+            : vm.Variants.FirstOrDefault(v => ReferenceEquals(v.Variant, preferred)
+                || v.Variant.SourceUrl == preferred.SourceUrl
+                   && v.Variant.VariantId == preferred.VariantId)
+              ?? vm.Variants.FirstOrDefault();
     }
 
     private void PruneOtherVideosForPage(Uri pageUrl, Guid keepId)

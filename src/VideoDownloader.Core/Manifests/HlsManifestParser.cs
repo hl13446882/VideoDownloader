@@ -12,6 +12,9 @@ public static class HlsManifestParser
     private const string ExtM3u = "#EXTM3U";
     private const string ExtStreamInf = "#EXT-X-STREAM-INF";
     private const string ExtMedia = "#EXT-X-MEDIA";
+    private const string ExtKey = "#EXT-X-KEY:";
+    private const string ExtInf = "#EXTINF:";
+    private const string ExtMediaSequence = "#EXT-X-MEDIA-SEQUENCE:";
 
     public static HlsParseResult Parse(string content, Uri manifestUrl, RequestContext context)
     {
@@ -28,11 +31,121 @@ public static class HlsManifestParser
             return new HlsParseResult(variants, isDrm, true);
         }
 
-        return new HlsParseResult(
-            [MediaVariant.FromTracks("media", null, null, null, "hls",
-                [new MediaTrack("hls-media", MediaTrackKind.Unknown, manifestUrl, null, "hls", null, null, context)])],
-            isDrm,
-            false);
+        return new HlsParseResult([ParseMediaPlaylistVariant(content, manifestUrl, context, isDrm)], isDrm, false);
+    }
+
+    private static MediaVariant ParseMediaPlaylistVariant(
+        string content,
+        Uri manifestUrl,
+        RequestContext context,
+        bool isDrm)
+    {
+        // Encryption metadata is only materialized for clear-key AES and never for license DRM.
+        var hls = TryParseClearKeyMedia(content, manifestUrl, context, isDrm);
+        var kind = hls is not null ? MediaTrackKind.Combined : MediaTrackKind.Unknown;
+        var track = new MediaTrack(
+            "hls-media",
+            kind,
+            manifestUrl,
+            null,
+            "hls",
+            null,
+            null,
+            context)
+        {
+            Hls = hls,
+            IsValidated = hls is not null
+        };
+        return MediaVariant.FromTracks("media", null, null, null, "hls", [track]);
+    }
+
+    /// <summary>
+    /// Builds <see cref="HlsMedia"/> only when the playlist uses clear-key AES.
+    /// Plain / DRM playlists return null so other download paths stay unchanged.
+    /// </summary>
+    internal static HlsMedia? TryParseClearKeyMedia(
+        string content,
+        Uri manifestUrl,
+        RequestContext context,
+        bool isDrm)
+    {
+        if (isDrm)
+            return null;
+
+        HlsEncryption? encryption = null;
+        var segments = new List<Uri>();
+        long mediaSequence = 0;
+        var expectSegment = false;
+
+        foreach (var raw in content.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0)
+                continue;
+
+            if (line.StartsWith(ExtMediaSequence, StringComparison.OrdinalIgnoreCase))
+            {
+                long.TryParse(line[ExtMediaSequence.Length..].Trim(), out mediaSequence);
+                continue;
+            }
+
+            if (line.StartsWith(ExtKey, StringComparison.OrdinalIgnoreCase))
+            {
+                // Prefer the last clear-key line (HLS allows key rotation).
+                var parsed = TryParseClearKeyLine(line, manifestUrl);
+                if (parsed is not null)
+                    encryption = parsed;
+                continue;
+            }
+
+            if (line.StartsWith(ExtInf, StringComparison.OrdinalIgnoreCase))
+            {
+                expectSegment = true;
+                continue;
+            }
+
+            if (line.StartsWith('#'))
+            {
+                expectSegment = false;
+                continue;
+            }
+
+            if (!expectSegment)
+                continue;
+
+            segments.Add(new Uri(ManifestParserUtil.CombineUrl(manifestUrl.ToString(), line)));
+            expectSegment = false;
+        }
+
+        if (encryption is not { KeyUri: not null } enc ||
+            !HlsMedia.IsClearKeyMethod(enc.Method) ||
+            segments.Count == 0)
+            return null;
+
+        return new HlsMedia(manifestUrl, segments, enc, mediaSequence, context);
+    }
+
+    private static HlsEncryption? TryParseClearKeyLine(string keyLine, Uri playlistUrl)
+    {
+        if (DrmAnalyzer.IsDrmKeyLine(keyLine))
+            return null;
+
+        var method = ManifestParserUtil.GetAttribute(keyLine, "METHOD");
+        if (!HlsMedia.IsClearKeyMethod(method))
+            return null;
+
+        var uriText = ManifestParserUtil.GetAttribute(keyLine, "URI");
+        if (string.IsNullOrWhiteSpace(uriText))
+            return null;
+
+        // Strip optional quotes left by unquoted/odd playlists.
+        uriText = uriText.Trim().Trim('"');
+        var keyUri = new Uri(ManifestParserUtil.CombineUrl(playlistUrl.ToString(), uriText));
+        var iv = ManifestParserUtil.GetAttribute(keyLine, "IV")?.Trim();
+        if (iv is { Length: > 2 } && iv.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+            iv = iv[2..];
+
+        return new HlsEncryption(method!, keyUri, iv);
     }
 
     private static List<MediaVariant> ParseMasterPlaylist(

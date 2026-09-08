@@ -27,6 +27,8 @@ public interface IExternalSiteResolver
     bool IsAvailable { get; }
     bool SupportsSite(string siteId);
     string? LastError { get; }
+    /// <summary>True when the last failure is human/bot verification (not a generic miss).</summary>
+    bool LastFailureIsHumanVerification { get; }
     Task<IReadOnlyList<DetectedVideo>> ResolveAsync(
         Uri pageUrl,
         RequestContext context,

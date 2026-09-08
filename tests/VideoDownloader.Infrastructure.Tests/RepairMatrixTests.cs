@@ -10,6 +10,7 @@ using VideoDownloader.Infrastructure.Detection;
 using VideoDownloader.Infrastructure.Download;
 using VideoDownloader.Infrastructure.Http;
 using VideoDownloader.Infrastructure.Persistence;
+using VideoDownloader.Infrastructure.Sites.ExternalResolvers;
 
 namespace VideoDownloader.Infrastructure.Tests;
 
@@ -145,6 +146,187 @@ public class RepairMatrixTests
         Assert.Equal("typed", Assert.Single(request.Headers.GetValues("User-Agent")));
         Assert.Equal("https://origin.test/", request.Headers.Referrer!.AbsoluteUri);
         Assert.False(request.Headers.Contains("Cookie"));
+    }
+
+    [Fact]
+    public void Y1_HumanVerificationError_IsClassified()
+    {
+        Assert.True(YtDlpResolver.IsHumanVerificationError("ERROR: Sign in to confirm you're not a bot"));
+        Assert.True(YtDlpResolver.IsHumanVerificationError("HTTP Error 412: Precondition Failed"));
+        Assert.False(YtDlpResolver.IsHumanVerificationError("ERROR: Unable to extract video"));
+        Assert.False(YtDlpResolver.IsHumanVerificationError(null));
+    }
+
+    [Fact]
+    public async Task Y1_HumanVerification_StopsClientPollingAndSurfacesReason()
+    {
+        var calls = 0;
+        var resolver = Substitute.For<IExternalSiteResolver>();
+        resolver.IsAvailable.Returns(true);
+        resolver.LastFailureIsHumanVerification.Returns(true);
+        resolver.LastError.Returns("Sign in to confirm you're not a bot");
+        resolver.ResolveAsync(Arg.Any<Uri>(), Arg.Any<RequestContext>(), Arg.Any<CancellationToken>())
+            .Returns(_ =>
+            {
+                calls++;
+                return Task.FromResult<IReadOnlyList<DetectedVideo>>([]);
+            });
+        var pipeline = new UnifiedMediaPipeline(new RequestMessageFactory(), [resolver],
+            Microsoft.Extensions.Options.Options.Create(new VideoDownloader.Infrastructure.Configuration.AppOptions()));
+        await pipeline.ProbePageAsync(new("https://www.youtube.com/watch?v=abc12345678"), null, null, RequestContext.CreateEmpty(), default, true);
+        await pipeline.CompleteDiscoveryAsync(default);
+        Assert.Equal(1, calls);
+        Assert.Contains(ErrorCodes.HumanVerification, pipeline.LastExternalError);
+        Assert.Contains("not a bot", pipeline.LastExternalError, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(pipeline.LastProbeDecisions, d => d.Reason == ErrorCodes.HumanVerification);
+    }
+
+    [Theory]
+    [InlineData("https://www.youtube.com/", null, false)]
+    [InlineData("https://www.youtube.com/watch?v=abc12345678", null, true)]
+    [InlineData("https://www.tiktok.com/foryou", null, false)]
+    [InlineData("https://www.tiktok.com/foryou", "content:7123456789012345678", true)]
+    [InlineData("https://www.tiktok.com/@u/video/7123456789012345678", null, true)]
+    public void Y3_ExternalResolve_OnlyForConcreteVideo(string page, string? identity, bool expected) =>
+        Assert.Equal(expected, UnifiedMediaPipeline.ShouldRunExternalResolve(new(page), identity));
+
+    [Fact]
+    public async Task T1_PreferredVideo403_UsesAlternateAndKeepsAudio()
+    {
+        var clients = Substitute.For<IHttpClientFactory>();
+        var handler = new Handler(r =>
+        {
+            var path = r.RequestUri!.AbsolutePath;
+            if (path.Contains("primary"))
+                return new(HttpStatusCode.Forbidden) { Content = new ByteArrayContent([1]) };
+            return new(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent([0, 0, 0, 16, 102, 116, 121, 112, 105, 115, 111, 109])
+            };
+        });
+        clients.CreateClient("media-primary").Returns(_ => new HttpClient(handler, false));
+        var factory = new RequestMessageFactory();
+        var validator = new MediaAvailabilityValidator(clients, factory, NullLogger<MediaAvailabilityValidator>.Instance);
+        var page = new Uri("https://www.tiktok.com/@creator/video/100");
+        var empty = RequestContext.CreateEmpty();
+        var primary = MediaVariant.FromTracks("720", null, 720, null, "mp4",
+            [new MediaTrack("v", MediaTrackKind.Video, new("https://cdn.test/primary.mp4"), "h264", "mp4", 1, 2_000_000, empty)]);
+        var backup = MediaVariant.FromTracks("720b", null, 720, null, "mp4",
+            [new MediaTrack("v", MediaTrackKind.Video, new("https://cdn.test/backup.mp4"), "h264", "mp4", 1, 2_000_000, empty)]);
+        var audio = MediaVariant.FromTracks("audio", null, null, null, "mp4",
+            [new MediaTrack("a", MediaTrackKind.Audio, new("https://cdn.test/audio.m4a"), "aac", "mp4", 1, 200_000, empty)]);
+        var resolver = Substitute.For<IExternalSiteResolver>();
+        resolver.IsAvailable.Returns(true);
+        resolver.LastFailureIsHumanVerification.Returns(false);
+        resolver.ResolveAsync(Arg.Any<Uri>(), Arg.Any<RequestContext>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult<IReadOnlyList<DetectedVideo>>([
+                new(Guid.NewGuid(), "tiktok", "100", "caption", page, MediaFamily.DirectMp4,
+                    [primary with { ContentIdentity = "id:100" }, backup with { ContentIdentity = "id:100" }, audio with { ContentIdentity = "id:100" }], false)
+            ]));
+        var pipeline = new UnifiedMediaPipeline(factory, [resolver],
+            Microsoft.Extensions.Options.Options.Create(new VideoDownloader.Infrastructure.Configuration.AppOptions()), availability: validator);
+        DetectedVideo? found = null;
+        pipeline.VideoDetected += (_, v) => found = v;
+        await pipeline.ProbePageAsync(page, null, "{\"caption\":\"caption\",\"identity\":\"content:100\"}", empty, default, true);
+        await pipeline.CompleteDiscoveryAsync(default);
+        Assert.NotNull(found);
+        Assert.Contains(found!.Variants, v => v.Tracks.Any(t => t.SourceUrl.AbsolutePath.Contains("backup")));
+        Assert.Contains(found.Variants, v => v.Tracks.Any(t => t.Kind == MediaTrackKind.Audio));
+        Assert.DoesNotContain(found.Variants.SelectMany(v => v.Tracks), t => t.SourceUrl.AbsolutePath.Contains("primary"));
+        Assert.Equal(MediaAvailabilityKind.Complete, found.Availability);
+        Assert.Contains(pipeline.LastProbeDecisions, d => d.Outcome == "accepted" && d.Reason == "alternate_ok");
+    }
+
+    [Fact]
+    public async Task T2_VideoAllDenied_AudioOnlyIsPartialSuccess()
+    {
+        var clients = Substitute.For<IHttpClientFactory>();
+        var handler = new Handler(r =>
+        {
+            if (r.RequestUri!.AbsolutePath.Contains("video"))
+                return new(HttpStatusCode.Forbidden) { Content = new ByteArrayContent([1]) };
+            return new(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent([0, 0, 0, 16, 102, 116, 121, 112, 105, 115, 111, 109])
+            };
+        });
+        clients.CreateClient("media-primary").Returns(_ => new HttpClient(handler, false));
+        var factory = new RequestMessageFactory();
+        var validator = new MediaAvailabilityValidator(clients, factory, NullLogger<MediaAvailabilityValidator>.Instance);
+        var page = new Uri("https://www.tiktok.com/@creator/video/100");
+        var empty = RequestContext.CreateEmpty();
+        var video = MediaVariant.FromTracks("720", null, 720, null, "mp4",
+            [new MediaTrack("v", MediaTrackKind.Video, new("https://cdn.test/video.mp4"), "h264", "mp4", 1, 2_000_000, empty)]) with { ContentIdentity = "id:100" };
+        var audio = MediaVariant.FromTracks("audio", null, null, null, "mp4",
+            [new MediaTrack("a", MediaTrackKind.Audio, new("https://cdn.test/audio.m4a"), "aac", "mp4", 1, 200_000, empty)]) with { ContentIdentity = "id:100" };
+        var resolver = Substitute.For<IExternalSiteResolver>();
+        resolver.IsAvailable.Returns(true);
+        resolver.LastFailureIsHumanVerification.Returns(false);
+        resolver.ResolveAsync(Arg.Any<Uri>(), Arg.Any<RequestContext>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult<IReadOnlyList<DetectedVideo>>([
+                new(Guid.NewGuid(), "tiktok", "100", "caption", page, MediaFamily.DirectMp4, [video, audio], false)
+            ]));
+        var pipeline = new UnifiedMediaPipeline(factory, [resolver],
+            Microsoft.Extensions.Options.Options.Create(new VideoDownloader.Infrastructure.Configuration.AppOptions()), availability: validator);
+        DetectedVideo? found = null;
+        pipeline.VideoDetected += (_, v) => found = v;
+        await pipeline.ProbePageAsync(page, null, "{\"caption\":\"caption\",\"identity\":\"content:100\"}", empty, default, true);
+        await pipeline.CompleteDiscoveryAsync(default);
+        Assert.NotNull(found);
+        Assert.Equal(MediaAvailabilityKind.VideoDenied, found!.Availability);
+        Assert.All(found.Variants, v => Assert.All(v.Tracks, t => Assert.Equal(MediaTrackKind.Audio, t.Kind)));
+        Assert.Contains(ErrorCodes.AudioOnly, pipeline.LastExternalError);
+        Assert.Contains(ErrorCodes.Http403, found.Metadata!["videoFailure"]);
+        Assert.DoesNotContain(pipeline.LastProbeDecisions, d => d.Outcome == "accepted" && d.MediaKind is "video" or "av");
+        Assert.Contains(pipeline.LastProbeDecisions, d => d.MediaKind == "audio_only" && d.Reason == nameof(MediaAvailabilityKind.VideoDenied));
+    }
+
+    [Fact]
+    public async Task C1_RecoveryAfterClear_DoesNotPolluteNewSession()
+    {
+        var gate = new TaskCompletionSource();
+        var release = new TaskCompletionSource();
+        var clients = Substitute.For<IHttpClientFactory>();
+        clients.CreateClient("media-primary").Returns(_ => new HttpClient(new Handler(_ =>
+        {
+            gate.TrySetResult();
+            release.Task.Wait(TimeSpan.FromSeconds(5));
+            return new(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent([0, 0, 0, 16, 102, 116, 121, 112, 105, 115, 111, 109])
+            };
+        }), false));
+        var pageA = new Uri("https://www.tiktok.com/@creator/video/100");
+        var pageB = new Uri("https://www.tiktok.com/@creator/video/200");
+        var empty = RequestContext.CreateEmpty();
+        var resolver = Substitute.For<IExternalSiteResolver>();
+        resolver.IsAvailable.Returns(true);
+        resolver.LastFailureIsHumanVerification.Returns(false);
+        resolver.ResolveAsync(Arg.Any<Uri>(), Arg.Any<RequestContext>(), Arg.Any<CancellationToken>())
+            .Returns(ci =>
+            {
+                var page = (Uri)ci[0];
+                var id = page.AbsolutePath.Contains("100") ? "100" : "200";
+                return Task.FromResult<IReadOnlyList<DetectedVideo>>([
+                    new(Guid.NewGuid(), "tiktok", id, "caption-" + id, page, MediaFamily.DirectMp4,
+                        [Variant($"https://cdn.test/{id}.mp4") with { ContentIdentity = "id:" + id }], false)
+                ]);
+            });
+        var pipeline = new UnifiedMediaPipeline(new RequestMessageFactory(), [resolver],
+            Microsoft.Extensions.Options.Options.Create(new VideoDownloader.Infrastructure.Configuration.AppOptions()),
+            availability: new MediaAvailabilityValidator(clients, new RequestMessageFactory(), NullLogger<MediaAvailabilityValidator>.Instance));
+        DetectedVideo? found = null;
+        pipeline.VideoDetected += (_, v) => found = v;
+        var probeA = pipeline.ProbePageAsync(pageA, null, "{\"identity\":\"content:100\"}", empty, default, true);
+        await gate.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        pipeline.Clear();
+        release.TrySetResult();
+        await probeA;
+        await pipeline.ProbePageAsync(pageB, null, "{\"identity\":\"content:200\",\"caption\":\"B\"}", empty, default, true);
+        await pipeline.CompleteDiscoveryAsync(default);
+        Assert.NotNull(found);
+        Assert.Equal("id:200", found!.Variants[0].ContentIdentity);
+        Assert.DoesNotContain("100", found.Variants[0].SourceUrl.AbsoluteUri);
     }
 
     private sealed class Handler(Func<HttpRequestMessage,HttpResponseMessage> respond) : HttpMessageHandler

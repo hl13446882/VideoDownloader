@@ -9,8 +9,10 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Detection;
+using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Infrastructure.Configuration;
+using VideoDownloader.Infrastructure.Download;
 
 namespace VideoDownloader.Infrastructure.Detection;
 
@@ -25,6 +27,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
     private Dictionary<string, string> _owners = new(StringComparer.Ordinal);
     private ConcurrentDictionary<string, string> _validationErrors = new(StringComparer.Ordinal);
     public string? LastValidationError => _validationErrors.IsEmpty ? null : string.Join("; ", _validationErrors.Values.Distinct());
+    private readonly ConcurrentBag<ProbeCandidateDecision> _probeDecisions = new();
+    public IReadOnlyList<ProbeCandidateDecision> LastProbeDecisions => _probeDecisions.ToArray();
     private readonly object _gate = new();
     internal Func<Uri, Uri, RequestContext, CancellationToken, Task<Probed?>>? InspectOverride { get; set; }
     private ConcurrentDictionary<string, byte> _pending = new();
@@ -159,6 +163,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         _owners = new(StringComparer.Ordinal);
         _validationErrors = new(StringComparer.Ordinal);
         _externalVideos = new(StringComparer.OrdinalIgnoreCase);
+        while (_probeDecisions.TryTake(out _)) { }
         _page = null;
         _title = null;
         _author = null;
@@ -293,12 +298,36 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         Publish(_generation.Token);
         if (runExternal)
         {
-            // Feed roots are unsupported by yt-dlp; prefer a stable content URL when the
-            // current player identity already exposed a concrete id.
-            var resolveUrl = ResolveExternalPageUrl(pageUrl, _observedIdentity);
-            await TryExternalResolveAsync(pageUrl, context, ct, resolveUrl);
+            // Y3: only start external resolve for a concrete video identity or stable watch URL.
+            if (!ShouldRunExternalResolve(pageUrl, _observedIdentity))
+            {
+                RecordDecision(new("external", "page", MediaOwnership.ForPage(pageUrl, _observedIdentity),
+                    "skipped", "home_or_feed_without_concrete_video", pageUrl.Host));
+                _logger.LogInformation("Skipped external resolve on non-concrete page {Host}{Path}", pageUrl.Host, pageUrl.AbsolutePath);
+            }
+            else
+            {
+                var resolveUrl = ResolveExternalPageUrl(pageUrl, _observedIdentity);
+                await TryExternalResolveAsync(pageUrl, context, ct, resolveUrl);
+            }
         }
     }
+
+    /// <summary>Y3 — homepage/feed without concrete identity must not invoke video extractors.</summary>
+    internal static bool ShouldRunExternalResolve(Uri pageUrl, string? observedIdentity)
+    {
+        if (MediaAddressRenewal.HasStableContentAddress(pageUrl))
+            return true;
+
+        if (!string.IsNullOrWhiteSpace(observedIdentity) &&
+            System.Text.RegularExpressions.Regex.IsMatch(
+                observedIdentity, @"content:(\d{10,}|BV[\w]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return true;
+
+        return false;
+    }
+
+    private void RecordDecision(ProbeCandidateDecision decision) => _probeDecisions.Add(decision);
 
     private static Uri ResolveExternalPageUrl(Uri pageUrl, string? observedIdentity)
     {
@@ -669,11 +698,13 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         if (!_options.ExternalResolvers.Enabled)
         {
             LastExternalError = "外置解析已关闭";
+            RecordDecision(new("external", "page", null, "skipped", "external_disabled", pageUrl.Host));
             return;
         }
 
         var target = resolveUrl ?? pageUrl;
         var generation = _generation.Token;
+        var sessionId = SessionId;
         var results = _externalVideos;
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(generation, ct);
         var token = cancellation.Token;
@@ -681,65 +712,86 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         foreach (var resolver in _externals.Where(r => r.IsAvailable))
         {
             anyAvailable = true;
-            if (generation.IsCancellationRequested)
+            if (generation.IsCancellationRequested || sessionId != SessionId)
                 return;
 
             try
             {
                 var videos = await resolver.ResolveAsync(target, context, token);
+                if (resolver.LastFailureIsHumanVerification)
+                {
+                    lock (_gate)
+                    {
+                        if (generation.IsCancellationRequested || sessionId != SessionId || _page is null || !SamePage(pageUrl, _page))
+                            return;
+                        LastExternalError = $"{ErrorCodes.HumanVerification}: {resolver.LastError}";
+                        RecordDecision(new("external", "page", MediaOwnership.ForPage(pageUrl, _observedIdentity),
+                            "rejected", ErrorCodes.HumanVerification, target.Host, resolver.LastError));
+                    }
+                    return;
+                }
+
                 if (_availability is not null)
                 {
-                    using var sampleBudget = CancellationTokenSource.CreateLinkedTokenSource(token);
-                    sampleBudget.CancelAfter(TimeSpan.FromSeconds(60));
-                    var sampleResults = new Dictionary<(Uri, Guid, int), bool>();
                     var checkedVideos = new List<DetectedVideo>();
+                    string? retainedVideoFailure = null;
                     foreach (var video in videos)
                     {
-                        var usable = new List<MediaVariant>();
-                        foreach (var variant in video.Variants)
+                        if (generation.IsCancellationRequested || sessionId != SessionId)
+                            return;
+                        var owner = MediaOwnership.ForPage(pageUrl, _observedIdentity);
+                        if (owner?.StartsWith("id:", StringComparison.Ordinal) == true &&
+                            !string.IsNullOrWhiteSpace(video.SiteContentId) && owner != "id:" + video.SiteContentId)
                         {
-                            // Manifests retain their existing resolver/segment validation path.
-                            if (variant.Tracks.Any(t => t.Container is "hls" or "dash"))
-                            { usable.Add(variant); continue; }
-                            var valid = true;
-                            foreach (var track in variant.Tracks)
-                            {
-                                var key = (track.SourceUrl, track.RequestContext.ContextId, track.RequestContext.Version);
-                                if (!sampleResults.TryGetValue(key, out var accepted))
-                                {
-                                    if (sampleBudget.IsCancellationRequested) { valid = false; break; }
-                                    try
-                                    {
-                                        await _availability.ValidateAsync(variant with { Tracks = [track] }, sampleBudget.Token);
-                                        accepted = true;
-                                    }
-                                    catch (VideoDownloader.Core.Errors.DownloadException ex)
-                                    { _logger.LogInformation("External media rejected host={Host} code={Code}", track.SourceUrl.Host, ex.ErrorCode); }
-                                    catch (HttpRequestException)
-                                    { _logger.LogInformation("External media rejected host={Host} code=NETWORK", track.SourceUrl.Host); }
-                                    catch (OperationCanceledException) when (!token.IsCancellationRequested) { }
-                                    sampleResults[key] = accepted;
-                                }
-                                valid &= accepted;
-                            }
-                            if (valid) usable.Add(variant);
+                            RecordDecision(new("external", "video", owner, "rejected", "ownership_mismatch", target.Host, video.SiteContentId));
+                            continue;
                         }
-                        _logger.LogInformation("External sample validation host={Host} candidates={Candidates} usable={Usable}", target.Host, video.Variants.Count, usable.Count);
-                        checkedVideos.Add(video with { Variants = usable });
+
+                        bool StillCurrent() =>
+                            !generation.IsCancellationRequested && sessionId == SessionId &&
+                            _page is not null && SamePage(pageUrl, _page);
+
+                        var (validated, videoFailure) = await ProbeSampleGate.ValidateAndRecoverAsync(
+                            video,
+                            pageUrl,
+                            owner ?? (video.SiteContentId is null ? null : "id:" + video.SiteContentId),
+                            context,
+                            resolver,
+                            _availability,
+                            StillCurrent,
+                            _logger,
+                            RecordDecision,
+                            token);
+                        if (videoFailure is not null)
+                            retainedVideoFailure ??= videoFailure;
+                        if (validated is not null)
+                            checkedVideos.Add(validated);
                     }
+
                     videos = checkedVideos;
+                    if (videos.Count == 0 && retainedVideoFailure is not null)
+                        LastExternalError = retainedVideoFailure == ErrorCodes.Http403
+                            ? $"{ErrorCodes.VideoDenied}: {retainedVideoFailure}"
+                            : retainedVideoFailure;
                 }
+
                 lock (_gate)
                 {
                 token.ThrowIfCancellationRequested();
-                // Bind to the browser document page, not the rewritten content permalink.
-                if (_page is null || !SamePage(pageUrl, _page))
+                // C1: bind to the browser document page and original session only.
+                if (sessionId != SessionId || _page is null || !SamePage(pageUrl, _page))
                     return;
-                if (!string.IsNullOrWhiteSpace(resolver.LastError))
+                if (!string.IsNullOrWhiteSpace(resolver.LastError) && LastExternalError is null)
                     LastExternalError = resolver.LastError;
 
                 if (videos.Count == 0)
+                {
+                    if (LastExternalError is null)
+                        LastExternalError = "外置解析未返回可用媒体";
+                    RecordDecision(new("external", "page", MediaOwnership.ForPage(pageUrl, _observedIdentity),
+                        "rejected", "no_usable_variants", target.Host, LastExternalError));
                     continue;
+                }
 
                 var acceptedVideo = false;
                 foreach (var video in videos)
@@ -747,26 +799,64 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                     var owner = MediaOwnership.ForPage(pageUrl, _observedIdentity);
                     if (owner?.StartsWith("id:", StringComparison.Ordinal) == true &&
                         !string.IsNullOrWhiteSpace(video.SiteContentId) && owner != "id:" + video.SiteContentId)
+                    {
+                        RecordDecision(new("external", "video", owner, "rejected", "ownership_mismatch", target.Host, video.SiteContentId));
                         continue;
+                    }
+
                     var filtered = MediaResourceSizeFilter.FilterForDisplay(video);
                     if (filtered.Variants.Count == 0)
+                    {
+                        RecordDecision(new("external", "video", owner, "rejected", "size_filter", target.Host));
                         continue;
+                    }
 
-                    results[pageUrl.AbsoluteUri] = filtered with { PageUrl = pageUrl };
+                    // Stamp recovery identity on every kept variant.
+                    var stamped = filtered with
+                    {
+                        PageUrl = pageUrl,
+                        Variants = filtered.Variants.Select(v => v with
+                        {
+                            ContentIdentity = v.ContentIdentity ?? owner ??
+                                              (filtered.SiteContentId is null ? null : "id:" + filtered.SiteContentId),
+                            RecoveryPageUrl = v.RecoveryPageUrl ??
+                                              MediaAddressRenewal.RecoveryAddress(pageUrl, owner) ??
+                                              (MediaAddressRenewal.HasStableContentAddress(pageUrl) ? pageUrl : null)
+                        }).ToArray()
+                    };
+                    results[pageUrl.AbsoluteUri] = stamped;
                     acceptedVideo = true;
+                    var decisionKind = stamped.Availability is MediaAvailabilityKind.AudioOnly or MediaAvailabilityKind.VideoDenied
+                        ? "audio_only"
+                        : "av";
+                    RecordDecision(new("external", decisionKind, owner, "accepted",
+                        stamped.Availability.ToString(), target.Host,
+                        $"variants={stamped.Variants.Count}"));
                 }
 
                 if (!acceptedVideo)
                 {
-                    LastExternalError = "外置解析候选未通过可下载性或视频归属校验";
+                    LastExternalError ??= "外置解析候选未通过可下载性或视频归属校验";
                     continue;
                 }
-                LastExternalError = null;
+
+                // T2: partial audio-only success must retain the video failure reason.
+                if (results.TryGetValue(pageUrl.AbsoluteUri, out var kept) &&
+                    kept.Availability is MediaAvailabilityKind.AudioOnly or MediaAvailabilityKind.VideoDenied)
+                {
+                    var fail = kept.Metadata?.GetValueOrDefault("videoFailure") ?? ErrorCodes.VideoDenied;
+                    LastExternalError = $"{ErrorCodes.AudioOnly}: {fail}";
+                }
+                else
+                {
+                    LastExternalError = null;
+                }
+
                 Publish(generation);
                 return;
                 }
             }
-            catch (OperationCanceledException) when (generation.IsCancellationRequested)
+            catch (OperationCanceledException) when (generation.IsCancellationRequested || sessionId != SessionId)
             {
                 return;
             }
@@ -778,10 +868,11 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             {
                 lock (_gate)
                 {
-                if (generation.IsCancellationRequested || _page is null || !SamePage(pageUrl, _page))
+                if (generation.IsCancellationRequested || sessionId != SessionId || _page is null || !SamePage(pageUrl, _page))
                     return;
                 ct.ThrowIfCancellationRequested();
                 LastExternalError = ex.Message;
+                RecordDecision(new("external", "page", null, "rejected", "exception", pageUrl.Host, ex.GetType().Name));
                 }
             }
         }
@@ -1044,9 +1135,52 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
                 .ToArray(),
             ProbeSource = ProbeSource.GenericFallback,
-            StatusHint = "已合并通用探测与外置解析"
+            StatusHint = PreferPartialHint(local.StatusHint, external.StatusHint, map.Values),
+            Availability = ComputeAvailability(map.Values, local.Availability, external.Availability),
+            Metadata = MergeMetadata(local.Metadata, external.Metadata)
         };
         return MediaResourceSizeFilter.FilterForDisplay(merged);
+    }
+
+    private static string? PreferPartialHint(string? local, string? external, IEnumerable<MediaVariant> variants)
+    {
+        if (!variants.Any(v => v.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)))
+            return external ?? local;
+        return "已合并通用探测与外置解析";
+    }
+
+    private static MediaAvailabilityKind ComputeAvailability(
+        IEnumerable<MediaVariant> variants,
+        MediaAvailabilityKind local,
+        MediaAvailabilityKind external)
+    {
+        var list = variants.ToArray();
+        var hasVideo = list.Any(v => v.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined));
+        var hasAudio = list.Any(v => v.Tracks.Any(t => t.Kind is MediaTrackKind.Audio or MediaTrackKind.Combined));
+        if (hasVideo)
+            return MediaAvailabilityKind.Complete;
+        if (hasAudio)
+        {
+            if (local is MediaAvailabilityKind.VideoDenied || external is MediaAvailabilityKind.VideoDenied)
+                return MediaAvailabilityKind.VideoDenied;
+            if (local is MediaAvailabilityKind.AudioOnly || external is MediaAvailabilityKind.AudioOnly)
+                return MediaAvailabilityKind.AudioOnly;
+            return MediaAvailabilityKind.AudioOnly;
+        }
+
+        return MediaAvailabilityKind.Unavailable;
+    }
+
+    private static IReadOnlyDictionary<string, string>? MergeMetadata(
+        IReadOnlyDictionary<string, string>? local,
+        IReadOnlyDictionary<string, string>? external)
+    {
+        if (local is null) return external;
+        if (external is null) return local;
+        var map = new Dictionary<string, string>(local, StringComparer.Ordinal);
+        foreach (var (k, v) in external)
+            map[k] = v;
+        return map;
     }
 
     private static string PreferDisplayTitle(string local, string external)
@@ -1163,7 +1297,14 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                     ? await inspect(track.SourceUrl, page, context, ct)
                     : await InspectAsync(track.SourceUrl, page, context, ct, resolveManifest: false);
                 if (inspected is not null)
-                    tracks.Add(track with { Kind = inspected.Track.Kind, Codec = inspected.Track.Codec, IsValidated = true });
+                    tracks.Add(track with
+                    {
+                        Kind = inspected.Track.Kind,
+                        Codec = inspected.Track.Codec,
+                        IsValidated = true,
+                        // Preserve clear-key HLS metadata when probe only classified streams.
+                        Hls = track.Hls ?? inspected.Track.Hls
+                    });
             }
             if (tracks.Count == variant.Tracks.Count) variants.Add(variant with { Tracks = tracks });
         }

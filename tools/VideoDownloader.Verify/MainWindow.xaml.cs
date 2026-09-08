@@ -79,34 +79,23 @@ public partial class MainWindow : Window
 
         EnsureToolLayout(publishRoot, AppContext.BaseDirectory);
 
-        var options = new AppOptions
-        {
-            ExternalResolvers =
+        // Same composition as the desktop app (user settings + infrastructure). Only paths that
+        // must point at the published package are overridden for the verifier process.
+        _services = VideoDownloader.UI.AppServiceComposition.Build(
+            configure: options =>
             {
-                Enabled = !Environment.GetCommandLineArgs().Contains("--local"),
-                YtDlpPath = Path.Combine(publishRoot, "tools", "yt-dlp.exe")
+                options.ExternalResolvers.Enabled = !Environment.GetCommandLineArgs().Contains("--local");
+                options.ExternalResolvers.YtDlpPath = Path.Combine(publishRoot, "tools", "yt-dlp.exe");
+                options.Download.DefaultSavePath = Path.Combine(Path.GetTempPath(), "VideoDownloaderVerifyDownloads");
+                if (Environment.GetCommandLineArgs().Contains("--local"))
+                {
+                    options.Browser.UserDataFolder = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                        "VideoDownloader",
+                        "AcceptanceWebView2Data");
+                }
             },
-            Download =
-            {
-                DefaultSavePath = Path.Combine(Path.GetTempPath(), "VideoDownloaderVerifyDownloads")
-            },
-            Browser =
-            {
-                UserDataFolder = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "VideoDownloader",
-                    Environment.GetCommandLineArgs().Contains("--local") ? "AcceptanceWebView2Data" : "WebView2Data")
-            }
-        };
-        Directory.CreateDirectory(options.Download.DefaultSavePath);
-        Directory.CreateDirectory(options.Browser.UserDataFolder);
-
-        var services = new ServiceCollection();
-        services.AddVideoDownloaderInfrastructure(options);
-        services.AddSingleton<UserSettingsStore>();
-        services.AddSingleton<SettingsViewModel>();
-        services.AddSingleton<MainViewModel>();
-        _services = services.BuildServiceProvider();
+            singletonUi: true);
         await _services.InitializeInfrastructureAsync();
 
         _mainVm = _services.GetRequiredService<MainViewModel>();

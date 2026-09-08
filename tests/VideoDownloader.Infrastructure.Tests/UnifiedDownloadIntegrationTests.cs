@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using NSubstitute;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Infrastructure.Configuration;
@@ -92,7 +93,8 @@ public class UnifiedDownloadIntegrationTests
             await pipeline.CompleteDiscoveryAsync(timeout.Token);
             Assert.Equal("Refreshed", (await detected.Task.WaitAsync(timeout.Token)).DisplayTitle);
             var options = Options.Create(new AppOptions { Ffmpeg = new() { ExecutablePath = ffmpegPath }, Database = new() { Path = Path.Combine(dir, "history.db") } });
-            var adapter = new M3u8DownloadAdapter(factory, new FfmpegAdapter(options, NullLogger<FfmpegAdapter>.Instance));
+            var httpClients = Substitute.For<IHttpClientFactory>();
+            var adapter = new M3u8DownloadAdapter(factory, new FfmpegAdapter(options, NullLogger<FfmpegAdapter>.Instance), httpClients);
             var combined = video.Variants.First(v => v.Tracks.Any(t => t.Kind == MediaTrackKind.Combined));
             var extractedAudio = video.Variants.First(v => v.Tracks.All(t => t.Kind == MediaTrackKind.Audio)).Tracks[0];
             var paired = MediaVariant.FromTracks("paired", null, combined.Height, null, "mkv",

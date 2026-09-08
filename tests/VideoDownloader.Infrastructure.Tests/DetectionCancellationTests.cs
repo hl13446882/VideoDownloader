@@ -44,7 +44,7 @@ public class DetectionCancellationTests
         var resolver = new DeferredResolver();
         var pipeline = CreatePipeline(resolver);
         using var cancellation = new CancellationTokenSource();
-        var pending = pipeline.ProbePageAsync(new Uri("https://example.test/watch"), null, null,
+        var pending = pipeline.ProbePageAsync(new Uri("https://example.test/watch?v=abc123"), null, null,
             RequestContext.CreateEmpty(), cancellation.Token, runExternal: true);
         cancellation.Cancel();
         Assert.True(resolver.Token.IsCancellationRequested);
@@ -73,6 +73,7 @@ public class DetectionCancellationTests
         public bool IsAvailable => true;
         public bool SupportsSite(string siteId) => true;
         public string? LastError => "old resolver error";
+        public bool LastFailureIsHumanVerification => false;
         public Task<IReadOnlyList<DetectedVideo>> ResolveAsync(Uri pageUrl, RequestContext context, CancellationToken ct)
         {
             Token = ct;

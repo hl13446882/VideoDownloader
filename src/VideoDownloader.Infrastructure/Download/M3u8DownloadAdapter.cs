@@ -1,14 +1,18 @@
 using System.Diagnostics;
+using System.Net.Http;
 using System.Xml.Linq;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Models;
-using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Licensing;
 using VideoDownloader.Core.Errors;
 
 namespace VideoDownloader.Infrastructure.Download;
 
-public sealed class M3u8DownloadAdapter(IRequestMessageFactory requests, IFfmpegAdapter ffmpeg, LicenseService? license = null)
+public sealed class M3u8DownloadAdapter(
+    IRequestMessageFactory requests,
+    IFfmpegAdapter ffmpeg,
+    IHttpClientFactory httpClients,
+    LicenseService? license = null)
 {
     public async Task DownloadAsync(DownloadJob job, Func<Task> checkpoint, CancellationToken ct)
     {
@@ -70,7 +74,7 @@ public sealed class M3u8DownloadAdapter(IRequestMessageFactory requests, IFfmpeg
             if (File.Exists(marker))
             {
                 var saved = await File.ReadAllTextAsync(marker, stop.Token);
-                if (File.Exists(saved)) { progress[index] = new FileInfo(saved).Length; return track with { SourceUrl = new Uri(saved), RequestContext = RequestContext.CreateEmpty() }; }
+                if (File.Exists(saved)) { progress[index] = new FileInfo(saved).Length; return track with { SourceUrl = new Uri(saved), RequestContext = RequestContext.CreateEmpty(), Hls = null }; }
             }
             var input = track.SourceUrl.AbsoluteUri;
             if (track.Container is not ("hls" or "dash"))
@@ -102,6 +106,10 @@ public sealed class M3u8DownloadAdapter(IRequestMessageFactory requests, IFfmpeg
             using var request = requests.Create(MediaVariant.FromTracks("download", null, null, null, track.Container, [track]), HttpMethod.Get, track.SourceUrl);
             foreach (var header in request.Headers.Where(h => !h.Key.Equals("Range", StringComparison.OrdinalIgnoreCase) && !h.Key.Equals("If-Range", StringComparison.OrdinalIgnoreCase)))
             { psi.ArgumentList.Add("-H"); psi.ArgumentList.Add($"{header.Key}: {string.Join(", ", header.Value)}"); }
+
+            // Clear-key AES only: inject custom HLS key/IV. Plain and DRM tracks never enter this branch.
+            await AppendClearKeyArgsAsync(psi, track, stop.Token);
+
             using var process = Process.Start(psi)!;
             using var cancel = stop.Token.Register(() => { try { process.Kill(true); } catch (InvalidOperationException) { } });
             var error = new Queue<string>();
@@ -150,7 +158,52 @@ public sealed class M3u8DownloadAdapter(IRequestMessageFactory requests, IFfmpeg
             Interlocked.Exchange(ref progress[index], new FileInfo(files[0]).Length);
             job.DownloadedBytes = progress.Sum();
             await checkpoint();
-            return track with { SourceUrl = new Uri(files[0]), RequestContext = RequestContext.CreateEmpty() };
+            return track with { SourceUrl = new Uri(files[0]), RequestContext = RequestContext.CreateEmpty(), Hls = null };
+        }
+    }
+
+    /// <summary>
+    /// Applies N_m3u8DL-RE custom HLS decrypt args only when <see cref="MediaTrack.Hls"/>
+    /// carries clear-key AES metadata. All other pages keep the previous argument set.
+    /// </summary>
+    private async Task AppendClearKeyArgsAsync(ProcessStartInfo psi, MediaTrack track, CancellationToken ct)
+    {
+        if (track.Hls is not { HasClearKeyEncryption: true, Encryption: { KeyUri: not null } enc })
+            return;
+
+        var method = enc.Method.Replace('-', '_').ToUpperInvariant();
+        byte[] keyBytes;
+        try
+        {
+            using var client = httpClients.CreateClient("media-primary");
+            using var keyRequest = requests.Create(
+                MediaVariant.FromTracks("hls-key", null, null, null, "hls", [track]),
+                HttpMethod.Get,
+                enc.KeyUri);
+            using var keyResponse = await client.SendAsync(keyRequest, HttpCompletionOption.ResponseHeadersRead, ct);
+            keyResponse.EnsureSuccessStatusCode();
+            keyBytes = await keyResponse.Content.ReadAsByteArrayAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            throw new DownloadException(ErrorCodes.InvalidFormat, "Failed to fetch HLS clear-key: " + ex.Message);
+        }
+
+        if (keyBytes.Length == 0)
+            throw new DownloadException(ErrorCodes.InvalidFormat, "HLS clear-key response was empty.");
+
+        psi.ArgumentList.Add("--custom-hls-method");
+        psi.ArgumentList.Add(method);
+        psi.ArgumentList.Add("--custom-hls-key");
+        psi.ArgumentList.Add(Convert.ToHexString(keyBytes));
+        if (!string.IsNullOrWhiteSpace(enc.IvHex))
+        {
+            var iv = enc.IvHex.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? enc.IvHex[2..] : enc.IvHex;
+            if (iv.Length > 0 && iv.All(Uri.IsHexDigit))
+            {
+                psi.ArgumentList.Add("--custom-hls-iv");
+                psi.ArgumentList.Add(iv);
+            }
         }
     }
 }

@@ -42,7 +42,9 @@ public sealed class RequestMessageFactory : IRequestMessageFactory
         foreach (var (name, value) in FilterSafeHeaders(ctx.Headers))
             request.Headers.TryAddWithoutValidation(name, value);
 
-        var cookie = _options.Browser.CaptureCookies ? BuildCookieHeader(ctx.Cookies, url) : null;
+        var cookie = _options.Browser.CaptureCookies && _options.ExternalResolvers.UseBrowserCookies
+            ? BuildCookieHeader(ctx.Cookies, url)
+            : null;
         if (!string.IsNullOrEmpty(cookie))
             request.Headers.TryAddWithoutValidation("Cookie", cookie);
 
