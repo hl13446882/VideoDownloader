@@ -24,12 +24,6 @@ public sealed class GenericMediaAdapter : ISiteMediaAdapter
         if (networkEvent.Url.Scheme is not ("http" or "https"))
             return new(NetworkCandidateDecisionKind.Reject, Name, "non_http", MediaEvidence.Heuristic);
 
-        // YouTube SABR adaptive streaming is not a progressive download candidate.
-        if (networkEvent.Url.AbsoluteUri.Contains("sabr=1", StringComparison.OrdinalIgnoreCase) &&
-            !networkEvent.Url.AbsoluteUri.Contains("mime=video", StringComparison.OrdinalIgnoreCase) &&
-            !networkEvent.Url.AbsoluteUri.Contains("mime=audio", StringComparison.OrdinalIgnoreCase))
-            return new(NetworkCandidateDecisionKind.Reject, Name, "sabr", MediaEvidence.Heuristic);
-
         if (UnifiedMediaPipeline.IsCandidate(
                 networkEvent.Url,
                 networkEvent.MimeType,

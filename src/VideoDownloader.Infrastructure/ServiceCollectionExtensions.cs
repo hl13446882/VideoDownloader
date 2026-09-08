@@ -47,6 +47,9 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IExternalSiteResolver, YtDlpResolver>();
         services.AddSingleton<ISiteMediaAdapter, VideoDownloader.Infrastructure.Sites.MediaAdapters.GenericMediaAdapter>();
         services.AddSingleton<ISiteMediaAdapter, VideoDownloader.Infrastructure.Sites.MediaAdapters.TikTokMediaAdapter>();
+        services.AddSingleton<ISiteMediaAdapter, VideoDownloader.Infrastructure.Sites.MediaAdapters.DouyinMediaAdapter>();
+        services.AddSingleton<ISiteMediaAdapter, VideoDownloader.Infrastructure.Sites.MediaAdapters.YouTubeMediaAdapter>();
+        services.AddSingleton<ISiteMediaAdapter, VideoDownloader.Infrastructure.Sites.MediaAdapters.BilibiliMediaAdapter>();
         services.AddSingleton<ICandidateDecisionPolicy, CandidateDecisionPolicy>();
         services.AddSingleton<ISiteMediaAdapterResolver, SiteMediaAdapterResolver>();
         services.AddSingleton<IMediaDetectionPipeline, VideoDownloader.Infrastructure.Detection.UnifiedMediaPipeline>();

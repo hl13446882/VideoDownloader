@@ -9,30 +9,13 @@ public sealed class CandidateDecisionPolicy : ICandidateDecisionPolicy
         NetworkCandidateDecision site,
         NetworkCandidateDecision generic)
     {
-        // Explicit site reject wins.
-        if (site.Kind == NetworkCandidateDecisionKind.Reject)
+        // Special-site adapters own admission when they express an opinion.
+        // Generic only fills gaps (Default) so TikTok/Douyin/YouTube/Bilibili
+        // each walk their own probe rules instead of a shared morphology soup.
+        if (site.Kind != NetworkCandidateDecisionKind.Default)
             return site;
 
-        // Strong site accept beats weak generic morphology.
-        if (site.Kind == NetworkCandidateDecisionKind.StrongAccept)
-            return site;
-
-        if (site.Kind == NetworkCandidateDecisionKind.Accept &&
-            generic.Kind is NetworkCandidateDecisionKind.Default or NetworkCandidateDecisionKind.Accept
-                or NetworkCandidateDecisionKind.StrongAccept)
-            return site with
-            {
-                Evidence = site.Evidence > generic.Evidence ? site.Evidence : generic.Evidence
-            };
-
-        if (generic.Kind == NetworkCandidateDecisionKind.Reject &&
-            site.Kind == NetworkCandidateDecisionKind.Default)
-            return generic;
-
-        if (generic.Kind is NetworkCandidateDecisionKind.StrongAccept or NetworkCandidateDecisionKind.Accept)
-            return generic;
-
-        return site.Kind == NetworkCandidateDecisionKind.Default ? generic : site;
+        return generic;
     }
 }
 

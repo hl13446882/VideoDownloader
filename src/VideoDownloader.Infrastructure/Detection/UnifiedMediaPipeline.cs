@@ -208,17 +208,20 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         _page ??= page;
 
         var pageContext = new PageMediaContext(page, _title, _observedIdentity, SessionId, _author);
-        var siteAdapter = _siteAdapters?.Resolve(page) ?? _siteAdapters?.Generic;
+        var siteAdapter = _siteAdapters?.Resolve(page);
         var genericAdapter = _siteAdapters?.Generic;
         var browserPlay = IsBrowserPlayEvidence(e);
+        var specialSite = siteAdapter is not null &&
+                          genericAdapter is not null &&
+                          !ReferenceEquals(siteAdapter, genericAdapter);
 
         NetworkCandidateDecision siteDecision = new(NetworkCandidateDecisionKind.Default, siteAdapter?.Name ?? "none");
         NetworkCandidateDecision genericDecision = new(NetworkCandidateDecisionKind.Default, genericAdapter?.Name ?? "generic");
         if (siteAdapter is not null)
             siteDecision = siteAdapter.EvaluateNetworkCandidate(e, pageContext);
-        if (genericAdapter is not null)
+        if (genericAdapter is not null && (!specialSite || siteDecision.Kind == NetworkCandidateDecisionKind.Default))
             genericDecision = genericAdapter.EvaluateNetworkCandidate(e, pageContext);
-        else
+        else if (genericAdapter is null)
         {
             // Fallback when adapters are not injected (unit tests / legacy ctor).
             if (e.Url.AbsoluteUri.Contains("sabr=1", StringComparison.OrdinalIgnoreCase) &&
@@ -241,7 +244,9 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             }
         }
 
-        var finalDecision = _candidatePolicy.Combine(siteDecision, genericDecision);
+        var finalDecision = specialSite && siteDecision.Kind != NetworkCandidateDecisionKind.Default
+            ? siteDecision
+            : _candidatePolicy.Combine(siteDecision, genericDecision);
         if (finalDecision.Kind is NetworkCandidateDecisionKind.StrongAccept or NetworkCandidateDecisionKind.Accept ||
             siteDecision.Kind != NetworkCandidateDecisionKind.Default)
         {
@@ -444,7 +449,9 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
 
         if (!string.IsNullOrWhiteSpace(observedIdentity) &&
             System.Text.RegularExpressions.Regex.IsMatch(
-                observedIdentity, @"content:(\d{10,}|BV[\w]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                observedIdentity,
+                @"content:(?:tiktok:|douyin:|youtube:|bilibili:)?(\d{10,}|BV[\w]+|[A-Za-z0-9_-]{6,})",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase))
             return true;
 
         return false;
