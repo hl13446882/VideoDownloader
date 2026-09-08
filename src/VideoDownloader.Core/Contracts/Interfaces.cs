@@ -115,7 +115,8 @@ public interface IRequestContextProvider
         Uri? pageUrl,
         Uri resourceUrl,
         RequestContext? previousContext,
-        CancellationToken ct);
+        CancellationToken ct,
+        bool forceCookies = false);
 }
 
 public interface IMediaDetectionPipeline

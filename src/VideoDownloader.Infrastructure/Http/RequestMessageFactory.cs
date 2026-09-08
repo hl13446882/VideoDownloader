@@ -42,9 +42,9 @@ public sealed class RequestMessageFactory : IRequestMessageFactory
         foreach (var (name, value) in FilterSafeHeaders(ctx.Headers))
             request.Headers.TryAddWithoutValidation(name, value);
 
-        var cookie = _options.Browser.CaptureCookies && _options.ExternalResolvers.UseBrowserCookies
-            ? BuildCookieHeader(ctx.Cookies, url)
-            : null;
+        // Apply cookies already present on the context (BrowserObserved / download refresh).
+        // Live jar capture remains gated at WebView2Host; this only sends what we already hold.
+        var cookie = BuildCookieHeader(ctx.Cookies, url);
         if (!string.IsNullOrEmpty(cookie))
             request.Headers.TryAddWithoutValidation("Cookie", cookie);
 

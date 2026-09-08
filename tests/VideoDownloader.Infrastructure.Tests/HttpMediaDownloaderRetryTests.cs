@@ -226,6 +226,24 @@ public class RequestMessageFactoryTests
     }
 
     [Fact]
+    public void Create_SendsCookiesAlreadyOnContext_EvenWhenCaptureDisabled()
+    {
+        // BrowserObserved downloads attach jar cookies without flipping CaptureCookies.
+        var context = RequestContext.CreateEmpty() with
+        {
+            Cookies = [new BrowserCookie("tt", "1", ".tiktok.com", "/", null, true, true)]
+        };
+        var variant = MediaVariant.FromCombinedTrack(
+            "v1",
+            new Uri("https://v16-webapp-prime.tiktok.com/video/x.mp4"),
+            context,
+            container: "mp4");
+
+        using var request = new RequestMessageFactory().Create(variant, HttpMethod.Get, variant.SourceUrl);
+        Assert.Contains("tt=1", string.Join("; ", request.Headers.GetValues("Cookie")));
+    }
+
+    [Fact]
     public void Create_CookieDisabled_RejectsExplicitCookieHeaderFromResolver()
     {
         var context = RequestContext.CreateEmpty() with

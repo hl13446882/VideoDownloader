@@ -438,11 +438,25 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                     contextRefreshed = true;
                     _logger.LogWarning("Job {JobId} media HTTP_403; starting same-content recovery", job.Id);
                     var pageUrl = job.Variant.RecoveryPageUrl ?? ResolvePageUrl(job) ?? throw new DownloadException(ErrorCodes.ContextExpired,"Original page address is unavailable.");
+                    var browserObserved = job.Variant.Tracks.Any(t => t.BrowserObserved);
                     var refreshed = await _contextProvider.RefreshContextAsync(
                         pageUrl,
                         job.Variant.SourceUrl,
                         job.Variant.RequestContext,
-                        cts.Token);
+                        cts.Token,
+                        forceCookies: browserObserved);
+
+                    if (browserObserved)
+                    {
+                        // Same CDN URL already played in WebView2 — refresh cookies and retry
+                        // without yt-dlp renewal (which often returns a different, 403-prone object).
+                        job.Variant = job.Variant.WithRequestContext(refreshed);
+                        _logger.LogInformation(
+                            "Retrying browser-observed URL for job {JobId} with refreshed cookies version={Version}",
+                            job.Id,
+                            refreshed.Version);
+                        continue;
+                    }
 
                     try
                     {
@@ -524,6 +538,29 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         CancellationToken ct)
     {
         job.Variant = EnsureDownloadContext(job);
+        if (job.Variant.Tracks.Any(t => t.BrowserObserved) &&
+            job.Variant.RequestContext.Cookies.Count == 0)
+        {
+            var pageUrl = ResolvePageUrl(job);
+            if (pageUrl is not null)
+            {
+                var refreshed = await _contextProvider.RefreshContextAsync(
+                    pageUrl,
+                    job.Variant.SourceUrl,
+                    job.Variant.RequestContext,
+                    ct,
+                    forceCookies: true);
+                if (refreshed.Cookies.Count > 0)
+                {
+                    job.Variant = job.Variant.WithRequestContext(refreshed);
+                    _logger.LogInformation(
+                        "Attached live cookies for browser-observed download job={JobId} count={Count}",
+                        job.Id,
+                        refreshed.Cookies.Count);
+                }
+            }
+        }
+
         var backend = _backendRouter.Resolve(job.Variant);
         switch (backend)
         {
@@ -794,9 +831,11 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             if (cookies.Count == 0 || string.IsNullOrWhiteSpace(userAgent))
             {
                 var fresh = _contextProvider.CaptureCurrentContext(pageUrl, variant.SourceUrl);
-                // T3: never pull live cookies when capture is disabled.
-                if (_options.Browser.CaptureCookies &&
-                    cookies.Count == 0 && fresh.Cookies.Count > 0)
+                // Browser-observed downloads may carry cookies from a one-shot jar read
+                // even when CaptureCookies is off for general browsing.
+                var browserObserved = variant.Tracks.Any(t => t.BrowserObserved);
+                if (cookies.Count == 0 && fresh.Cookies.Count > 0 &&
+                    (_options.Browser.CaptureCookies || browserObserved))
                 {
                     cookies = fresh.Cookies;
                     changed = true;
@@ -956,6 +995,10 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             if (_removedJobs.ContainsKey(job.Id) || _ctsMap.ContainsKey(job.Id))
                 continue;
             if (now - job.UpdatedAt < minAge)
+                continue;
+            // CONTEXT_EXPIRED means the signed URL/session is dead; replaying the same job
+            // cannot recover without a fresh probe. Skip auto-retry.
+            if (string.Equals(job.LastErrorCode, ErrorCodes.ContextExpired, StringComparison.OrdinalIgnoreCase))
                 continue;
 
             _logger.LogInformation(

@@ -97,6 +97,37 @@ internal static class ProbeSampleGate
         var audioCandidates = video.Variants.Where(v => !HasVideo(v) && HasAudio(v)).ToList();
         var acceptedVideoSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // Page-level browser play facts win: accept them without out-of-band sampling,
+        // and do not keep probing unmatched yt-dlp CDN objects that typically 403.
+        var browserVideos = videoCandidates
+            .Where(v => v.Tracks.Any(t => t.BrowserObserved))
+            .ToList();
+        if (browserVideos.Count > 0)
+        {
+            foreach (var preferred in browserVideos)
+            {
+                if (!isCurrentSession())
+                    return (null, ErrorCodes.Cancelled);
+                if (!acceptedVideoSources.Add(preferred.SourceUrl.AbsoluteUri))
+                    continue;
+                record(new("external", KindOf(preferred), ownership, "accepted", "browser_observed", preferred.SourceUrl.Host));
+                usable.Add(preferred with
+                {
+                    ContentIdentity = preferred.ContentIdentity ?? ownership,
+                    RecoveryPageUrl = preferred.RecoveryPageUrl ??
+                                      MediaAddressRenewal.RecoveryAddress(documentPage, ownership) ??
+                                      documentPage,
+                    Alternatives = videoCandidates
+                        .Where(a => a.SourceUrl != preferred.SourceUrl && MediaAddressRenewal.Compatible(preferred, a))
+                        .Take(MaxAlternateTries)
+                        .ToArray()
+                });
+            }
+
+            // Skip non-observed video sampling when browser already proved a video.
+            videoCandidates = [];
+        }
+
         // Validate preferred video variants; on 403 try same-batch alternates (T1).
         foreach (var preferred in videoCandidates)
         {

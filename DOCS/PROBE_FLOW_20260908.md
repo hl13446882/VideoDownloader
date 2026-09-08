@@ -204,7 +204,7 @@ flowchart TD
   H -->|否| NO
 ```
 
-> **TikTok 优先策略（2026-09-08）：** CDP 实播（`BrowserObserved`）> DOM/playAddr > yt-dlp > 独立 `MediaAvailabilityValidator`。浏览器已成功 200/206 的 Media 不再被二次抽样否决。
+> **TikTok 优先策略（2026-09-08）：** CDP 实播（`BrowserObserved`）> DOM/playAddr > yt-dlp > 独立 `MediaAvailabilityValidator`。浏览器已成功 200/206 的 Media 不再被二次抽样否决。页内已有实播视频时会 **注入浏览器 URL** 并跳过 yt-dlp 视频抽样；下载对 BrowserObserved 会 **一次性读取 WebView2 Cookie 重试同 URL**，且 `CONTEXT_EXPIRED` 不再自动死磕重试。
 ### `InspectAsync` 子分支
 
 ```mermaid

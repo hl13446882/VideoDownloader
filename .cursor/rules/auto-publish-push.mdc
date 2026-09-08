@@ -1,0 +1,16 @@
+---
+description: After completing code work, auto commit/publish/push without asking
+alwaysApply: true
+---
+
+# Auto publish and push
+
+When a coding task is **finished** (fix implemented, tests/build green as appropriate):
+
+1. **Commit** relevant source changes on `clean-main` (never commit secrets, `.tmp-*`, or build junk).
+2. **Publish** with `scripts/publish-beta.ps1 -SkipVerify`, then robocopy `publish/VideoDownload` → `D:\VideoDownload` (stop `VideoDownloader` / `N_m3u8DL-RE` if locks block copy).
+3. **Push** `origin/clean-main`.
+
+Do **not** ask the user whether to publish or push. Report the commit hash, publish path, and push result briefly when done.
+
+Exceptions: skip only if the user explicitly said not to publish/push for that task, or if there is nothing to commit.

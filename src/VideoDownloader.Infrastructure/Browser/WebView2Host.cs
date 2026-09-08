@@ -444,7 +444,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         return await RunAsync();
     }
 
-    public async Task RefreshContextSnapshotAsync(CancellationToken ct = default)
+    public async Task RefreshContextSnapshotAsync(CancellationToken ct = default, bool forceCookies = false)
     {
         if (_core is null || _uiDispatcher is null)
             return;
@@ -452,12 +452,12 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         if (!_uiDispatcher.CheckAccess())
         {
             await _uiDispatcher.InvokeAsync(
-                () => RefreshContextSnapshotCoreAsync(ct),
+                () => RefreshContextSnapshotCoreAsync(ct, forceCookies),
                 DispatcherPriority.Background).Task.Unwrap();
             return;
         }
 
-        await RefreshContextSnapshotCoreAsync(ct);
+        await RefreshContextSnapshotCoreAsync(ct, forceCookies);
     }
 
     public RequestContext CaptureCurrentContext(Uri? pageUrl, Uri resourceUrl)
@@ -485,7 +485,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             DateTimeOffset.UtcNow);
     }
 
-    private async Task RefreshContextSnapshotCoreAsync(CancellationToken ct)
+    private async Task RefreshContextSnapshotCoreAsync(CancellationToken ct, bool forceCookies = false)
     {
         if (_core is null)
             return;
@@ -498,7 +498,8 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
 
         IReadOnlyList<BrowserCookie> cookies = Array.Empty<BrowserCookie>();
         var pageUrl = CurrentPageUrl;
-        if (_options.Browser.CaptureCookies && pageUrl is not null)
+        // forceCookies: one-shot jar read for BrowserObserved CDN downloads without flipping the setting.
+        if ((_options.Browser.CaptureCookies || forceCookies) && pageUrl is not null)
         {
             var cookieUrls = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { pageUrl.AbsoluteUri };
             foreach (var related in RelatedCookieUrls(pageUrl))

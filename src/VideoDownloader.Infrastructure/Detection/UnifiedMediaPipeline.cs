@@ -224,7 +224,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 e.Url,
                 e.MimeType,
                 InferKindFromMime(e.MimeType),
-                e.RequestContext);
+                AttachRequestCookie(e.RequestContext, e.RequestHeaders, e.Url));
             RecordDecision(new("network", KindLabel(InferKindFromMime(e.MimeType)), MediaOwnership.ForPage(page, _observedIdentity),
                 "accepted", "browser_observed", e.Url.Host,
                 $"status={e.StatusCode};type={e.ResourceType};mime={e.MimeType}"));
@@ -839,7 +839,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                         }
 
                         // Prefer browser-play facts over an independent sample GET (TikTok CDN).
-                        var stamped = StampBrowserObserved(video);
+                        var stamped = OverlayBrowserObservedVideos(StampBrowserObserved(video));
 
                         bool StillCurrent() =>
                             !generation.IsCancellationRequested && sessionId == SessionId &&
@@ -1171,7 +1171,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 return ordered[0] with { Alternatives = ordered.Skip(1).Take(4).ToArray() };
             })
             .Where(v => !MediaResourceSizeFilter.ShouldExcludeVariant(v))
-            .OrderByDescending(v => v.Height ?? 0)
+            .OrderByDescending(v => v.Tracks.Any(t => t.BrowserObserved))
+            .ThenByDescending(v => v.Height ?? 0)
             .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
             .ToList();
 
@@ -1225,7 +1226,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             // Prefer an already-bound player caption over external/page-host placeholders.
             DisplayTitle = PreferDisplayTitle(local.DisplayTitle, external.DisplayTitle),
             Variants = map.Values
-                .OrderByDescending(v => v.Height ?? 0)
+                .OrderByDescending(v => v.Tracks.Any(t => t.BrowserObserved))
+                .ThenByDescending(v => v.Height ?? 0)
                 .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
                 .ToArray(),
             ProbeSource = ProbeSource.GenericFallback,
@@ -1416,28 +1418,139 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         {
             var tracks = v.Tracks.Select(t =>
             {
-                if (!IsBrowserObservedUrl(t.SourceUrl))
+                if (!TryGetBrowserObserved(t.SourceUrl, out var evidence) || evidence is null)
                     return t;
-                return t with { IsValidated = true, BrowserObserved = true };
+                return t with
+                {
+                    IsValidated = true,
+                    BrowserObserved = true,
+                    // Prefer the CDP request context that already succeeded.
+                    RequestContext = evidence.Context
+                };
             }).ToArray();
             return v with { Tracks = tracks };
         }).ToArray();
         return video with { Variants = variants };
     }
 
-    private bool IsBrowserObservedUrl(Uri url)
+    /// <summary>
+    /// yt-dlp CDN objects often differ from the URL WebView2 actually played.
+    /// Inject proven browser video/combined tracks so ProbeSampleGate can accept them
+    /// without an out-of-band GET that 403s.
+    /// </summary>
+    private DetectedVideo OverlayBrowserObservedVideos(DetectedVideo video)
+    {
+        var browserVideos = _browserObserved.Values
+            .Where(o => o.KindHint is MediaTrackKind.Video or MediaTrackKind.Combined)
+            .GroupBy(o => MediaUrlNormalizer.Normalize(o.Url), StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .ToArray();
+        if (browserVideos.Length == 0)
+            return video;
+
+        var existing = video.Variants
+            .SelectMany(v => v.Tracks)
+            .Select(t => MediaUrlNormalizer.Normalize(t.SourceUrl))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var injected = new List<MediaVariant>();
+        var index = 0;
+        foreach (var observed in browserVideos)
+        {
+            var key = MediaUrlNormalizer.Normalize(observed.Url);
+            if (!existing.Add(key))
+                continue;
+
+            var container = observed.Mime?.Contains("webm", StringComparison.OrdinalIgnoreCase) == true
+                ? "webm"
+                : "mp4";
+            var track = new MediaTrack(
+                $"browser-video-{index++}",
+                observed.KindHint,
+                observed.Url,
+                null,
+                container,
+                null,
+                null,
+                observed.Context)
+            {
+                IsValidated = true,
+                BrowserObserved = true,
+                ContentIdentity = video.SiteContentId is null ? null : "id:" + video.SiteContentId
+            };
+            injected.Add(MediaVariant.FromTracks(
+                $"视频 (浏览器实播)",
+                null,
+                null,
+                null,
+                container,
+                [track]) with
+            {
+                ContentIdentity = track.ContentIdentity,
+                RecoveryPageUrl = video.PageUrl
+            });
+        }
+
+        if (injected.Count == 0)
+            return video;
+
+        return video with { Variants = injected.Concat(video.Variants).ToArray() };
+    }
+
+    private bool IsBrowserObservedUrl(Uri url) => TryGetBrowserObserved(url, out _);
+
+    private bool TryGetBrowserObserved(Uri url, out BrowserObservedMedia? evidence)
     {
         var key = MediaUrlNormalizer.Normalize(url);
-        if (_browserObserved.ContainsKey(key))
+        if (_browserObserved.TryGetValue(key, out evidence))
             return true;
-        // TikTok CDN often rotates query signatures between CDP and yt-dlp; path session match is enough.
+
         foreach (var observed in _browserObserved.Values)
         {
             if (MediaUrlNormalizer.IsSameMedia(observed.Url, url) ||
                 MediaUrlNormalizer.IsSameSession(observed.Url, url))
+            {
+                evidence = observed;
                 return true;
+            }
         }
+
+        evidence = null;
         return false;
+    }
+
+    private static RequestContext AttachRequestCookie(
+        RequestContext context,
+        IReadOnlyDictionary<string, string> requestHeaders,
+        Uri url)
+    {
+        if (context.Cookies.Count > 0)
+            return context;
+        if (!requestHeaders.TryGetValue("cookie", out var header) &&
+            !requestHeaders.TryGetValue("Cookie", out header))
+            return context;
+        if (string.IsNullOrWhiteSpace(header))
+            return context;
+
+        var cookies = ParseCookieHeader(header, url);
+        return cookies.Count == 0 ? context : context with { Cookies = cookies };
+    }
+
+    private static IReadOnlyList<BrowserCookie> ParseCookieHeader(string header, Uri url)
+    {
+        var list = new List<BrowserCookie>();
+        foreach (var part in header.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var idx = part.IndexOf('=');
+            if (idx <= 0)
+                continue;
+            var name = part[..idx].Trim();
+            var value = part[(idx + 1)..].Trim();
+            if (name.Length == 0)
+                continue;
+            list.Add(new BrowserCookie(name, value, url.Host, "/", null, url.Scheme == "https", false));
+        }
+        return list;
     }
 
     internal sealed record BrowserObservedMedia(

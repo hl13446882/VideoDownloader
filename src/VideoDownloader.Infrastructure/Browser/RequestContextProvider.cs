@@ -20,13 +20,14 @@ public sealed class RequestContextProvider : IRequestContextProvider
         Uri? pageUrl,
         Uri resourceUrl,
         RequestContext? previousContext,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool forceCookies = false)
     {
         var host = _locator.Active;
         if (host is null || host.CurrentPageUrl != pageUrl)
             return previousContext ?? RequestContext.CreateEmpty();
 
-        await host.RefreshContextSnapshotAsync(ct);
+        await host.RefreshContextSnapshotAsync(ct, forceCookies);
         var fresh = host.CaptureCurrentContext(pageUrl, resourceUrl);
 
         if (previousContext is null)
