@@ -107,6 +107,21 @@ public sealed class FfmpegAdapter : IFfmpegAdapter
         if (!File.Exists(ffmpegPath) && !IsOnPath(ffmpegPath))
             throw new DownloadException(ErrorCodes.FfmpegNotFound, "FFmpeg executable was not found.");
 
+        var ffprobePath = Path.Combine(Path.GetDirectoryName(ffmpegPath)!, "ffprobe.exe");
+        if (!File.Exists(ffprobePath))
+            ffprobePath = "ffprobe";
+
+        var probed = new List<(MediaTrack Track, bool HasVideo, bool HasAudio)>(tracks.Count);
+        foreach (var track in tracks)
+        {
+            var streams = await ProbeStreamKindsAsync(ffprobePath, GetInputArgument(track.SourceUrl), ct);
+            probed.Add((track, streams.HasVideo, streams.HasAudio));
+        }
+
+        var selected = SelectTracksForRemux(probed);
+        if (selected.Count == 0)
+            throw new DownloadException(ErrorCodes.FfmpegFailed, "No usable tracks to remux.");
+
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
 
         var psi = new ProcessStartInfo
@@ -124,7 +139,7 @@ public sealed class FfmpegAdapter : IFfmpegAdapter
         psi.ArgumentList.Add("-loglevel");
         psi.ArgumentList.Add("warning");
         psi.ArgumentList.Add("-dn");
-        var orderedTracks = tracks.OrderBy(t => t.Kind == MediaTrackKind.Audio ? 1 : 0).ToList();
+        var orderedTracks = selected.OrderBy(t => t.Kind == MediaTrackKind.Audio ? 1 : 0).ToList();
         foreach (var track in orderedTracks)
         {
             AddInputHeaders(psi.ArgumentList, track.RequestContext);
@@ -132,10 +147,20 @@ public sealed class FfmpegAdapter : IFfmpegAdapter
             psi.ArgumentList.Add(GetInputArgument(track.SourceUrl));
         }
 
-        for (var i = 0; i < orderedTracks.Count; i++)
+        // Single self-contained input: copy every stream (already has audio when present).
+        // Multi-input: map video from non-audio inputs and audio only from Audio tracks.
+        if (orderedTracks.Count == 1)
         {
             psi.ArgumentList.Add("-map");
-            psi.ArgumentList.Add(i.ToString(System.Globalization.CultureInfo.InvariantCulture) + (orderedTracks[i].Kind == MediaTrackKind.Audio ? ":a:0" : orderedTracks[i].Kind == MediaTrackKind.Video ? ":v:0" : ""));
+            psi.ArgumentList.Add("0");
+        }
+        else
+        {
+            for (var i = 0; i < orderedTracks.Count; i++)
+            {
+                psi.ArgumentList.Add("-map");
+                psi.ArgumentList.Add(i.ToString(System.Globalization.CultureInfo.InvariantCulture) + (orderedTracks[i].Kind == MediaTrackKind.Audio ? ":a:0" : orderedTracks[i].Kind == MediaTrackKind.Video ? ":v:0" : ""));
+            }
         }
 
         psi.ArgumentList.Add("-c");
@@ -297,6 +322,95 @@ public sealed class FfmpegAdapter : IFfmpegAdapter
 
         if (!File.Exists(outputPath))
             throw new DownloadException(ErrorCodes.FfmpegFailed, "FFmpeg finished without creating album output file.");
+    }
+
+    /// <summary>
+    /// When a primary already embeds audio, drop companion Audio tracks.
+    /// When no usable video-only primary exists but a self-contained A+V file does, use that alone.
+    /// </summary>
+    internal static IReadOnlyList<MediaTrack> SelectTracksForRemux(
+        IReadOnlyList<(MediaTrack Track, bool HasVideo, bool HasAudio)> probed)
+    {
+        if (probed.Count <= 1)
+            return probed.Select(p => p.Track).ToArray();
+
+        IReadOnlyList<(MediaTrack Track, bool HasVideo, bool HasAudio)> candidates = probed;
+
+        // Already-muxed primary (Combined / video with embedded audio): do not merge extra audio.
+        if (candidates.Any(p =>
+                p.Track.Kind != MediaTrackKind.Audio &&
+                p.HasAudio))
+        {
+            candidates = candidates
+                .Where(p => p.Track.Kind != MediaTrackKind.Audio)
+                .ToArray();
+        }
+
+        var videoOnlyPrimary = candidates.Any(p =>
+            p.Track.Kind != MediaTrackKind.Audio &&
+            p.HasVideo &&
+            !p.HasAudio);
+
+        if (!videoOnlyPrimary)
+        {
+            var selfContained = candidates
+                .Where(p => p.HasVideo && p.HasAudio)
+                .OrderByDescending(p => p.Track.Kind == MediaTrackKind.Combined ? 1 : 0)
+                .ThenByDescending(p => p.Track.ContentLength ?? 0)
+                .Select(p => p.Track)
+                .FirstOrDefault();
+            if (selfContained is not null)
+                return [selfContained];
+        }
+
+        return candidates.Select(p => p.Track).ToArray();
+    }
+
+    private static async Task<(bool HasVideo, bool HasAudio)> ProbeStreamKindsAsync(
+        string ffprobePath,
+        string mediaPath,
+        CancellationToken ct)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = ffprobePath,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            psi.ArgumentList.Add("-v");
+            psi.ArgumentList.Add("error");
+            psi.ArgumentList.Add("-show_entries");
+            psi.ArgumentList.Add("stream=codec_type");
+            psi.ArgumentList.Add("-of");
+            psi.ArgumentList.Add("csv=p=0");
+            psi.ArgumentList.Add(mediaPath);
+
+            using var process = Process.Start(psi);
+            if (process is null) return (false, false);
+            var stdout = await process.StandardOutput.ReadToEndAsync(ct);
+            await process.WaitForExitAsync(ct);
+            if (process.ExitCode != 0) return (false, false);
+
+            var hasVideo = false;
+            var hasAudio = false;
+            foreach (var line in stdout.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                if (line.Equals("video", StringComparison.OrdinalIgnoreCase))
+                    hasVideo = true;
+                else if (line.Equals("audio", StringComparison.OrdinalIgnoreCase))
+                    hasAudio = true;
+            }
+
+            return (hasVideo, hasAudio);
+        }
+        catch
+        {
+            return (false, false);
+        }
     }
 
     private static async Task<double?> ProbeDurationSecondsAsync(string ffprobePath, string mediaPath, CancellationToken ct)

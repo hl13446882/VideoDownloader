@@ -1426,7 +1426,10 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             .Where(a => !IsInsufficientByteDanceDownloadObject(a.Track.SourceUrl, a.Track.ContentLength))
             .OrderBy(a => MediaVariantRanking.IsFlvLike(a.Track) ? 1 : 0)
             .ThenByDescending(a => a.Track.ContentLength ?? a.Track.Bandwidth ?? 0)
+            // Progressive Combined can donate audio to a higher video-only sibling.
+            // HLS/DASH Combined is already a full A+V playlist — never pair it as audio-extract.
             .Concat(singleTracks.Where(a => a.Track.Kind == MediaTrackKind.Combined)
+                .Where(a => a.Track.Container is not ("hls" or "dash"))
                 .Where(a => !IsInsufficientByteDanceDownloadObject(a.Track.SourceUrl, a.Track.ContentLength))
                 .Select(a => a with { Track = a.Track with { Kind = MediaTrackKind.Audio, TrackId = "audio-extract", Codec = null } }))
             .ToArray();
@@ -1731,6 +1734,11 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         if (!IsLikelyVodAudioUrl(audio.Track.SourceUrl) &&
             !IsDouyinLiveStream(audio.Track.SourceUrl) &&
             audio.Track.Kind != MediaTrackKind.Audio)
+            return false;
+
+        // Full HLS/DASH playlists are not audio donors for a separate video object.
+        if (audio.Track.TrackId == "audio-extract" &&
+            audio.Track.Container is "hls" or "dash")
             return false;
 
         // Orphan tracks on a shared feed host must not invent a pair.
