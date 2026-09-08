@@ -111,4 +111,35 @@ public class UnifiedMediaPipelineCandidateTests
             contentLength: 8 * 1024);
         Assert.True(MediaResourceSizeFilter.ShouldExcludeVariant(variant));
     }
+
+    [Theory]
+    [InlineData("https://v3.douyinvod.com/video/tos/obj", 1024L, true)]
+    [InlineData("https://v3-dy-o.zjcdn.com/video/tos/obj", 8192L, true)]
+    [InlineData("https://v16.tiktokcdn.com/playAddr/obj", 16_384L, true)]
+    [InlineData("https://v3.douyinvod.com/video/tos/obj", 262144L, false)]
+    [InlineData("https://v3.douyinvod.com/video/tos/obj", null, false)]
+    [InlineData("https://upos-sz-mirrorcos.bilivideo.com/upos/x.m4s", 1024L, false)]
+    [InlineData("https://googlevideo.com/videoplayback", 1024L, false)]
+    [InlineData("https://cdn.example.com/stream.mp4", 1024L, false)]
+    public void InsufficientByteDanceObject_IsScopedToDouyinTikTokCdn(
+        string url, long? length, bool expected) =>
+        Assert.Equal(expected, UnifiedMediaPipeline.IsInsufficientByteDanceDownloadObject(new Uri(url), length));
+
+    [Fact]
+    public void Ranking_DemotesTinyDouyinSlice_OverLargeProgressive()
+    {
+        var tiny = MediaVariant.FromCombinedTrack(
+            "mse",
+            new Uri("https://v3.douyinvod.com/video/tos/tiny"),
+            RequestContext.CreateEmpty(),
+            contentLength: 999);
+        var full = MediaVariant.FromCombinedTrack(
+            "full",
+            new Uri("https://v3-dy-o.zjcdn.com/video/tos/full"),
+            RequestContext.CreateEmpty(),
+            contentLength: 2_000_000);
+        var preferred = MediaVariantRanking.SelectPreferredVideo([tiny, full]);
+        Assert.NotNull(preferred);
+        Assert.Equal(full.SourceUrl, preferred!.SourceUrl);
+    }
 }

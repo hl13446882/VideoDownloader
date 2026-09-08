@@ -49,6 +49,9 @@ public static class MediaVariantRanking
             .ThenBy(v => v.Tracks.Any(t => MediaUrlNormalizer.IsLikelySegment(t.SourceUrl)) ? 1 : 0)
             // Prefer CDN objects over Douyin /aweme/v1/play gateways that only 302.
             .ThenBy(v => v.Tracks.Any(t => UnifiedMediaPipeline.IsDouyinPlayGateway(t.SourceUrl)) ? 1 : 0)
+            // Demote Douyin/TikTok MSE Range windows that somehow remain with a tiny known length.
+            .ThenBy(v => v.Tracks.Any(t =>
+                UnifiedMediaPipeline.IsInsufficientByteDanceDownloadObject(t.SourceUrl, t.ContentLength)) ? 1 : 0)
             .ThenByDescending(v => v.TotalContentLength ?? 0)
             .ThenByDescending(v => v.Bandwidth ?? 0)
             .ThenByDescending(v => v.Height ?? 0)

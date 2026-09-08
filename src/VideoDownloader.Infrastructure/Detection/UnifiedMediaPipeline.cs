@@ -14,6 +14,7 @@ using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Download;
+using VideoDownloader.Infrastructure.Sites;
 using VideoDownloader.Core.Sites;
 
 namespace VideoDownloader.Infrastructure.Detection;
@@ -280,6 +281,16 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         if (finalDecision.Kind == NetworkCandidateDecisionKind.Reject)
             return Task.CompletedTask;
 
+        // Douyin/TikTok MSE Range windows report tiny Content-Length; those are not downloadable objects.
+        // Scoped to ByteDance/TikTok CDNs so Bilibili/YouTube/Generic keep prior behavior.
+        if (IsInsufficientByteDanceDownloadObject(e.Url, e.ContentLength))
+        {
+            RecordDecision(new("network", "av", MediaOwnership.ForPage(page, _observedIdentity),
+                "rejected", "tiny_mse_slice", e.Url.Host,
+                $"length={e.ContentLength};status={e.StatusCode};type={e.ResourceType}"));
+            return Task.CompletedTask;
+        }
+
         // Segments thrash the 3 ffprobe slots unless a site StrongAccept / browser play overrides.
         var allowSegment = browserPlay ||
                            finalDecision.Kind == NetworkCandidateDecisionKind.StrongAccept ||
@@ -300,17 +311,28 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             if (siteAdapter is not null)
                 ctx = siteAdapter.EnrichRequestContext(ctx, e.Url, pageContext);
             var kindHint = InferKindFromMime(e.MimeType, e.Url);
-            _browserObserved[key] = new BrowserObservedMedia(
-                e.Url,
-                e.MimeType,
-                kindHint,
-                ctx);
+            if (_browserObserved.TryGetValue(key, out var prev) &&
+                (prev.ContentLength ?? 0) > (e.ContentLength ?? 0) &&
+                e.ContentLength is not null)
+            {
+                // Keep the larger observed object; refresh cookies from the latest successful request.
+                _browserObserved[key] = prev with { Context = ctx };
+            }
+            else
+            {
+                _browserObserved[key] = new BrowserObservedMedia(
+                    e.Url,
+                    e.MimeType,
+                    kindHint,
+                    ctx,
+                    e.ContentLength);
+            }
             RecordDecision(new("network", KindLabel(kindHint), MediaOwnership.ForPage(page, _observedIdentity),
                 "accepted", finalDecision.Reason ?? "browser_observed", e.Url.Host,
-                $"adapter={finalDecision.AdapterName};status={e.StatusCode};type={e.ResourceType};mime={e.MimeType}"));
+                $"adapter={finalDecision.AdapterName};status={e.StatusCode};type={e.ResourceType};mime={e.MimeType};length={e.ContentLength}"));
             _logger.LogInformation(
-                "Browser-observed media session={Session} host={Host} status={Status} type={Type} mime={Mime} adapter={Adapter}",
-                e.SessionId, e.Url.Host, e.StatusCode, e.ResourceType, e.MimeType, finalDecision.AdapterName);
+                "Browser-observed media session={Session} host={Host} status={Status} type={Type} mime={Mime} length={Length} adapter={Adapter}",
+                e.SessionId, e.Url.Host, e.StatusCode, e.ResourceType, e.MimeType, e.ContentLength, finalDecision.AdapterName);
         }
 
         Queue(e.Url, page, e.RequestContext, e.ContentLength, ct, e.MimeType,
@@ -399,6 +421,29 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         return path.Contains("/aweme/", StringComparison.OrdinalIgnoreCase) ||
                path.Contains("/play/", StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>
+    /// Douyin/TikTok CDN hosts only. Unknown-size objects are allowed; known sub-display
+    /// lengths are MSE Range windows, not full progressive/adaptive tracks.
+    /// </summary>
+    public static bool IsByteDanceOrTikTokMediaCdn(Uri url)
+    {
+        var host = url.Host;
+        if (SiteNetworkHelper.IsDouyinHost(url) || SiteNetworkHelper.IsTikTokHost(url))
+            return true;
+        return host.Contains("zjcdn", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("byteicdn", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("byteoversea", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("iesdouyin", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// True when Douyin/TikTok CDN reports a known payload smaller than a displayable object.
+    /// Does not apply to Bilibili / YouTube / generic CDNs.
+    /// </summary>
+    public static bool IsInsufficientByteDanceDownloadObject(Uri url, long? contentLength) =>
+        contentLength is > 0 and < MediaResourceSizeFilter.MinDisplayBytes &&
+        IsByteDanceOrTikTokMediaCdn(url);
 
     internal static string? ExtractContentIdFromUrl(Uri url)
     {
@@ -744,8 +789,12 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         if (url.Scheme is not ("http" or "https"))
             return;
 
+        // Douyin/TikTok: never promote known-tiny MSE slices, even when CDP marked them Media.
+        if (IsInsufficientByteDanceDownloadObject(url, knownLength))
+            return;
+
         // Weak small responses may be junk; strong MIME / browser play still go through.
-        // (ABR/range chunks report tiny Content-Length while the media itself is large).
+        // (YouTube ABR/range chunks report tiny Content-Length while the media itself is large).
         var ranged = IsRangedOrVolatileMediaUrl(url);
         if (!browserObserved && !ranged && !IsStrongMediaMime(mime) &&
             knownLength is > 0 and < MediaResourceSizeFilter.MinStrongMimeBytes &&
@@ -797,7 +846,9 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                     BrowserObservedMedia? evidence = null;
                     var trustBrowserObservation = observed &&
                         !IsManifestAddress(probeUrl, mime) &&
+                        !IsInsufficientByteDanceDownloadObject(probeUrl, knownLength) &&
                         _browserObserved.TryGetValue(mediaKey, out evidence) &&
+                        !IsInsufficientByteDanceDownloadObject(evidence.Url, evidence.ContentLength) &&
                         (knownLength is null ||
                          knownLength >= MediaResourceSizeFilter.MinStrongMimeBytes ||
                          ranged ||
@@ -857,7 +908,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             null,
             container,
             null,
-            null,
+            evidence.ContentLength,
             evidence.Context)
         {
             IsValidated = true,
@@ -1266,6 +1317,11 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                             p.Track.Kind is MediaTrackKind.Video or MediaTrackKind.Combined))
             probed = probed.Where(p => !IsDouyinLiveStream(p.Track.SourceUrl)).ToArray();
 
+        // Drop Douyin/TikTok MSE Range windows that slipped through with a known tiny length.
+        probed = probed
+            .Where(p => !IsInsufficientByteDanceDownloadObject(p.Track.SourceUrl, p.Track.ContentLength))
+            .ToArray();
+
         DetectedVideo? external = null;
         if (page is not null && _externalVideos.TryGetValue(page.AbsoluteUri, out var ext))
             external = ext;
@@ -1345,14 +1401,18 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             a.Manifest.Variants.Where(v => v.Tracks.Count == 1).Select(v => new Probed(a.Page,
                 v.Tracks[0] with { ContentIdentity = a.Track.ContentIdentity ?? v.Tracks[0].ContentIdentity }, 0, v.Height))).ToArray();
         var videos = singleTracks.Where(a => a.Track.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
+            .Where(a => !IsInsufficientByteDanceDownloadObject(a.Track.SourceUrl, a.Track.ContentLength))
             .OrderBy(a => MediaVariantRanking.IsFlvLike(a.Track) ? 1 : 0)
+            .ThenByDescending(a => a.Track.Kind == MediaTrackKind.Combined ? 1 : 0)
             .ThenByDescending(a => a.Height ?? 0)
             .ThenByDescending(a => a.Track.ContentLength ?? 0)
             .ToArray();
         var audios = singleTracks.Where(a => a.Track.Kind == MediaTrackKind.Audio)
+            .Where(a => !IsInsufficientByteDanceDownloadObject(a.Track.SourceUrl, a.Track.ContentLength))
             .OrderBy(a => MediaVariantRanking.IsFlvLike(a.Track) ? 1 : 0)
             .ThenByDescending(a => a.Track.ContentLength ?? a.Track.Bandwidth ?? 0)
             .Concat(singleTracks.Where(a => a.Track.Kind == MediaTrackKind.Combined)
+                .Where(a => !IsInsufficientByteDanceDownloadObject(a.Track.SourceUrl, a.Track.ContentLength))
                 .Select(a => a with { Track = a.Track with { Kind = MediaTrackKind.Audio, TrackId = "audio-extract", Codec = null } }))
             .ToArray();
 
@@ -1485,6 +1545,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             })
             .Where(v => !MediaResourceSizeFilter.ShouldExcludeVariant(v))
             .OrderByDescending(v => v.Tracks.Any(t => t.BrowserObserved))
+            .ThenBy(v => v.Tracks.Any(t =>
+                IsInsufficientByteDanceDownloadObject(t.SourceUrl, t.ContentLength)) ? 1 : 0)
             .ThenByDescending(v => v.Height ?? 0)
             .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
             .ToList();
@@ -1853,9 +1915,12 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         var browserVideos = _browserObserved.Values
             .Where(o => !IsManifestAddress(o.Url, o.Mime))
             .Where(o => !IsDouyinLiveStream(o.Url))
+            .Where(o => !IsInsufficientByteDanceDownloadObject(o.Url, o.ContentLength))
             .Where(o => o.KindHint is MediaTrackKind.Video or MediaTrackKind.Combined)
             .GroupBy(o => MediaUrlNormalizer.Normalize(o.Url), StringComparer.OrdinalIgnoreCase)
-            .Select(g => g.First())
+            .Select(g => g.OrderByDescending(o => o.ContentLength ?? 0).First())
+            .OrderByDescending(o => o.KindHint == MediaTrackKind.Combined ? 1 : 0)
+            .ThenByDescending(o => o.ContentLength ?? 0)
             .ToArray();
         if (browserVideos.Length == 0)
             return video;
@@ -1872,6 +1937,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             .Where(t => t.Kind is MediaTrackKind.Audio or MediaTrackKind.Combined)
             .Where(t => !MediaVariantRanking.IsFlvLike(t))
             .Where(t => !IsDouyinLiveStream(t.SourceUrl))
+            .Where(t => !IsInsufficientByteDanceDownloadObject(t.SourceUrl, t.ContentLength))
             .Where(t => IsLikelyVodAudioUrl(t.SourceUrl) || t.Kind == MediaTrackKind.Audio)
             .OrderByDescending(t => IsLikelyVodAudioUrl(t.SourceUrl) ? 1 : 0)
             .ThenByDescending(t => t.ContentLength ?? t.Bandwidth ?? 0)
@@ -1902,7 +1968,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 null,
                 container,
                 null,
-                null,
+                observed.ContentLength,
                 observed.Context)
             {
                 IsValidated = true,
@@ -1992,7 +2058,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         Uri Url,
         string? Mime,
         MediaTrackKind KindHint,
-        RequestContext Context);
+        RequestContext Context,
+        long? ContentLength = null);
 
     internal sealed record Probed(Uri Page, MediaTrack Track, double Duration, int? Height, ManifestResolutionResult? Manifest = null);
 }

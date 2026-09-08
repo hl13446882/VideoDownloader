@@ -36,6 +36,11 @@ public sealed class TikTokMediaAdapter : ISiteMediaAdapter
         if (networkEvent.StatusCode is not (200 or 206 or null))
             return new(NetworkCandidateDecisionKind.Default, Name, "bad_status");
 
+        // MSE Range windows are not downloadable progressive objects.
+        if (UnifiedMediaPipeline.IsInsufficientByteDanceDownloadObject(
+                networkEvent.Url, networkEvent.ContentLength))
+            return new(NetworkCandidateDecisionKind.Reject, Name, "tiny_mse_slice");
+
         // Browser already delivered media bytes — strongest TikTok evidence.
         if (UnifiedMediaPipeline.IsBrowserPlayEvidence(networkEvent))
         {
