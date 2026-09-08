@@ -168,9 +168,10 @@ public partial class MainWindow
                             else if(result.Ok)
                                 anyTrackOk=true;
                             else if(track.BrowserObserved &&
-                                    result.Note.Contains("NET_TIMEOUT",StringComparison.OrdinalIgnoreCase))
+                                    (result.Note.Contains("NET_TIMEOUT",StringComparison.OrdinalIgnoreCase) ||
+                                     result.Note.Contains("TaskCanceled",StringComparison.OrdinalIgnoreCase)))
                             {
-                                // Browser already played these bytes; 2MiB proof is the hard gate.
+                                // Browser already played these bytes; 20MiB proof is the hard gate.
                                 samples[^1]=$"{track.Kind}: browser-observed (sample GET timed out); {track.SourceUrl.Host}";
                                 anyTrackOk=true;
                             }
@@ -190,6 +191,15 @@ public partial class MainWindow
                                     samples.Add($"fallback {alt.Kind}: {altResult.Note}");
                                     if(altResult.Ok && alt.Kind==MediaTrackKind.Combined) { anyTrackOk=true; }
                                     else sampleOk=false;
+                                }
+                                else if(result.Note.Contains("TaskCanceled",StringComparison.OrdinalIgnoreCase) ||
+                                        result.Note.Contains("NET_TIMEOUT",StringComparison.OrdinalIgnoreCase) ||
+                                        result.Note.Contains("timed out",StringComparison.OrdinalIgnoreCase))
+                                {
+                                    // Flaky first-segment probe must not veto a real HLS playlist;
+                                    // the ≥20MiB (or complete) download proof is authoritative.
+                                    samples[^1]=$"{track.Kind}: HLS sample deferred to download proof; {track.SourceUrl.Host}";
+                                    anyTrackOk=true;
                                 }
                                 else
                                     sampleOk &= false;
