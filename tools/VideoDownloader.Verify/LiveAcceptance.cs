@@ -551,7 +551,7 @@ public partial class MainWindow
                 }
                 // Short VOD under 20MiB still counts when the body finished (≥64KiB).
                 var entityLength=TryGetEntityLength(response) ?? response.Content.Headers.ContentLength;
-                var complete=entityLength is >0 and <minBytes && total>=entityLength.Value && total>=64*1024;
+                var complete=entityLength is long el && el>0 && el<minBytes && total>=el && total>=64*1024;
                 var ok=total>=minBytes || complete;
                 return(ok,$"bytes={total} entity={entityLength?.ToString()??"?"} complete={complete} host={url.Host}");
             }
