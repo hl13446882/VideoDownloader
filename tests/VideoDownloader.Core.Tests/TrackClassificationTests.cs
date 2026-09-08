@@ -18,10 +18,12 @@ public class TrackClassificationTests
     }
 
     [Fact]
-    public void LeafPlaylist_RequiresStreamValidation()
+    public void LeafPlaylist_WithSegments_IsCombined()
     {
         var result = HlsManifestParser.Parse("#EXTM3U\n#EXTINF:5,\na.ts\n#EXT-X-ENDLIST", new("https://cdn.test/a.m3u8"), RequestContext.CreateEmpty());
-        Assert.Equal(MediaTrackKind.Unknown, result.Variants[0].Tracks[0].Kind);
+        var track = Assert.Single(Assert.Single(result.Variants).Tracks);
+        Assert.Equal(MediaTrackKind.Combined, track.Kind);
+        Assert.True(track.IsValidated);
     }
 
     [Fact]
