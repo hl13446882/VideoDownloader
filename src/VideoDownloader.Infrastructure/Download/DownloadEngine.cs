@@ -165,7 +165,9 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
     public IReadOnlyList<DownloadJob> GetActiveJobs() =>
         _jobs.Values
             .Where(j => j.Status is not (DownloadStatus.Removed or DownloadStatus.Cancelled))
-            .OrderByDescending(j => j.UpdatedAt)
+            // Incomplete first; then newest UpdatedAt (completion time for finished jobs).
+            .OrderBy(j => j.Status == DownloadStatus.Completed ? 1 : 0)
+            .ThenByDescending(j => j.UpdatedAt)
             .ToList();
 
     public async Task RemoveAsync(Guid jobId, bool deleteFile = false, CancellationToken ct = default)

@@ -1088,8 +1088,9 @@ public sealed partial class MainViewModel : ObservableObject
     public void TickDownloads()
     {
         var jobs = _downloadEngine.GetActiveJobs();
-        if (DownloadJobs.Count != jobs.Count ||
-            jobs.Any(j => DownloadJobs.All(vm => vm.Job.Id != j.Id)))
+        var orderChanged = DownloadJobs.Count != jobs.Count ||
+                           !DownloadJobs.Select(vm => vm.Job.Id).SequenceEqual(jobs.Select(j => j.Id));
+        if (orderChanged)
         {
             RefreshDownloadJobs();
             return;
