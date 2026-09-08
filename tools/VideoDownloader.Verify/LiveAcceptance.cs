@@ -192,6 +192,29 @@ public partial class MainWindow
                         }
                         if(albumOk || (selected is not null && MediaVariantReconciler.HasCompleteAudio(selected)))
                             sampleOk &= anyTrackOk || tracks.All(t=>t.Kind==MediaTrackKind.Image);
+
+                        // Product gate: preferred complete media must actually yield ≥2 MiB.
+                        if(sampleOk && selected is not null && !albumOk)
+                        {
+                            var proofCandidates=selected.Tracks
+                                .Where(t=>t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
+                                .OrderBy(t=>UnifiedMediaPipeline.IsDouyinPlayGateway(t.SourceUrl)?1:0)
+                                .Concat((video.Variants??[]).SelectMany(v=>v.Tracks)
+                                    .Where(t=>t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
+                                    .OrderBy(t=>UnifiedMediaPipeline.IsDouyinPlayGateway(t.SourceUrl)?1:0))
+                                .DistinctBy(t=>t.SourceUrl.AbsoluteUri)
+                                .ToArray();
+                            var proofOk=false;
+                            string? proofNote=null;
+                            foreach(var proofTrack in proofCandidates)
+                            {
+                                var proof=await ProveDownloadAtLeastAsync(proofTrack,2L*1024*1024);
+                                proofNote=proof.Note;
+                                if(proof.Ok){proofOk=true;break;}
+                            }
+                            samples.Add($"download≥2MiB: {proofNote??"no video track"}");
+                            sampleOk &= proofOk;
+                        }
                     }
                     // Short hold only: autoplay feeds advance during multi-second waits and falsely fail stability.
                     await Task.Delay(1200);
@@ -453,6 +476,93 @@ public partial class MainWindow
             Log($"Skipping a visible {label} post; it does not count toward the four-video acceptance.");
             await WebView.CoreWebView2.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent",JsonSerializer.Serialize(new {type="keyDown",key="ArrowDown",code="ArrowDown",windowsVirtualKeyCode=40,nativeVirtualKeyCode=40}));
             await WebView.CoreWebView2.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent",JsonSerializer.Serialize(new {type="keyUp",key="ArrowDown",code="ArrowDown",windowsVirtualKeyCode=40,nativeVirtualKeyCode=40}));
+        }
+    }
+
+    private async Task<(bool Ok,string Note)> ProveDownloadAtLeastAsync(MediaTrack track,long minBytes)
+    {
+        try
+        {
+            if(track.Container is "hls" or "dash" ||
+               track.SourceUrl.AbsolutePath.EndsWith(".m3u8",StringComparison.OrdinalIgnoreCase) ||
+               track.SourceUrl.AbsolutePath.EndsWith(".mpd",StringComparison.OrdinalIgnoreCase) ||
+               UnifiedMediaPipeline.IsDouyinLiveStream(track.SourceUrl))
+                return await ProveManifestDownloadAtLeastAsync(track,minBytes);
+
+            using var client=_services!.GetRequiredService<System.Net.Http.IHttpClientFactory>().CreateClient("media-primary");
+            var factory=_services!.GetRequiredService<IRequestMessageFactory>();
+            var url=track.SourceUrl;
+            using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(90));
+            for(var hop=0;hop<6;hop++)
+            {
+                using var request=factory.Create(
+                    MediaVariant.FromTracks("proof",null,null,null,track.Container,[track with { SourceUrl=url }]),HttpMethod.Get,url);
+                request.Headers.Remove("Range");
+                request.Headers.Remove("If-Range");
+                request.Headers.Range=new System.Net.Http.Headers.RangeHeaderValue(0,minBytes-1);
+                using var response=await client.SendAsync(request,HttpCompletionOption.ResponseHeadersRead,timeout.Token);
+                if((int)response.StatusCode is >=300 and <400)
+                {
+                    var location=response.Headers.Location;
+                    if(location is null) return(false,$"HTTP {(int)response.StatusCode} without Location from {url.Host}");
+                    url=location.IsAbsoluteUri ? location : new Uri(url,location);
+                    continue;
+                }
+                if(!response.IsSuccessStatusCode)
+                    return(false,$"HTTP {(int)response.StatusCode} from {url.Host}");
+                await using var stream=await response.Content.ReadAsStreamAsync(timeout.Token);
+                var buffer=new byte[64*1024];
+                long total=0;
+                while(total<minBytes)
+                {
+                    var read=await stream.ReadAsync(buffer.AsMemory(0,(int)Math.Min(buffer.Length,minBytes-total)),timeout.Token);
+                    if(read==0) break;
+                    total+=read;
+                }
+                // Short VOD under 2MiB still counts if the server closed after a full body ≥64KiB.
+                var contentLength=response.Content.Headers.ContentLength;
+                var ok=total>=minBytes ||
+                       (contentLength is >0 && contentLength<minBytes && total>=contentLength.Value && total>=64*1024);
+                return(ok,$"bytes={total} host={url.Host}");
+            }
+            return(false,$"too many redirects from {track.SourceUrl.Host}");
+        }
+        catch(Exception ex)
+        {
+            return(false,ex.GetType().Name+": "+ex.Message);
+        }
+    }
+
+    private async Task<(bool Ok,string Note)> ProveManifestDownloadAtLeastAsync(MediaTrack track,long minBytes)
+    {
+        var folder=Path.Combine(Path.GetTempPath(),"vd-proof-"+Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        var publish=FindPublishRoot();
+        // Pull enough segments to reach ≥2MiB (first segment alone is often smaller).
+        var info=new ProcessStartInfo(Path.Combine(publish,"M3u8","N_m3u8DL-RE.exe"))
+            {UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,WorkingDirectory=folder};
+        foreach(var arg in new[]{track.SourceUrl.AbsoluteUri,"--custom-range","0-40","--skip-merge","--auto-select","--thread-count","4","--download-retry-count","1",
+            "--save-dir",folder,"--tmp-dir",Path.Combine(folder,"segments"),"--save-name","proof","--no-log","--no-ansi-color","--write-meta-json","false","--disable-update-check",
+            "--ffmpeg-binary-path",Path.Combine(publish,"ffmpeg","ffmpeg.exe")}) info.ArgumentList.Add(arg);
+        using var request=_services!.GetRequiredService<IRequestMessageFactory>().Create(MediaVariant.FromTracks("proof",null,null,null,track.Container,[track]),HttpMethod.Get,track.SourceUrl);
+        foreach(var header in request.Headers.Where(h=>!h.Key.Equals("Range",StringComparison.OrdinalIgnoreCase)))
+        {info.ArgumentList.Add("-H");info.ArgumentList.Add(header.Key+": "+string.Join(", ",header.Value));}
+        using var process=Process.Start(info)!;
+        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(120));
+        var output=process.StandardOutput.ReadToEndAsync();var errors=process.StandardError.ReadToEndAsync();
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+            await Task.WhenAll(output,errors);
+            var bytes=Directory.EnumerateFiles(folder,"*",SearchOption.AllDirectories)
+                .Where(p=>new[]{".ts",".m4s",".mp4",".m4a",".aac",".webm",".mkv"}.Contains(Path.GetExtension(p)))
+                .Sum(p=>new FileInfo(p).Length);
+            return(process.ExitCode==0&&bytes>=minBytes,$"N_m3u8DL-RE proof: exit={process.ExitCode}, mediaBytes={bytes}");
+        }
+        finally
+        {
+            if(!process.HasExited) process.Kill(true);
+            try{Directory.Delete(folder,true);}catch{/* best-effort */}
         }
     }
 

@@ -42,6 +42,8 @@ public sealed class DownloadJobStateMachine : IDownloadJobStateMachine
             throw new InvalidOperationException($"Invalid transition from {job.Status} to {target} for job {job.Id}");
 
         job.Status = target;
-        job.UpdatedAt = DateTimeOffset.UtcNow;
+        // Queue order uses the first UpdatedAt; do not refresh it on Preparing/Downloading/Muxing/Pause.
+        if (target is DownloadStatus.Completed or DownloadStatus.Failed or DownloadStatus.Cancelled)
+            job.UpdatedAt = DateTimeOffset.UtcNow;
     }
 }

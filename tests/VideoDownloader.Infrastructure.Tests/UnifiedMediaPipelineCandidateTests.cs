@@ -10,9 +10,41 @@ public class UnifiedMediaPipelineCandidateTests
     [Theory]
     [InlineData("https://v3.douyinvod.com/video/tos/cn/item/media-audio-und-mp4a/?mime_type=video_mp4", "video/mp4", MediaTrackKind.Audio)]
     [InlineData("https://v3.douyinvod.com/video/tos/cn/item/media-video-avc1/?mime_type=video_mp4", "video/mp4", MediaTrackKind.Video)]
+    [InlineData("https://v3-dy-o.zjcdn.com/abc/video/tos/cn/tos-cn-ve-15/obj/?mime_type=video_mp4&__vid=7682715203741568283", "video/mp4", MediaTrackKind.Combined)]
     public void TrackPathOverridesGenericContainerMime(string url, string mime, MediaTrackKind expected)
     {
         Assert.Equal(expected, UnifiedMediaPipeline.InferKindFromMime(mime, new Uri(url)));
+    }
+
+    [Theory]
+    [InlineData("http://pull-hls-f26.douyinliving.com/media/stream-1.m3u8", true)]
+    [InlineData("http://pull-flv-f26.douyinliving.com/media/stream-1.flv", true)]
+    [InlineData("http://pull-t5.douyincdn.com/third/stream-120.flv", true)]
+    [InlineData("https://v3-dy-o.zjcdn.com/video/tos/obj/?mime_type=video_mp4", false)]
+    public void DetectsDouyinLiveStreamUrls(string url, bool expected) =>
+        Assert.Equal(expected, UnifiedMediaPipeline.IsDouyinLiveStream(new Uri(url)));
+
+    [Fact]
+    public void DetectsDouyinPlayGateway()
+    {
+        Assert.True(UnifiedMediaPipeline.IsDouyinPlayGateway(
+            new Uri("https://www.douyin.com/aweme/v1/play/?video_id=x&is_play_url=1")));
+        Assert.False(UnifiedMediaPipeline.IsDouyinPlayGateway(
+            new Uri("https://v3-web-prime.douyinvod.com/video/tos/obj")));
+    }
+
+    [Theory]
+    [InlineData("id:7682715203741568283", "7682715203741568283")]
+    [InlineData("content:douyin:7682715203741568283", "7682715203741568283")]
+    [InlineData("www.douyin.com:content:7682715203741568283", "7682715203741568283")]
+    public void NormalizeContentId_CollapsesPrefixes(string identity, string expected) =>
+        Assert.Equal(expected, UnifiedMediaPipeline.NormalizeContentId(identity));
+
+    [Fact]
+    public void ExtractContentIdFromUrl_ReadsVidQuery()
+    {
+        var url = new Uri("https://v3-dy-o.zjcdn.com/x/?mime_type=video_mp4&__vid=7682715203741568283");
+        Assert.Equal("7682715203741568283", UnifiedMediaPipeline.ExtractContentIdFromUrl(url));
     }
 
     [Theory]

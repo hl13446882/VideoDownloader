@@ -341,6 +341,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             var full = url.AbsoluteUri;
             var path = url.AbsolutePath;
             if (path.Contains("/media-audio-", StringComparison.OrdinalIgnoreCase) ||
+                path.Contains("/ies-music/", StringComparison.OrdinalIgnoreCase) ||
                 path.Contains("-30216", StringComparison.OrdinalIgnoreCase) ||
                 path.Contains("-30280", StringComparison.OrdinalIgnoreCase) ||
                 full.Contains("mime_type=audio", StringComparison.OrdinalIgnoreCase) ||
@@ -348,11 +349,18 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 full.Contains("/audio/tos/", StringComparison.OrdinalIgnoreCase) ||
                 full.Contains("media_type=audio", StringComparison.OrdinalIgnoreCase))
                 return MediaTrackKind.Audio;
-            if (full.Contains("mime_type=video", StringComparison.OrdinalIgnoreCase) ||
-                full.Contains("mimetype=video", StringComparison.OrdinalIgnoreCase) ||
-                full.Contains("/video/tos/", StringComparison.OrdinalIgnoreCase) ||
-                full.Contains("media_type=video", StringComparison.OrdinalIgnoreCase) ||
-                path.Contains("-300", StringComparison.OrdinalIgnoreCase))
+            // Separate video-only DASH/fMP4 track.
+            if (path.Contains("/media-video-", StringComparison.OrdinalIgnoreCase))
+                return MediaTrackKind.Video;
+            // Muxed progressive Douyin/TikTok objects often advertise mime_type=video_mp4
+            // without /media-video- — treat as Combined so we do not invent a live audio pair.
+            if ((full.Contains("mime_type=video", StringComparison.OrdinalIgnoreCase) ||
+                 full.Contains("mimetype=video", StringComparison.OrdinalIgnoreCase) ||
+                 full.Contains("/video/tos/", StringComparison.OrdinalIgnoreCase) ||
+                 full.Contains("media_type=video", StringComparison.OrdinalIgnoreCase)) &&
+                !IsDouyinLiveStream(url))
+                return MediaTrackKind.Combined;
+            if (path.Contains("-300", StringComparison.OrdinalIgnoreCase))
                 return MediaTrackKind.Video;
         }
 
@@ -364,6 +372,48 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             !mime.Contains("audio", StringComparison.OrdinalIgnoreCase))
             return MediaTrackKind.Video;
         return MediaTrackKind.Combined;
+    }
+
+    /// <summary>Douyin feed live previews (HLS/FLV) must not attach to short-video VOD.</summary>
+    public static bool IsDouyinLiveStream(Uri url)
+    {
+        var host = url.Host;
+        if (host.Contains("douyinliving", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("livehwc", StringComparison.OrdinalIgnoreCase))
+            return true;
+        var full = url.AbsoluteUri;
+        return full.Contains("pull-hls", StringComparison.OrdinalIgnoreCase) ||
+               full.Contains("pull-flv", StringComparison.OrdinalIgnoreCase) ||
+               full.Contains("/media/stream-", StringComparison.OrdinalIgnoreCase) ||
+               full.Contains("/third/stream-", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>www.douyin.com/aweme/v1/play gateways 302 to CDN — prefer direct objects.</summary>
+    public static bool IsDouyinPlayGateway(Uri url)
+    {
+        var host = url.Host;
+        if (!host.Equals("www.douyin.com", StringComparison.OrdinalIgnoreCase) &&
+            !host.Equals("www.iesdouyin.com", StringComparison.OrdinalIgnoreCase))
+            return false;
+        var path = url.AbsolutePath;
+        return path.Contains("/aweme/", StringComparison.OrdinalIgnoreCase) ||
+               path.Contains("/play/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static string? ExtractContentIdFromUrl(Uri url)
+    {
+        var q = url.Query;
+        foreach (var key in new[] { "__vid=", "target=", "aweme_id=", "item_ids=", "item_id=", "modal_id=" })
+        {
+            var idx = q.IndexOf(key, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) continue;
+            var start = idx + key.Length;
+            var end = q.IndexOf('&', start);
+            var raw = Uri.UnescapeDataString(end < 0 ? q[start..] : q[start..end]);
+            if (Regex.IsMatch(raw, @"^\d{10,}$"))
+                return raw;
+        }
+        return null;
     }
 
     private static string KindLabel(MediaTrackKind kind) => kind switch
@@ -705,7 +755,9 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
 
         // Deduplicate by normalized URL so YouTube/TikTok range/ABR variants share one probe slot.
         var mediaKey = MediaUrlNormalizer.Normalize(url);
-        if (MediaOwnership.ForPage(page, _observedIdentity) is { } pageOwner)
+        if (ExtractContentIdFromUrl(url) is { } urlOwner)
+            _owners[mediaKey] = "id:" + urlOwner;
+        else if (MediaOwnership.ForPage(page, _observedIdentity) is { } pageOwner && !IsDouyinLiveStream(url))
             _owners[mediaKey] = pageOwner;
         var dedupeKey = (primary ? "primary:" : "network:") + mediaKey;
         var probeUrl = url;
@@ -1180,7 +1232,12 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             {
                 var inherited = _owners.GetValueOrDefault(entry.Key)
                                 ?? entry.Value.Track.ContentIdentity
-                                ?? (owner is not null && owner.StartsWith("id:", StringComparison.Ordinal)
+                                ?? (ExtractContentIdFromUrl(entry.Value.Track.SourceUrl) is { } fromUrl
+                                    ? "id:" + fromUrl
+                                    : null)
+                                ?? (owner is not null &&
+                                    owner.StartsWith("id:", StringComparison.Ordinal) &&
+                                    !IsDouyinLiveStream(entry.Value.Track.SourceUrl)
                                     ? owner
                                     : null);
                 return entry.Value with
@@ -1189,8 +1246,25 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 };
             })
             .Where(m => page is null || SamePage(m.Page, page))
-            .Where(m => owner is null || m.Track.ContentIdentity is null || m.Track.ContentIdentity == owner)
+            .Where(m =>
+            {
+                if (owner is null) return true;
+                var pageId = NormalizeContentId(owner);
+                var trackId = NormalizeContentId(m.Track.ContentIdentity) ??
+                              ExtractContentIdFromUrl(m.Track.SourceUrl);
+                if (trackId is not null && pageId is not null)
+                    return string.Equals(trackId, pageId, StringComparison.OrdinalIgnoreCase);
+                // Orphan live previews must not pollute a concrete short-video identity.
+                if (pageId is not null && IsDouyinLiveStream(m.Track.SourceUrl))
+                    return false;
+                return trackId is null;
+            })
             .ToArray();
+
+        // When the active item already has progressive VOD, drop leftover live HLS/FLV.
+        if (probed.Any(p => !IsDouyinLiveStream(p.Track.SourceUrl) &&
+                            p.Track.Kind is MediaTrackKind.Video or MediaTrackKind.Combined))
+            probed = probed.Where(p => !IsDouyinLiveStream(p.Track.SourceUrl)).ToArray();
 
         DetectedVideo? external = null;
         if (page is not null && _externalVideos.TryGetValue(page.AbsoluteUri, out var ext))
@@ -1337,6 +1411,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             var bestAudio = audios
                 .Where(audio => CanPair(item, audio))
                 .OrderBy(audio => MediaVariantRanking.IsFlvLike(audio.Track) ? 1 : 0)
+                .ThenBy(audio => IsDouyinLiveStream(audio.Track.SourceUrl) ? 1 : 0)
+                .ThenByDescending(audio => IsLikelyVodAudioUrl(audio.Track.SourceUrl) ? 1 : 0)
                 .ThenByDescending(audio => audio.Track.ContentLength ?? audio.Track.Bandwidth ?? 0)
                 .FirstOrDefault();
             var track = item.Track;
@@ -1557,23 +1633,59 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         if (!SamePage(video.Page, audio.Page))
             return false;
 
-        var videoId = video.Track.ContentIdentity;
-        var audioId = audio.Track.ContentIdentity;
+        // Live HLS/FLV must never mux with progressive short-video objects.
+        if (IsDouyinLiveStream(video.Track.SourceUrl) != IsDouyinLiveStream(audio.Track.SourceUrl))
+            return false;
+
+        var videoId = NormalizeContentId(video.Track.ContentIdentity) ??
+                      ExtractContentIdFromUrl(video.Track.SourceUrl);
+        var audioId = NormalizeContentId(audio.Track.ContentIdentity) ??
+                      ExtractContentIdFromUrl(audio.Track.SourceUrl);
         if (videoId is not null && audioId is not null)
-            return videoId == audioId;
+            return string.Equals(videoId, audioId, StringComparison.OrdinalIgnoreCase);
+
+        // Prefer real VOD audio tracks (media-audio / ies-music) over orphans.
+        if (!IsLikelyVodAudioUrl(audio.Track.SourceUrl) &&
+            !IsDouyinLiveStream(audio.Track.SourceUrl) &&
+            audio.Track.Kind != MediaTrackKind.Audio)
+            return false;
 
         // Orphan tracks on a shared feed host must not invent a pair.
         if (videoId is null && audioId is null)
-            return false;
+            return IsLikelyVodAudioUrl(audio.Track.SourceUrl) &&
+                   !IsDouyinLiveStream(video.Track.SourceUrl);
 
         // One-sided stamp: require the stamped id to match page ownership when the URL
         // itself encodes a content id; otherwise trust SamePage (active feed item).
         var stamped = videoId ?? audioId!;
-        var pageOwner = MediaOwnership.ForPage(video.Page, null);
+        var pageOwner = NormalizeContentId(MediaOwnership.ForPage(video.Page, null));
         if (pageOwner is not null)
-            return stamped == pageOwner;
+            return string.Equals(stamped, pageOwner, StringComparison.OrdinalIgnoreCase);
 
-        return true;
+        return IsLikelyVodAudioUrl(audio.Track.SourceUrl);
+    }
+
+    private static bool IsLikelyVodAudioUrl(Uri url)
+    {
+        var path = url.AbsolutePath;
+        return path.Contains("/media-audio-", StringComparison.OrdinalIgnoreCase) ||
+               path.Contains("/ies-music/", StringComparison.OrdinalIgnoreCase) ||
+               path.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase) ||
+               path.EndsWith(".m4a", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Collapse <c>id:123</c>, <c>content:douyin:123</c>, <c>host:content:123</c> to bare <c>123</c>.
+    /// </summary>
+    internal static string? NormalizeContentId(string? identity)
+    {
+        if (string.IsNullOrWhiteSpace(identity))
+            return null;
+        if (identity.StartsWith("id:", StringComparison.OrdinalIgnoreCase))
+            return identity[3..].Trim();
+        var match = Regex.Match(identity, @"content:(?:[A-Za-z][\w-]*:)?([A-Za-z0-9_-]{6,})",
+            RegexOptions.IgnoreCase);
+        return match.Success ? match.Groups[1].Value : identity.Trim();
     }
 
     private static bool IsLikelyCrossSiteLeak(Uri page, Uri media)
@@ -1740,6 +1852,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
     {
         var browserVideos = _browserObserved.Values
             .Where(o => !IsManifestAddress(o.Url, o.Mime))
+            .Where(o => !IsDouyinLiveStream(o.Url))
             .Where(o => o.KindHint is MediaTrackKind.Video or MediaTrackKind.Combined)
             .GroupBy(o => MediaUrlNormalizer.Normalize(o.Url), StringComparer.OrdinalIgnoreCase)
             .Select(g => g.First())
@@ -1752,11 +1865,16 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             .Select(t => MediaUrlNormalizer.Normalize(t.SourceUrl))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        var owner = video.SiteContentId is null ? null : "id:" + video.SiteContentId;
+        var owner = MediaOwnership.ForPage(video.PageUrl, video.SiteContentId is null ? null : "content:" + video.SiteContentId)
+                    ?? (video.SiteContentId is null ? null : "id:" + video.SiteContentId);
         var pairedAudio = video.Variants
             .SelectMany(v => v.Tracks)
             .Where(t => t.Kind is MediaTrackKind.Audio or MediaTrackKind.Combined)
-            .OrderByDescending(t => t.ContentLength ?? t.Bandwidth ?? 0)
+            .Where(t => !MediaVariantRanking.IsFlvLike(t))
+            .Where(t => !IsDouyinLiveStream(t.SourceUrl))
+            .Where(t => IsLikelyVodAudioUrl(t.SourceUrl) || t.Kind == MediaTrackKind.Audio)
+            .OrderByDescending(t => IsLikelyVodAudioUrl(t.SourceUrl) ? 1 : 0)
+            .ThenByDescending(t => t.ContentLength ?? t.Bandwidth ?? 0)
             .FirstOrDefault();
         if (pairedAudio is { Kind: MediaTrackKind.Combined })
             pairedAudio = pairedAudio with { Kind = MediaTrackKind.Audio, TrackId = "audio-extract", Codec = null };
@@ -1772,9 +1890,14 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             var container = observed.Mime?.Contains("webm", StringComparison.OrdinalIgnoreCase) == true
                 ? "webm"
                 : "mp4";
+            var kind = observed.KindHint == MediaTrackKind.Audio
+                ? MediaTrackKind.Video
+                : observed.KindHint;
+            // Muxed progressive needs no invented audio partner.
+            var needsAudio = kind == MediaTrackKind.Video && pairedAudio is not null;
             var track = new MediaTrack(
                 $"browser-video-{index++}",
-                observed.KindHint == MediaTrackKind.Audio ? MediaTrackKind.Video : observed.KindHint,
+                needsAudio ? MediaTrackKind.Video : MediaTrackKind.Combined,
                 observed.Url,
                 null,
                 container,
@@ -1785,17 +1908,17 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 IsValidated = true,
                 BrowserObserved = true,
                 Evidence = MediaEvidence.BrowserObserved,
-                ContentIdentity = owner
+                ContentIdentity = owner ?? (ExtractContentIdFromUrl(observed.Url) is { } vid ? "id:" + vid : null)
             };
-            var tracks = pairedAudio is null
-                ? new[] { track }
-                : new[] { track, pairedAudio with { ContentIdentity = owner ?? pairedAudio.ContentIdentity } };
+            var tracks = needsAudio
+                ? new[] { track, pairedAudio! with { ContentIdentity = owner ?? pairedAudio!.ContentIdentity } }
+                : new[] { track };
             injected.Add(MediaVariant.FromTracks(
-                pairedAudio is null ? "视频 (浏览器实播)" : "视频 (浏览器实播+音轨)",
+                needsAudio ? "视频 (浏览器实播+音轨)" : "视频 (浏览器实播)",
                 null,
                 null,
                 null,
-                pairedAudio is null ? container : "mkv",
+                needsAudio ? "mkv" : container,
                 tracks) with
             {
                 ContentIdentity = owner,

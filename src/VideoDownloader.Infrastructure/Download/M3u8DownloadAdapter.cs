@@ -135,7 +135,6 @@ public sealed class M3u8DownloadAdapter(
                         stop.Cancel();
                         throw new DownloadException(ErrorCodes.LicenseLimit, "DEMO download limit exceeded.");
                     }
-                    job.UpdatedAt = DateTimeOffset.UtcNow;
                     return bytes + Directory.EnumerateFiles(output).Sum(ProcessProgress.FileLength);
                 }, TimeSpan.FromMinutes(2), stop.Token);
                 await readers.WaitAsync(TimeSpan.FromSeconds(5), stop.Token);

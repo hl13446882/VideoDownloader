@@ -165,7 +165,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
     public IReadOnlyList<DownloadJob> GetActiveJobs() =>
         _jobs.Values
             .Where(j => j.Status is not (DownloadStatus.Removed or DownloadStatus.Cancelled))
-            // Incomplete first; then newest UpdatedAt (completion time for finished jobs).
+            // Incomplete first; then by first UpdatedAt (must not be refreshed on progress).
             .OrderBy(j => j.Status == DownloadStatus.Completed ? 1 : 0)
             .ThenByDescending(j => j.UpdatedAt)
             .ToList();
@@ -391,7 +391,6 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             if (job.Status == DownloadStatus.Completed && File.Exists(job.TargetPath))
                 UpdateCompletedFileSize(job);
 
-            job.UpdatedAt = DateTimeOffset.UtcNow;
             _jobs[job.Id] = job;
             await _repository.SaveAsync(job, ct);
 
@@ -569,7 +568,6 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                 var progress = new Progress<long>(bytes =>
                 {
                     job.DownloadedBytes = bytes;
-                    job.UpdatedAt = DateTimeOffset.UtcNow;
                 });
                 await _httpDownloader.DownloadDirectAsync(job, progress, checkpoint, ct);
                 UpdateCompletedFileSize(job);
@@ -653,7 +651,6 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         var length = new FileInfo(job.TargetPath).Length;
         job.DownloadedBytes = length;
         job.TotalBytes = length;
-        job.UpdatedAt = DateTimeOffset.UtcNow;
     }
 
     internal static string ClassifyError(Exception ex) => ex switch
@@ -711,7 +708,6 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                 var existingLength = new FileInfo(trackPath).Length;
                 completedBytes += existingLength;
                 job.DownloadedBytes = completedBytes;
-                job.UpdatedAt = DateTimeOffset.UtcNow;
                 await checkpoint();
                 localTracks.Add(track with
                 {
@@ -747,13 +743,11 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             var progress = new Progress<long>(bytes =>
             {
                 job.DownloadedBytes = completedBytes + bytes;
-                job.UpdatedAt = DateTimeOffset.UtcNow;
             });
 
             await _httpDownloader.DownloadDirectAsync(trackJob, progress, checkpoint, ct);
             completedBytes += new FileInfo(trackPath).Length;
             job.DownloadedBytes = completedBytes;
-            job.UpdatedAt = DateTimeOffset.UtcNow;
             await checkpoint();
 
             localTracks.Add(track with
