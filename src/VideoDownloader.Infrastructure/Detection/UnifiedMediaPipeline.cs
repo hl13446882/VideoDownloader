@@ -281,9 +281,12 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         if (finalDecision.Kind == NetworkCandidateDecisionKind.Reject)
             return Task.CompletedTask;
 
-        // Douyin/TikTok MSE Range windows report tiny Content-Length; those are not downloadable objects.
-        // Scoped to ByteDance/TikTok CDNs so Bilibili/YouTube/Generic keep prior behavior.
-        if (IsInsufficientByteDanceDownloadObject(e.Url, e.ContentLength))
+        // Douyin/TikTok MSE Range windows report tiny Content-Length. Do not treat that length
+        // as the object size — but keep browser-play URLs so Overlay/download can still use them.
+        var tinyByteDance = IsInsufficientByteDanceDownloadObject(e.Url, e.ContentLength);
+        var effectiveLength = tinyByteDance ? null : e.ContentLength;
+        if (tinyByteDance &&
+            !(browserPlay || finalDecision.Evidence == MediaEvidence.BrowserObserved))
         {
             RecordDecision(new("network", "av", MediaOwnership.ForPage(page, _observedIdentity),
                 "rejected", "tiny_mse_slice", e.Url.Host,
@@ -312,30 +315,31 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 ctx = siteAdapter.EnrichRequestContext(ctx, e.Url, pageContext);
             var kindHint = InferKindFromMime(e.MimeType, e.Url);
             if (_browserObserved.TryGetValue(key, out var prev) &&
-                (prev.ContentLength ?? 0) > (e.ContentLength ?? 0) &&
-                e.ContentLength is not null)
+                (prev.ContentLength ?? 0) > (effectiveLength ?? 0) &&
+                effectiveLength is not null)
             {
                 // Keep the larger observed object; refresh cookies from the latest successful request.
                 _browserObserved[key] = prev with { Context = ctx };
             }
             else
             {
+                var lengthToStore = effectiveLength ?? prev?.ContentLength;
                 _browserObserved[key] = new BrowserObservedMedia(
                     e.Url,
                     e.MimeType,
                     kindHint,
                     ctx,
-                    e.ContentLength);
+                    lengthToStore);
             }
             RecordDecision(new("network", KindLabel(kindHint), MediaOwnership.ForPage(page, _observedIdentity),
-                "accepted", finalDecision.Reason ?? "browser_observed", e.Url.Host,
-                $"adapter={finalDecision.AdapterName};status={e.StatusCode};type={e.ResourceType};mime={e.MimeType};length={e.ContentLength}"));
+                "accepted", tinyByteDance ? "browser_observed_strip_range_length" : (finalDecision.Reason ?? "browser_observed"), e.Url.Host,
+                $"adapter={finalDecision.AdapterName};status={e.StatusCode};type={e.ResourceType};mime={e.MimeType};length={e.ContentLength};storedLength={effectiveLength}"));
             _logger.LogInformation(
-                "Browser-observed media session={Session} host={Host} status={Status} type={Type} mime={Mime} length={Length} adapter={Adapter}",
-                e.SessionId, e.Url.Host, e.StatusCode, e.ResourceType, e.MimeType, e.ContentLength, finalDecision.AdapterName);
+                "Browser-observed media session={Session} host={Host} status={Status} type={Type} mime={Mime} length={Length} storedLength={Stored} adapter={Adapter}",
+                e.SessionId, e.Url.Host, e.StatusCode, e.ResourceType, e.MimeType, e.ContentLength, effectiveLength, finalDecision.AdapterName);
         }
 
-        Queue(e.Url, page, e.RequestContext, e.ContentLength, ct, e.MimeType,
+        Queue(e.Url, page, e.RequestContext, effectiveLength, ct, e.MimeType,
             browserObserved: browserPlay || finalDecision.Evidence == MediaEvidence.BrowserObserved);
         return Task.CompletedTask;
     }

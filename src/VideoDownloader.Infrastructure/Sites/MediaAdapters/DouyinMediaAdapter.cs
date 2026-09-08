@@ -35,9 +35,10 @@ public sealed class DouyinMediaAdapter : ISiteMediaAdapter
         if (networkEvent.StatusCode is not (200 or 206 or null))
             return new(NetworkCandidateDecisionKind.Default, Name, "bad_status");
 
-        // MSE Range windows are not downloadable progressive objects.
+        // Drop non-play heuristic crumbs; browser-play URLs are kept (length stripped upstream).
         if (UnifiedMediaPipeline.IsInsufficientByteDanceDownloadObject(
-                networkEvent.Url, networkEvent.ContentLength))
+                networkEvent.Url, networkEvent.ContentLength) &&
+            !UnifiedMediaPipeline.IsBrowserPlayEvidence(networkEvent))
             return new(NetworkCandidateDecisionKind.Reject, Name, "tiny_mse_slice");
 
         if (UnifiedMediaPipeline.IsBrowserPlayEvidence(networkEvent))
