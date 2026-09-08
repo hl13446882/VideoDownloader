@@ -57,5 +57,6 @@ public enum DownloadBackendKind
 {
     DirectHttp,
     FfmpegRemux,
-    FfmpegMultiInput
+    FfmpegMultiInput,
+    FfmpegAlbumSlideshow
 }

@@ -162,4 +162,14 @@ public interface IFfmpegAdapter
         IReadOnlyList<MediaTrack> tracks,
         string outputPath,
         CancellationToken ct);
+
+    /// <summary>
+    /// Equal-duration image slideshow + audio mux (Douyin/TikTok photo mode).
+    /// Each still gets audioDuration / imageCount seconds.
+    /// </summary>
+    Task RunAlbumSlideshowAsync(
+        IReadOnlyList<string> imagePaths,
+        string audioPath,
+        string outputPath,
+        CancellationToken ct);
 }

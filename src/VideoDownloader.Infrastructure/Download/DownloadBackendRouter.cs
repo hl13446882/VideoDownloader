@@ -7,6 +7,10 @@ public sealed class DownloadBackendRouter : IDownloadBackendRouter
 {
     public DownloadBackendKind Resolve(MediaVariant variant)
     {
+        if (variant.Tracks.Any(t => t.Kind == MediaTrackKind.Image) ||
+            string.Equals(variant.Container, "album", StringComparison.OrdinalIgnoreCase))
+            return DownloadBackendKind.FfmpegAlbumSlideshow;
+
         if (variant.Tracks.Any(t => t.Container is "hls" or "dash" || t.TrackId == "audio-extract"))
             return DownloadBackendKind.FfmpegRemux;
         if (variant.Tracks.Count > 1)

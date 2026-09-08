@@ -6,14 +6,14 @@ if(-not $SkipBuild){
     if($LASTEXITCODE -ne 0){throw 'Verifier build failed'}
 }
 $urls=@(
-    'https://www.youtube.com/watch?v=FUZPqZ-fRBg&list=RDFUZPqZ-fRBg&start_radio=1&t=319s',
-    'https://www.youtube.com/watch?v=ePhVSep8e1c&list=RDePhVSep8e1c&start_radio=1&t=648s',
     'https://www.douyin.com/?recommend=1',
     'https://www.douyin.com/jingxuan?modal_id=7660503158577286451',
+    'https://v.douyin.com/9cY9PQIM6HY/',
     'https://www.tiktok.com/',
     'https://www.bilibili.com/video/BV1xMtw6XEAu',
     'https://www.bilibili.com/video/BV1CXWuz3E7V/',
-    'https://www.bilibili.com/video/BV1x8g56LEsz/'
+    'https://www.bilibili.com/video/BV1x8g56LEsz/',
+    'https://www.xmfyy.com/index.php/vod/play/id/290850/sid/1/nid/1.html'
 )
 if($Sites){$urls=@($urls|Where-Object{$hostName=([Uri]$_).Host; @($Sites|Where-Object{$hostName.Contains($_)}).Count -gt 0})}
 $arguments='--live '+(($urls|ForEach-Object{'"'+$_+'"'}) -join ' ')

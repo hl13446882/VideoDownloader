@@ -177,6 +177,165 @@ public sealed class FfmpegAdapter : IFfmpegAdapter
             throw new DownloadException(ErrorCodes.FfmpegFailed, "FFmpeg finished without creating output file.");
     }
 
+    public async Task RunAlbumSlideshowAsync(
+        IReadOnlyList<string> imagePaths,
+        string audioPath,
+        string outputPath,
+        CancellationToken ct)
+    {
+        if (imagePaths.Count == 0)
+            throw new DownloadException(ErrorCodes.FfmpegFailed, "Album slideshow requires at least one image.");
+        if (!File.Exists(audioPath))
+            throw new DownloadException(ErrorCodes.FfmpegFailed, "Album slideshow audio file was not found.");
+
+        var ffmpegPath = PathExpander.Expand(_options.Ffmpeg.ExecutablePath);
+        if (!File.Exists(ffmpegPath) && !IsOnPath(ffmpegPath))
+            throw new DownloadException(ErrorCodes.FfmpegNotFound, "FFmpeg executable was not found.");
+
+        var ffprobePath = Path.Combine(Path.GetDirectoryName(ffmpegPath)!, "ffprobe.exe");
+        if (!File.Exists(ffprobePath))
+            ffprobePath = "ffprobe";
+
+        var duration = await ProbeDurationSecondsAsync(ffprobePath, audioPath, ct);
+        if (duration is null or <= 0.05)
+            duration = Math.Max(1.0, imagePaths.Count * 2.0);
+        var perImage = Math.Max(0.2, duration.Value / imagePaths.Count);
+
+        Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = ffmpegPath,
+            RedirectStandardInput = true,
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        psi.ArgumentList.Add("-y");
+        psi.ArgumentList.Add("-nostdin");
+        psi.ArgumentList.Add("-loglevel");
+        psi.ArgumentList.Add("warning");
+
+        var perImageText = perImage.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+        foreach (var image in imagePaths)
+        {
+            psi.ArgumentList.Add("-loop");
+            psi.ArgumentList.Add("1");
+            psi.ArgumentList.Add("-t");
+            psi.ArgumentList.Add(perImageText);
+            psi.ArgumentList.Add("-i");
+            psi.ArgumentList.Add(image);
+        }
+
+        psi.ArgumentList.Add("-i");
+        psi.ArgumentList.Add(audioPath);
+
+        var filter = new StringBuilder();
+        for (var i = 0; i < imagePaths.Count; i++)
+        {
+            filter.Append('[')
+                .Append(i.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                .Append(":v]scale=1280:720:force_original_aspect_ratio=decrease,")
+                .Append("pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[v")
+                .Append(i.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                .Append("];");
+        }
+
+        for (var i = 0; i < imagePaths.Count; i++)
+            filter.Append("[v").Append(i.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append(']');
+        filter.Append("concat=n=")
+            .Append(imagePaths.Count.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            .Append(":v=1:a=0[vout]");
+
+        psi.ArgumentList.Add("-filter_complex");
+        psi.ArgumentList.Add(filter.ToString());
+        psi.ArgumentList.Add("-map");
+        psi.ArgumentList.Add("[vout]");
+        psi.ArgumentList.Add("-map");
+        psi.ArgumentList.Add(imagePaths.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":a:0?");
+        psi.ArgumentList.Add("-c:v");
+        psi.ArgumentList.Add("libx264");
+        psi.ArgumentList.Add("-preset");
+        psi.ArgumentList.Add("veryfast");
+        psi.ArgumentList.Add("-c:a");
+        psi.ArgumentList.Add("aac");
+        psi.ArgumentList.Add("-shortest");
+        psi.ArgumentList.Add("-map_metadata");
+        psi.ArgumentList.Add("-1");
+        psi.ArgumentList.Add(outputPath);
+
+        using var process = Process.Start(psi)
+            ?? throw new DownloadException(ErrorCodes.FfmpegFailed, "Unable to start FFmpeg.");
+
+        var stderrTail = new StringBuilder();
+        using var outputStop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var stderrTask = ConsumeStderrAsync(process, stderrTail, outputStop.Token);
+        var stdoutTask = ConsumeOutputAsync(process, outputStop.Token);
+        await using var reg = ct.Register(() => _ = RequestStopAsync(process));
+
+        try
+        {
+            await VideoDownloader.Infrastructure.Download.ProcessProgress.WaitForExitAsync(process,
+                () => VideoDownloader.Infrastructure.Download.ProcessProgress.FileLength(outputPath), TimeSpan.FromMinutes(5), ct);
+        }
+        catch (OperationCanceledException)
+        {
+            await RequestStopAsync(process);
+            throw;
+        }
+        finally
+        {
+            outputStop.CancelAfter(TimeSpan.FromSeconds(5));
+            try { await Task.WhenAll(stderrTask, stdoutTask); }
+            catch (OperationCanceledException) when (outputStop.IsCancellationRequested) { }
+        }
+
+        if (process.ExitCode != 0 && !ct.IsCancellationRequested)
+            throw new DownloadException(ErrorCodes.FfmpegFailed, SanitizedLogger.SanitizeMessage(stderrTail.ToString()));
+
+        if (!File.Exists(outputPath))
+            throw new DownloadException(ErrorCodes.FfmpegFailed, "FFmpeg finished without creating album output file.");
+    }
+
+    private static async Task<double?> ProbeDurationSecondsAsync(string ffprobePath, string mediaPath, CancellationToken ct)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = ffprobePath,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            psi.ArgumentList.Add("-v");
+            psi.ArgumentList.Add("error");
+            psi.ArgumentList.Add("-show_entries");
+            psi.ArgumentList.Add("format=duration");
+            psi.ArgumentList.Add("-of");
+            psi.ArgumentList.Add("default=noprint_wrappers=1:nokey=1");
+            psi.ArgumentList.Add(mediaPath);
+
+            using var process = Process.Start(psi);
+            if (process is null) return null;
+            var stdout = await process.StandardOutput.ReadToEndAsync(ct);
+            await process.WaitForExitAsync(ct);
+            if (process.ExitCode != 0) return null;
+            var text = stdout.Trim();
+            return double.TryParse(text, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var seconds)
+                ? seconds
+                : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static string GetInputArgument(Uri uri) =>
         uri.IsFile ? uri.LocalPath : uri.ToString();
 

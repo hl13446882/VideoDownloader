@@ -41,6 +41,19 @@ public class DownloadPolicyAcceptanceTests
         Assert.Equal(DownloadBackendKind.FfmpegRemux,router.Resolve(variant with {Tracks=[variant.Tracks[0] with {TrackId="audio-extract",Kind=MediaTrackKind.Audio}]}));
         Assert.Equal(DownloadBackendKind.FfmpegRemux,router.Resolve(variant with {Tracks=[variant.Tracks[0] with {Container="hls"},variant.Tracks[0]]}));
         Assert.Null((variant with {Tracks=[variant.Tracks[0] with {ContentLength=10},variant.Tracks[0]]}).TotalContentLength);
+
+        var ctx = RequestContext.CreateEmpty();
+        var album = MediaVariant.FromTracks(
+            "album",
+            null,
+            null,
+            null,
+            "album",
+            [
+                new MediaTrack("i0", MediaTrackKind.Image, new Uri("https://cdn.test/a.jpg"), null, "image", null, null, ctx),
+                new MediaTrack("a", MediaTrackKind.Audio, new Uri("https://cdn.test/a.m4a"), null, "m4a", null, null, ctx)
+            ]);
+        Assert.Equal(DownloadBackendKind.FfmpegAlbumSlideshow, router.Resolve(album));
     }
 
     [Fact]

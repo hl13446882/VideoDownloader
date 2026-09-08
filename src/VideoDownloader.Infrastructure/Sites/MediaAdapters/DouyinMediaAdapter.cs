@@ -9,7 +9,7 @@ namespace VideoDownloader.Infrastructure.Sites.MediaAdapters;
 public sealed class DouyinMediaAdapter : ISiteMediaAdapter
 {
     private static readonly Regex VideoIdPath = new(
-        @"/video/(?<id>\d{10,})|/share/video/(?<id>\d{10,})",
+        @"/(?:video|note|share/video|share/note)/(?<id>\d{10,})",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     public string Name => "douyin";
@@ -109,12 +109,14 @@ public sealed class DouyinMediaAdapter : ISiteMediaAdapter
         var path = pageUrl.AbsolutePath.TrimEnd('/');
         var isFeedRoot = path is "" or "/" or "/recommend" ||
                          path.Equals("/jingxuan", StringComparison.OrdinalIgnoreCase);
+        var isNote = path.Contains("/note/", StringComparison.OrdinalIgnoreCase) ||
+                     path.StartsWith("/note/", StringComparison.OrdinalIgnoreCase);
         if (!isFeedRoot && ExtractVideoId(pageUrl) is not null)
-            return new Uri($"https://www.douyin.com/video/{id}");
+            return new Uri(isNote ? $"https://www.douyin.com/note/{id}" : $"https://www.douyin.com/video/{id}");
         if (!isFeedRoot)
             return null;
 
-        return new Uri($"https://www.douyin.com/video/{id}");
+        return new Uri(isNote ? $"https://www.douyin.com/note/{id}" : $"https://www.douyin.com/video/{id}");
     }
 
     public int ScoreCandidate(Uri mediaUrl, bool browserObserved, PageMediaContext context) =>

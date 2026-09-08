@@ -6,7 +6,10 @@ namespace VideoDownloader.Infrastructure.Detection;
 public static class MediaVariantRanking
 {
     public static bool IsFlvLike(MediaVariant variant) =>
-        variant.Tracks.Any(IsFlvLike);
+        variant.Tracks
+            .Where(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
+            .DefaultIfEmpty()
+            .Any(t => t is not null && IsFlvLike(t));
 
     public static bool IsFlvLike(MediaTrack track)
     {
@@ -20,7 +23,8 @@ public static class MediaVariantRanking
     }
 
     public static bool HasVideo(MediaVariant variant) =>
-        variant.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined);
+        variant.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined or MediaTrackKind.Image) ||
+        string.Equals(variant.Container, "album", StringComparison.OrdinalIgnoreCase);
 
     public static bool HasAudio(MediaVariant variant) =>
         variant.Tracks.Any(t => t.Kind is MediaTrackKind.Audio or MediaTrackKind.Combined);
@@ -31,7 +35,9 @@ public static class MediaVariantRanking
     public static IReadOnlyList<MediaVariant> Rank(IEnumerable<MediaVariant> variants) =>
         variants
             .OrderBy(v => IsFlvLike(v) ? 1 : 0)
+            .ThenByDescending(v => string.Equals(v.Container, "album", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
             .ThenByDescending(v => HasVideo(v) ? 1 : 0)
+            .ThenByDescending(v => MediaVariantReconciler.HasCompleteAudio(v) ? 1 : 0)
             .ThenByDescending(v => v.TotalContentLength ?? 0)
             .ThenByDescending(v => v.Bandwidth ?? 0)
             .ThenByDescending(v => v.Height ?? 0)

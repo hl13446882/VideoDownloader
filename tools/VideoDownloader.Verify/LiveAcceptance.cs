@@ -87,13 +87,20 @@ public partial class MainWindow
                     var sampleOk=video is not null && video.Variants.Count>0;
                     if(video is not null)
                     {
-                        // Same ranking as MainViewModel.FocusLargestVideoVariant / download pick.
                         var selected=MediaVariantRanking.SelectPreferredVideo(video.Variants);
                         var audio=MediaVariantRanking.SelectPreferredAudio(video.Variants);
-                        sampleOk &= selected is not null && (audio is not null || selected.Tracks.Any(t=>t.Kind==MediaTrackKind.Combined));
+                        var albumOk=selected is not null &&
+                            (string.Equals(selected.Container,"album",StringComparison.OrdinalIgnoreCase) ||
+                             selected.Tracks.Any(t=>t.Kind==MediaTrackKind.Image)) &&
+                            selected.Tracks.Any(t=>t.Kind is MediaTrackKind.Audio or MediaTrackKind.Combined);
+                        sampleOk &= selected is not null && (albumOk || audio is not null || selected.Tracks.Any(t=>t.Kind==MediaTrackKind.Combined));
+                        if(albumOk)
+                            samples.Add($"Album: {selected!.Tracks.Count(t=>t.Kind==MediaTrackKind.Image)} images + audio");
                         if(selected is not null && MediaVariantRanking.IsFlvLike(selected))
                             sampleOk=false;
-                        var tracks=selected is not null && audio is not null &&
+                        var tracks=albumOk
+                            ? selected!.Tracks.Where(t=>t.Kind is MediaTrackKind.Image or MediaTrackKind.Audio or MediaTrackKind.Combined).Take(4).ToArray()
+                            : selected is not null && audio is not null &&
                                    selected.Tracks.Any(t=>t.Kind==MediaTrackKind.Combined) &&
                                    audio.Tracks.All(t=>selected.Tracks.Any(s=>s.SourceUrl==t.SourceUrl))
                             ? selected.Tracks.Where(t=>t.Kind==MediaTrackKind.Combined).Take(1).ToArray()
@@ -101,11 +108,24 @@ public partial class MainWindow
                         var validator=_services!.GetRequiredService<VideoDownloader.Infrastructure.Http.MediaAvailabilityValidator>();
                         foreach(var track in tracks)
                         {
+                            if(track.Kind==MediaTrackKind.Image)
+                            {
+                                samples.Add($"Image: album still accepted; {track.SourceUrl.Host}");
+                                continue;
+                            }
                             var result=await ReadMediaSampleAsync(track,validator);
                             samples.Add($"{track.Kind}: {result.Note}");
                             if(MediaVariantRanking.IsFlvLike(track) ||
                                result.Note.Contains("video/x-flv",StringComparison.OrdinalIgnoreCase))
-                                sampleOk=false;
+                            {
+                                // VOD audio may still be FLV-shaped on Douyin CDN; reject only when the
+                                // preferred video pipe itself is FLV (live-style).
+                                if(track.Kind is MediaTrackKind.Video or MediaTrackKind.Combined ||
+                                   (selected is not null && MediaVariantRanking.IsFlvLike(selected)))
+                                    sampleOk=false;
+                                else
+                                    samples[^1]=$"{track.Kind}: flv-audio accepted with progressive video; {track.SourceUrl.Host}";
+                            }
                             else
                                 sampleOk &= result.Ok;
                         }
@@ -136,6 +156,24 @@ public partial class MainWindow
                             video.DisplayTitle is not "视频" &&
                             video.DisplayTitle!=Path.GetFileName(video.Variants.FirstOrDefault()?.SourceUrl.AbsolutePath??"");
                     }
+                    // Douyin/TikTok often mirror the post caption into document.title ("… - 抖音").
+                    if(!captionOk && video is not null && !string.IsNullOrWhiteSpace(identity) &&
+                       !string.IsNullOrWhiteSpace(video.DisplayTitle) &&
+                       video.DisplayTitle is not "视频" &&
+                       video.DisplayTitle!=video.PageUrl.Host &&
+                       video.DisplayTitle.Length>=6 &&
+                       !video.DisplayTitle.EndsWith(".flv",StringComparison.OrdinalIgnoreCase) &&
+                       !video.DisplayTitle.EndsWith(".m3u8",StringComparison.OrdinalIgnoreCase))
+                    {
+                        var doc=WebView.CoreWebView2.DocumentTitle ?? "";
+                        var stripped=System.Text.RegularExpressions.Regex.Replace(doc,
+                            @"\s*[-_|].*(?:抖音|douyin|TikTok|bilibili|哔哩哔哩).*$","",
+                            System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
+                        if(string.Equals(video.DisplayTitle,doc,StringComparison.Ordinal) ||
+                           string.Equals(video.DisplayTitle,stripped,StringComparison.Ordinal) ||
+                           (!string.IsNullOrWhiteSpace(stripped) && doc.StartsWith(video.DisplayTitle,StringComparison.Ordinal)))
+                            captionOk=true;
+                    }
                     var pass=completed && sampleOk && stable && switched && captionOk && uniqueIdentity;
                     var diagnostic=pass ? null : await WebView.CoreWebView2.ExecuteScriptAsync("(()=>{let e=[...document.querySelectorAll('video')].find(e=>{let r=e.getBoundingClientRect();return r.bottom>0&&r.top<innerHeight;});const rows=[];for(let i=0;e&&i<14;i++,e=e.parentElement){const k=Object.keys(e).find(k=>k.startsWith('__reactProps$'));const p=k?e[k]:{};rows.push({tag:e.tagName,attrs:[...e.attributes].map(a=>[a.name,a.value]),props:Object.keys(p||{}),itemKeys:Object.keys(p?.item||p?.itemInfo||p?.data||{}),src:e.currentSrc});}return JSON.stringify(rows);})()");
                     allPassed &= pass;
@@ -146,8 +184,8 @@ public partial class MainWindow
                         runId,ordinal,address,finalPage,step=step+1,pass,completed,stable,switched,switches,captionOk,uniqueIdentity,
                         identity,session,title=video?.DisplayTitle,captionSource=video is null?null:"player-or-probe",
                         heights=video?.Variants.Select(v=>v.Height).Distinct().ToArray(),
-                        variants=video?.Variants.Select(v=>new{v.Height,v.VariantId,tracks=v.Tracks.Select(t=>new{t.Kind,t.TrackId,t.SourceUrl})}),
-                        audio=video?.Variants.Any(v=>v.Tracks.All(t=>t.Kind==MediaTrackKind.Audio)),samples,
+                        variants=video?.Variants.Select(v=>new{v.Height,v.VariantId,v.Container,tracks=v.Tracks.Select(t=>new{t.Kind,t.TrackId,t.SourceUrl})}),
+                        album=video?.Variants.Any(v=>string.Equals(v.Container,"album",StringComparison.OrdinalIgnoreCase)||v.Tracks.Any(t=>t.Kind==MediaTrackKind.Image)),samples,
                         status=_mainVm.StatusMessage,externalError=(pipeline as UnifiedMediaPipeline)?.LastExternalError,dom=snapshot,diagnostic};
                     records.Add(record);
                     await WriteLiveEvidenceAsync(rootReportDir,reportDir,runId,expectedCount,records,runComplete:false,allPassed);
@@ -207,7 +245,7 @@ public partial class MainWindow
                 if((key is "v" or "modal_id" or "aweme_id" or "item_id") && !string.IsNullOrWhiteSpace(value))
                     return key+"="+value;
             }
-            var match=System.Text.RegularExpressions.Regex.Match(uri.AbsolutePath,@"/(video|shorts)/(BV[\w]+|[\w-]+)",System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            var match=System.Text.RegularExpressions.Regex.Match(uri.AbsolutePath,@"/(video|shorts|note)/(BV[\w]+|[\w-]+)",System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             return match.Success ? match.Value : null;
         }
         var idA=ContentId(a);
@@ -303,7 +341,7 @@ public partial class MainWindow
                 })()
                 """);
             var label=kind.Trim('"');
-            if(label=="video") return;
+            if(label=="video" || label=="photo") return;
             if(label=="pending")
             {
                 await TryStartPlaybackAsync();

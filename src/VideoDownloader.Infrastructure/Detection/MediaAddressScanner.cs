@@ -15,16 +15,30 @@ internal static class MediaAddressScanner
         catch (JsonException) { }
         // Do not associate unstructured scripts with a feed's active item.
         if (currentOwner is not null) return [];
-        var matches = System.Text.RegularExpressions.Regex.Matches(body,
-            "(?:[\"']?(?:src|file|url|playUrl|videoUrl|audioUrl)[\"']?\\s*[:=]\\s*)[\"'](?<url>https?[^\"'\\r\\n]{1,8192})[\"']",
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(100));
         var results = new List<Address>();
-        foreach (System.Text.RegularExpressions.Match match in matches.Take(64))
+        var mediaMatches = System.Text.RegularExpressions.Regex.Matches(body,
+            "(?:[\"']?(?:src|file|url|playUrl|videoUrl|audioUrl|link)[\"']?\\s*[:=]\\s*)[\"'](?<url>https?[^\"'\\r\\n]{1,8192})[\"']",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(150));
+        foreach (System.Text.RegularExpressions.Match match in mediaMatches.Take(64))
         {
             var value = System.Net.WebUtility.HtmlDecode(match.Groups["url"].Value.Replace("\\/", "/"));
             if (Uri.TryCreate(value, UriKind.Absolute, out var url) && UnifiedMediaPipeline.IsCandidate(url, null) && !IsAssetExtension(url))
                 results.Add(new(url.AbsoluteUri, null));
         }
+
+        // Bare playlist / progressive URLs inside player bootstrap (AES HLS MacCMS etc.).
+        var bare = System.Text.RegularExpressions.Regex.Matches(body,
+            @"https?:\\?/\\?/[^\s""'<>\\]{8,512}\.(?:m3u8|mpd|mp4|m4a|m4s)(?:\?[^\s""'<>\\]*)?",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(150));
+        foreach (System.Text.RegularExpressions.Match match in bare.Take(64))
+        {
+            var value = System.Net.WebUtility.HtmlDecode(match.Value.Replace("\\/", "/"));
+            if (Uri.TryCreate(value, UriKind.Absolute, out var url) &&
+                url.Scheme is "http" or "https" &&
+                !IsAssetExtension(url))
+                results.Add(new(url.AbsoluteUri, null));
+        }
+
         return results.Distinct().ToArray();
     }
 

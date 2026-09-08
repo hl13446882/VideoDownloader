@@ -81,9 +81,161 @@ internal static class VideoObservationScript
             players.sort((a,b)=>Number(!b.paused)-Number(!a.paused)||visible(b)-visible(a));
             return players[0];
           };
+          const collectImageUrls = record => {
+            const urls=[];
+            const push=v=>{
+              if(typeof v==='string' && /^https?:/i.test(v) &&
+                 (/\.(jpg|jpeg|png|webp)([?#]|$)/i.test(v) ||
+                  /(?:byteimg|douyinpic|tiktokcdn).*\/(?:tos-|obj\/|image)/i.test(v)))
+                urls.push(v);
+              else if(v&&typeof v==='object'){
+                for(const k of ['urlList','url_list','download_url_list','display_image','origin','url']){
+                  const child=v[k];
+                  if(Array.isArray(child)) child.forEach(push);
+                  else if(typeof child==='string') push(child);
+                }
+              }
+            };
+            for(const key of ['images','image_list','imageList','image_post_info','imagePost','photos','image_infos']){
+              const block=record?.[key];
+              if(Array.isArray(block)) block.forEach(push);
+              else if(block?.images) block.images.forEach(push);
+              else if(block?.image_list) block.image_list.forEach(push);
+            }
+            return [...new Set(urls)];
+          };
+          const observeAlbumPost = () => {
+            // Douyin/TikTok photo mode: carousel images + BGM, often no <video>.
+            let record=null;
+            const roots=[];
+            const push=v=>{if(v&&typeof v==='object')roots.push(v);};
+            try{
+              const el=document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__')
+                || document.getElementById('SIGI_STATE')
+                || document.getElementById('__NEXT_DATA__');
+              if(el?.textContent) push(JSON.parse(el.textContent));
+            }catch{}
+            for(const key of ['__UNIVERSAL_DATA_FOR_REHYDRATION__','SIGI_STATE','__NEXT_DATA__','__INITIAL_STATE__']){
+              try{push(window[key]);}catch{}
+            }
+            const seen=new WeakSet(); let budget=900;
+            const find=(value,depth)=>{
+              if(!value||typeof value!=='object'||value instanceof Node||seen.has(value)||depth>12||--budget<0) return null;
+              seen.add(value);
+              const hasImages = !!(value.images||value.image_list||value.image_post_info||value.imagePost||value.image_infos);
+              const hasMusic = !!(value.music||value.audio||value.playAddr||value.play_addr);
+              const id = value.aweme_id||value.itemId||value.videoId||value.id||value.modal_id||value.note_id;
+              if(hasImages && (hasMusic||id) && (value.desc||value.description||value.title||id)) return value;
+              if(Array.isArray(value)){
+                for(const c of value.slice(0,40)){const r=find(c,depth+1); if(r) return r;}
+              }else{
+                for(const c of Object.values(value)){const r=find(c,depth+1); if(r) return r;}
+              }
+              return null;
+            };
+            for(const root of roots){ record=find(root,0); if(record) break; }
+            if(!record){
+              // DOM fallback: large in-view images + any audio
+              const imgs=[...document.querySelectorAll('img')].filter(e=>{
+                const r=e.getBoundingClientRect();
+                const src=e.currentSrc||e.src||'';
+                return r.width>120 && r.height>120 && visible(e)>0 && /^https?:/i.test(src) &&
+                  !/avatar|emoji|emoticon|badge|logo/i.test(src);
+              }).slice(0,24);
+              const audio=[...document.querySelectorAll('audio,video')].find(e=>
+                /^https?:/i.test(e.currentSrc||e.src||'') &&
+                (e.tagName==='AUDIO' || (e.tagName==='VIDEO' && (e.duration>0 || e.seekable?.length))));
+              if(imgs.length<1) return null;
+              const modal=(location.search.match(/modal_id=(\d{10,})/)||[])[1];
+              const pathId=(location.pathname.match(/\/(?:video|note)\/(\d{10,})/)||[])[1];
+              const id=modal||pathId;
+              if(!id && !/douyin|tiktok/i.test(location.host)) return null;
+              const caption=(document.querySelector('[data-e2e="browse-video-desc"],[data-e2e="video-desc"],[data-e2e="detail-desc"],[data-e2e="note-desc"],.desc')?.textContent
+                || document.title || '').trim().replace(/\s*[_|].*抖音.*$/u,'').trim();
+              const media=[];
+              if(audio) media.push(audio.currentSrc||audio.src);
+              return {
+                type:'vd-video-identity',
+                identity: id ? (location.host+':content:'+id) : pageKey(location.href),
+                caption,
+                href:location.href,
+                media,
+                images:imgs.map(e=>e.currentSrc||e.src),
+                album:true
+              };
+            }
+            const images=collectImageUrls(record);
+            if(images.length<1) return null;
+            const music=record.music||{};
+            const audioUrls=[];
+            const pushAudio=v=>{
+              if(typeof v==='string' && /^https?:/i.test(v) && !/\.(jpg|jpeg|png|webp|gif)([?#]|$)/i.test(v)) audioUrls.push(v);
+              else if(v&&typeof v==='object'){
+                for(const k of ['playUrl','play_url','uri','url','urlList','url_list']){
+                  const c=v[k];
+                  if(Array.isArray(c)) c.forEach(pushAudio);
+                  else pushAudio(c);
+                }
+              }
+            };
+            pushAudio(music.play_url||music.playUrl||music);
+            pushAudio(record.playAddr||record.play_addr);
+            const id=String(record.aweme_id||record.itemId||record.videoId||record.id||'');
+            const caption=String(record.desc||record.description||record.title||'').trim();
+            if(!id && audioUrls.length===0) return null;
+            return {
+              type:'vd-video-identity',
+              identity: id ? (location.host+':content:'+id) : pageKey(location.href),
+              caption,
+              href:location.href,
+              media:[...new Set(audioUrls.filter(u=>/^https?:/i.test(u)))],
+              images,
+              album:true
+            };
+          };
+          const observeDocumentMeta = () => {
+            if(!/bilibili\.com/i.test(location.host)) return null;
+            const bvid=(location.pathname.match(/\/video\/(BV[\w]+)/i)||[])[1]
+              || document.querySelector('[data-bvid]')?.getAttribute('data-bvid');
+            if(!bvid) return null;
+            const pick=(...nodes)=> {
+              for(const n of nodes){
+                if(!n) continue;
+                const t=(n.getAttribute?.('title')||n.textContent||'').trim();
+                if(t) return t;
+              }
+              return '';
+            };
+            let caption=pick(
+              document.querySelector('h1.video-title'),
+              document.querySelector('.video-info-title h1'),
+              document.querySelector('.video-info-title'),
+              document.querySelector('h1[title]'),
+              document.querySelector('#viewbox_report h1'),
+              document.querySelector('.tit'),
+              document.querySelector('meta[property="og:title"]'));
+            if(!caption && document.querySelector('meta[property="og:title"]'))
+              caption=(document.querySelector('meta[property="og:title"]').getAttribute('content')||'').trim();
+            if(!caption){
+              caption=(document.title||'').replace(/\s*[_|].*哔哩哔哩.*$/u,'').replace(/\s*[_-]\s*bilibili.*$/i,'').trim();
+            }
+            return {
+              type:'vd-video-identity',
+              identity: location.host+':content:'+bvid,
+              caption,
+              href:location.href,
+              media:[]
+            };
+          };
           window.__vdObserve = () => {
+            // Note / album posts may still mount a tiny <video> for BGM; prefer album when images exist.
+            const albumEarly = observeAlbumPost();
+            if (albumEarly?.images?.length > 0) return albumEarly;
             const active = activePlayer();
-            if (!active) return null;
+            if (!active) {
+              const bili = observeDocumentMeta();
+              return bili;
+            }
             const record=playerRecord(active);
             let scope = active, explicit = record ? 'content:'+(record.aweme_id||record.itemId||record.videoId||record.id) : '',
                 caption = record ? String(record.desc||record.description||record.title||'').trim() : '';
@@ -99,8 +251,8 @@ internal static class VideoObservationScript
               if(classVid && !explicit) explicit = 'content:'+classVid[1];
               const link = scope.querySelector('a[href*="/video/"],a[href*="modal_id="],a[href*="/watch?v="],a[href*="/@"][href*="/video/"]');
               if (link && !explicit) explicit = pageKey(link.href);
-              const desc = scope.querySelector('[data-e2e="browse-video-desc"],[data-e2e="video-desc"],[data-e2e="detail-desc"],[data-e2e="new-desc-span"],[data-e2e="video-meta-caption"],[data-video-caption],figcaption');
-              if (desc && !caption) caption = desc.textContent.trim();
+              const desc = scope.querySelector('[data-e2e="browse-video-desc"],[data-e2e="video-desc"],[data-e2e="detail-desc"],[data-e2e="new-desc-span"],[data-e2e="video-meta-caption"],[data-video-caption],figcaption,h1.video-title,.video-info-title,h1[title],.tit,.video-title');
+              if (desc && !caption) caption = (desc.getAttribute('title')||desc.textContent||'').trim();
               if (explicit && caption) break;
               // Never collect metadata from a container containing another visible player.
               if (scope.parentElement && [...scope.parentElement.querySelectorAll('video,audio')].some(e => e !== active && visible(e)>0)) break;
@@ -117,13 +269,17 @@ internal static class VideoObservationScript
             }
             caption=caption.replace(/(?:展开|收起|See more|See less)\s*$/i,'').trim();
             if(!caption){
-              const card=active.closest('[data-e2e="feed-active-video"],[data-e2e="feed-item"],[data-e2e="recommend-list-item-container"],[data-e2e="feed-video"],article,#one-column-item-0')
+              const card=active.closest('[data-e2e="feed-active-video"],[data-e2e="feed-item"],[data-e2e="recommend-list-item-container"],[data-e2e="feed-video"],article,#one-column-item-0,.video-info-container,.video-info')
                 || active.closest('section')?.parentElement;
-              const desc=card?.querySelector('[data-e2e="browse-video-desc"],[data-e2e="video-desc"],[data-e2e="detail-desc"],[data-e2e="new-desc-span"],[data-e2e="video-meta-caption"],[data-e2e="browse-video-desc-new"]');
-              if(desc) caption=desc.textContent.trim().replace(/(?:展开|收起|See more|See less)\s*$/i,'').trim();
+              const desc=card?.querySelector('[data-e2e="browse-video-desc"],[data-e2e="video-desc"],[data-e2e="detail-desc"],[data-e2e="new-desc-span"],[data-e2e="video-meta-caption"],[data-e2e="browse-video-desc-new"],h1.video-title,.video-info-title,h1[title],.tit');
+              if(desc) caption=(desc.getAttribute('title')||desc.textContent||'').trim().replace(/(?:展开|收起|See more|See less)\s*$/i,'').trim();
+            }
+            if(!caption){
+              const h1=document.querySelector('h1.video-title,.video-info-title,h1[title]');
+              if(h1) caption=(h1.getAttribute('title')||h1.textContent||'').trim();
             }
             // Transport addresses deliberately never participate in logical identity.
-            const stablePage = ids.some(k => new URL(location.href).searchParams.has(k)) || /\/(video|shorts)\/[^/]+/.test(location.pathname);
+            const stablePage = ids.some(k => new URL(location.href).searchParams.has(k)) || /\/(video|shorts|note)\/[^/]+/.test(location.pathname);
             // Feed roots without a concrete content id are not a stable logical video yet.
             if(!stablePage && !explicit) return null;
             const identity = stablePage ? base : location.host + ':' + explicit;
@@ -169,7 +325,11 @@ internal static class VideoObservationScript
             const visit=(value,depth)=>{
               if(--budget<0||depth>10||value==null)return;
               if(typeof value==='string'){
-                if(/^https?:\/\//i.test(value) && !/\.(jpg|jpeg|png|webp|gif|svg)([?#]|$)/i.test(value))observation.media.push(value);
+                if(/^https?:\/\//i.test(value) &&
+                   !/\.(jpg|jpeg|png|webp|gif|svg)([?#]|$)/i.test(value) &&
+                   !/(?:byteimg|douyinpic)\./i.test(value) &&
+                   !/\/(?:emoticon|aweme-image|obj\/tos-cn-i-)/i.test(value))
+                  observation.media.push(value);
                 return;
               }
               if(typeof value!=='object'||value instanceof Node||seen.has(value))return;
@@ -182,6 +342,8 @@ internal static class VideoObservationScript
             if(record){
               if(!observation.caption) observation.caption=String(record.desc||record.description||record.title||'').trim();
               visit(record.video||record,0);
+              visit(record.music||{},0);
+              visit(record.bit_rate||record.bitrateInfo||{},0);
             }
             // Blob players often expose only the content id on the wrapper. Resolve that
             // item from hydration / feed JSON so play addresses bind to the same identity.
@@ -192,6 +354,17 @@ internal static class VideoObservationScript
               if(byId){
                 if(!observation.caption) observation.caption=String(byId.desc||byId.description||byId.title||'').trim();
                 visit(byId.video||byId,0);
+                visit(byId.music||{},0);
+                visit(byId.bit_rate||byId.bitrateInfo||{},0);
+              }
+            }
+            // Always harvest album stills when present on the same identity.
+            if(!observation.images?.length){
+              const album=observeAlbumPost();
+              if(album?.images?.length){
+                observation.images=album.images;
+                observation.album=true;
+                for(const u of album.media||[]) observation.media.push(u);
               }
             }
             observation.media=[...new Set(observation.media)];

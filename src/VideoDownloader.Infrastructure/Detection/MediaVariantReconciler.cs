@@ -6,7 +6,8 @@ public static class MediaVariantReconciler
 {
     public static bool HasCompleteAudio(MediaVariant variant) =>
         variant.Tracks.Any(t => t.Kind == MediaTrackKind.Combined) ||
-        (variant.Tracks.Any(t => t.Kind == MediaTrackKind.Video) && variant.Tracks.Any(t => t.Kind == MediaTrackKind.Audio));
+        (variant.Tracks.Any(t => t.Kind == MediaTrackKind.Video) && variant.Tracks.Any(t => t.Kind == MediaTrackKind.Audio)) ||
+        (variant.Tracks.Any(t => t.Kind == MediaTrackKind.Image) && variant.Tracks.Any(t => t.Kind == MediaTrackKind.Audio));
 
     private static IEnumerable<string> VideoKeys(MediaVariant variant) => variant.Tracks
         .Where(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)

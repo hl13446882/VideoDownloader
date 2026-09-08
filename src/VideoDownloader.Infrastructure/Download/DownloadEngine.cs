@@ -602,11 +602,48 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
 
                 break;
             }
+            case DownloadBackendKind.FfmpegAlbumSlideshow:
+            {
+                var (tracks, tempDir) = await DownloadTracksToTempFilesAsync(job, checkpoint, ct);
+                var muxed = false;
+                try
+                {
+                    job.Status = DownloadStatus.Muxing;
+                    await checkpoint();
+                    var images = tracks
+                        .Where(t => t.Kind == MediaTrackKind.Image)
+                        .Select(LocalPathOf)
+                        .Where(File.Exists)
+                        .ToArray();
+                    var audio = tracks.FirstOrDefault(t => t.Kind == MediaTrackKind.Audio);
+                    if (images.Length == 0 || audio is null)
+                        throw new DownloadException(ErrorCodes.FfmpegFailed, "Album download requires images and audio.");
+                    var staging = Path.Combine(tempDir, "album" + Path.GetExtension(job.TargetPath));
+                    await _ffmpegAdapter.RunAlbumSlideshowAsync(images, LocalPathOf(audio), staging, ct);
+                    EnforceFinalDemoLimit(staging);
+                    File.Move(staging, job.TargetPath, overwrite: false);
+                    UpdateCompletedFileSize(job);
+                    muxed = true;
+                }
+                finally
+                {
+                    if (muxed)
+                    {
+                        DeleteTempTracks(tracks);
+                        TryDeleteDirectory(tempDir);
+                    }
+                }
+
+                break;
+            }
             default:
                 await _m3u8.DownloadAsync(job, checkpoint, ct);
                 break;
         }
     }
+
+    private static string LocalPathOf(MediaTrack track) =>
+        track.SourceUrl.IsFile ? track.SourceUrl.LocalPath : track.SourceUrl.AbsolutePath;
 
     private static void UpdateCompletedFileSize(DownloadJob job)
     {
@@ -944,14 +981,24 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             : ".mp4";
 
     private static string ResolveTrackExtension(MediaTrack track) =>
-        track.Container?.ToLowerInvariant() switch
-        {
-            "webm" => ".webm",
-            "m4a" => ".m4a",
-            "mp4" => ".mp4",
-            "m4v" => ".m4v",
-            _ => track.Kind == MediaTrackKind.Audio ? ".m4a" : ".mp4"
-        };
+        track.Kind == MediaTrackKind.Image
+            ? Path.GetExtension(track.SourceUrl.AbsolutePath).ToLowerInvariant() switch
+            {
+                ".png" => ".png",
+                ".webp" => ".webp",
+                ".gif" => ".gif",
+                ".bmp" => ".bmp",
+                _ => ".jpg"
+            }
+            : track.Container?.ToLowerInvariant() switch
+            {
+                "webm" => ".webm",
+                "m4a" => ".m4a",
+                "mp4" => ".mp4",
+                "m4v" => ".m4v",
+                "image" => ".jpg",
+                _ => track.Kind == MediaTrackKind.Audio ? ".m4a" : ".mp4"
+            };
 
     private static string SanitizeFileName(string name)
     {

@@ -412,7 +412,8 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
                 (() => {
                   const observation = window.__vdProbe?.() ?? window.__vdObserve?.();
                   const result = observation ?? {href:location.href,media:[]};
-                  if (!result.identity) result.candidates = [...(result.candidates ?? []), ...ADDRESS_DISCOVERY];
+                  const discovered = ADDRESS_DISCOVERY;
+                  result.candidates = [...(result.candidates ?? []), ...discovered];
                   return JSON.stringify(result);
                 })();
                 """.Replace("ADDRESS_DISCOVERY", MediaAddressDiscoveryScript.Expression);
@@ -420,21 +421,31 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             var json = DecodeScriptResult(await _core.ExecuteScriptAsync(script).WaitAsync(ct));
             if (session != _pipeline.SessionId || string.IsNullOrWhiteSpace(json)) return null;
             var payload = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
-            if (payload["identity"] is null)
+            // Always harvest cross-frame player addresses (MacCMS / iframe HLS). Do not
+            // gate on missing identity — pages may have a document title without media.
+            try
             {
-                try
+                var addresses = await FrameAddressDiscovery.CollectAsync(_core.CallDevToolsProtocolMethodAsync,
+                    () => session == _pipeline.SessionId && _captureEnabled, ct);
+                if (addresses.Count > 0)
                 {
-                    var addresses = await FrameAddressDiscovery.CollectAsync(_core.CallDevToolsProtocolMethodAsync,
-                        () => session == _pipeline.SessionId && _captureEnabled, ct);
                     if (payload["candidates"] is not System.Text.Json.Nodes.JsonArray)
                         payload["candidates"] = new System.Text.Json.Nodes.JsonArray();
                     var candidates = payload["candidates"]!.AsArray();
-                    foreach (var address in addresses) candidates.Add(new System.Text.Json.Nodes.JsonObject { ["url"] = address });
+                    var existing = candidates
+                        .Select(c => c?["url"]?.GetValue<string>())
+                        .Where(u => !string.IsNullOrWhiteSpace(u))
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    foreach (var address in addresses)
+                    {
+                        if (existing.Add(address))
+                            candidates.Add(new System.Text.Json.Nodes.JsonObject { ["url"] = address });
+                    }
                     _logger.LogInformation("Address discovery session={Session} frameCandidates={Count}", session, addresses.Count);
                 }
-                catch (OperationCanceledException) when (!ct.IsCancellationRequested) { _logger.LogInformation("Frame discovery timed out session={Session}", session); }
-                catch (Exception ex) when (ex is not OperationCanceledException) { _logger.LogInformation("Frame discovery unavailable session={Session} reason={Reason}", session, ex.GetType().Name); }
             }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested) { _logger.LogInformation("Frame discovery timed out session={Session}", session); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { _logger.LogInformation("Frame discovery unavailable session={Session} reason={Reason}", session, ex.GetType().Name); }
             return session == _pipeline.SessionId ? payload.ToJsonString() : null;
         }
 
@@ -627,6 +638,18 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
     {
         if (_core is null || _cdpEnabled)
             return;
+
+        // Flatten OOPIF / player iframe targets so cross-origin HLS (MacCMS etc.) is visible.
+        try
+        {
+            await _core.CallDevToolsProtocolMethodAsync(
+                "Target.setAutoAttach",
+                """{"autoAttach":true,"waitForDebuggerOnStart":false,"flatten":true}""");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Target.setAutoAttach unavailable; continuing with top-level Network only");
+        }
 
         await _core.CallDevToolsProtocolMethodAsync("Network.enable", "{}");
         _cdpRequestReceiver = _core.GetDevToolsProtocolEventReceiver("Network.requestWillBeSent");

@@ -45,6 +45,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
     private string? _title;
     private string? _author;
     private string? _observedIdentity;
+    private List<Uri> _albumImages = [];
     private DetectionSession _session = new();
     public Guid SessionId => _session.Id;
     public bool IsCompleted => _session.Phase == DetectionPhase.Completed;
@@ -179,6 +180,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         _author = null;
         _observedIdentity = null;
         _lastBuilt = null;
+        _albumImages = [];
         LastExternalError = null;
     }
 
@@ -290,12 +292,13 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             var ctx = AttachRequestCookie(e.RequestContext, e.RequestHeaders, e.Url);
             if (siteAdapter is not null)
                 ctx = siteAdapter.EnrichRequestContext(ctx, e.Url, pageContext);
+            var kindHint = InferKindFromMime(e.MimeType, e.Url);
             _browserObserved[key] = new BrowserObservedMedia(
                 e.Url,
                 e.MimeType,
-                InferKindFromMime(e.MimeType),
+                kindHint,
                 ctx);
-            RecordDecision(new("network", KindLabel(InferKindFromMime(e.MimeType)), MediaOwnership.ForPage(page, _observedIdentity),
+            RecordDecision(new("network", KindLabel(kindHint), MediaOwnership.ForPage(page, _observedIdentity),
                 "accepted", finalDecision.Reason ?? "browser_observed", e.Url.Host,
                 $"adapter={finalDecision.AdapterName};status={e.StatusCode};type={e.ResourceType};mime={e.MimeType}"));
             _logger.LogInformation(
@@ -324,8 +327,23 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         return IsStrongMediaMime(e.MimeType);
     }
 
-    private static MediaTrackKind InferKindFromMime(string? mime)
+    private static MediaTrackKind InferKindFromMime(string? mime, Uri? url = null)
     {
+        if (url is not null)
+        {
+            var full = url.AbsoluteUri;
+            if (full.Contains("mime_type=video", StringComparison.OrdinalIgnoreCase) ||
+                full.Contains("mimetype=video", StringComparison.OrdinalIgnoreCase) ||
+                full.Contains("/video/tos/", StringComparison.OrdinalIgnoreCase) ||
+                full.Contains("media_type=video", StringComparison.OrdinalIgnoreCase))
+                return MediaTrackKind.Video;
+            if (full.Contains("mime_type=audio", StringComparison.OrdinalIgnoreCase) ||
+                full.Contains("mimetype=audio", StringComparison.OrdinalIgnoreCase) ||
+                full.Contains("/audio/tos/", StringComparison.OrdinalIgnoreCase) ||
+                full.Contains("media_type=audio", StringComparison.OrdinalIgnoreCase))
+                return MediaTrackKind.Audio;
+        }
+
         if (mime is null) return MediaTrackKind.Combined;
         if (mime.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) &&
             !mime.StartsWith("video/", StringComparison.OrdinalIgnoreCase))
@@ -393,7 +411,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                     {
                         if (Uri.TryCreate(pageUrl, item.GetString(), out var url) &&
                             !MediaUrlNormalizer.IsLikelySegment(url) &&
-                            !LooksLikeJunkPath(url))
+                            !LooksLikeJunkPath(url) &&
+                            !LooksLikeImageCdn(url))
                         {
                             if (primary && MediaOwnership.ForPage(pageUrl, _observedIdentity) is { } owner)
                                 _owners[MediaUrlNormalizer.Normalize(url)] = owner;
@@ -402,10 +421,26 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                     }
                 }
 
+                // Douyin/TikTok photo mode: still images + BGM compose into one slideshow variant.
+                _albumImages = [];
+                if (root.TryGetProperty("images", out var images) && images.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var item in images.EnumerateArray())
+                    {
+                        if (Uri.TryCreate(pageUrl, item.GetString(), out var imageUrl) &&
+                            imageUrl.Scheme is "http" or "https")
+                            _albumImages.Add(imageUrl);
+                    }
+                    if (_albumImages.Count > 0)
+                        _logger.LogInformation("Album images discovered count={Count} page={Host}", _albumImages.Count, pageUrl.Host);
+                }
+
                 if (root.TryGetProperty("candidates", out var candidates))
                     foreach (var candidate in candidates.EnumerateArray())
                     {
                         if (!candidate.TryGetProperty("url", out var address) || !Uri.TryCreate(address.GetString(), UriKind.Absolute, out var url)) continue;
+                        if (LooksLikeJunkPath(url) || LooksLikeImageCdn(url) || !IsCandidate(url, null))
+                            continue;
                         var owner = candidate.TryGetProperty("contentIdentity", out var identityValue) ? identityValue.GetString() : null;
                         if (owner is not null) _owners[MediaUrlNormalizer.Normalize(url)] = owner;
                         var currentOwner = MediaOwnership.ForPage(pageUrl, _observedIdentity);
@@ -522,7 +557,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         if (IsStrongMediaMime(mime))
             return true;
 
-        if (LooksLikeJunkPath(url))
+        if (LooksLikeJunkPath(url) || LooksLikeImageCdn(url))
             return false;
 
         if (resourceType is not null &&
@@ -558,11 +593,14 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             full.Contains("play_addr", StringComparison.OrdinalIgnoreCase) ||
             full.Contains("downloadaddr", StringComparison.OrdinalIgnoreCase) ||
             full.Contains("playaddr", StringComparison.OrdinalIgnoreCase) ||
+            (full.Contains("player", StringComparison.OrdinalIgnoreCase) &&
+             full.Contains("url=", StringComparison.OrdinalIgnoreCase)) ||
             path.Contains("/video/", StringComparison.OrdinalIgnoreCase) ||
             path.Contains("/audio/", StringComparison.OrdinalIgnoreCase) ||
             path.Contains("/mediasource/", StringComparison.OrdinalIgnoreCase) ||
             path.Contains("/upos", StringComparison.OrdinalIgnoreCase) ||
-            path.Contains("/stream", StringComparison.OrdinalIgnoreCase);
+            path.Contains("/stream", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("/m3u8", StringComparison.OrdinalIgnoreCase);
 
         // A generic progressive-play endpoint shape used by multiple embedded players.
         // Do not accept every /play/ API call: require a media identity or explicit play marker.
@@ -614,7 +652,18 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
 
         // Common non-media asset path tokens (morphological, not site-specific).
         return path.Contains("/cover") || path.Contains("/thumb") || path.Contains("/avatar") ||
-               path.Contains("/sprite") || path.Contains("/emoji") || path.Contains("/static/image");
+               path.Contains("/sprite") || path.Contains("/emoji") || path.Contains("/emoticon") ||
+               path.Contains("/static/image") || path.Contains("/im-") ||
+               path.Contains("/aweme-image") || path.Contains("/obj/tos-cn-i-");
+    }
+
+    private static bool LooksLikeImageCdn(Uri url)
+    {
+        var host = url.Host;
+        return host.Contains("byteimg", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("douyinpic", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("tiktokcdn-us.com", StringComparison.OrdinalIgnoreCase) &&
+               url.AbsolutePath.Contains("/image", StringComparison.OrdinalIgnoreCase);
     }
 
     private void Queue(Uri url, Uri page, RequestContext context, long? knownLength, CancellationToken ct, string? mime = null, bool primary = false, bool browserObserved = false)
@@ -633,6 +682,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
 
         // Deduplicate by normalized URL so YouTube/TikTok range/ABR variants share one probe slot.
         var mediaKey = MediaUrlNormalizer.Normalize(url);
+        if (MediaOwnership.ForPage(page, _observedIdentity) is { } pageOwner)
+            _owners[mediaKey] = pageOwner;
         var dedupeKey = (primary ? "primary:" : "network:") + mediaKey;
         var probeUrl = url;
 
@@ -668,7 +719,14 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 try
                 {
                     Probed? found;
-                    if (observed && _browserObserved.TryGetValue(mediaKey, out var evidence))
+                    BrowserObservedMedia? evidence = null;
+                    var trustBrowserObservation = observed &&
+                        _browserObserved.TryGetValue(mediaKey, out evidence) &&
+                        (knownLength is null ||
+                         knownLength >= MediaResourceSizeFilter.MinStrongMimeBytes ||
+                         ranged ||
+                         IsRangedOrVolatileMediaUrl(probeUrl));
+                    if (trustBrowserObservation && evidence is not null)
                     {
                         // Browser already fetched this URL successfully — do not ffprobe/re-GET.
                         found = FromBrowserObservation(page, evidence);
@@ -1177,18 +1235,72 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             a.Manifest.Variants.Where(v => v.Tracks.Count == 1).Select(v => new Probed(a.Page,
                 v.Tracks[0] with { ContentIdentity = a.Track.ContentIdentity ?? v.Tracks[0].ContentIdentity }, 0, v.Height))).ToArray();
         var videos = singleTracks.Where(a => a.Track.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
-            .OrderByDescending(a => a.Height ?? 0)
+            .OrderBy(a => MediaVariantRanking.IsFlvLike(a.Track) ? 1 : 0)
+            .ThenByDescending(a => a.Height ?? 0)
             .ThenByDescending(a => a.Track.ContentLength ?? 0)
             .ToArray();
         var audios = singleTracks.Where(a => a.Track.Kind == MediaTrackKind.Audio)
-            .OrderByDescending(a => a.Track.ContentLength ?? a.Track.Bandwidth ?? 0)
+            .OrderBy(a => MediaVariantRanking.IsFlvLike(a.Track) ? 1 : 0)
+            .ThenByDescending(a => a.Track.ContentLength ?? a.Track.Bandwidth ?? 0)
             .Concat(singleTracks.Where(a => a.Track.Kind == MediaTrackKind.Combined)
                 .Select(a => a with { Track = a.Track with { Kind = MediaTrackKind.Audio, TrackId = "audio-extract", Codec = null } }))
             .ToArray();
 
+        // Photo / album mode: equal-duration image slideshow + BGM.
+        if (_albumImages.Count > 0)
+        {
+            var albumAudio = audios.FirstOrDefault()?.Track
+                ?? singleTracks.Select(a => a.Track).FirstOrDefault(t => t.Kind is MediaTrackKind.Audio or MediaTrackKind.Combined);
+            if (albumAudio is not null)
+            {
+                var owner = MediaOwnership.ForPage(page, _observedIdentity);
+                var imageTracks = _albumImages
+                    .DistinctBy(u => MediaUrlNormalizer.Normalize(u))
+                    .Take(48)
+                    .Select((url, i) => new MediaTrack(
+                        $"album-img-{i}",
+                        MediaTrackKind.Image,
+                        url,
+                        null,
+                        "image",
+                        null,
+                        null,
+                        albumAudio.RequestContext)
+                    {
+                        IsValidated = true,
+                        ContentIdentity = owner ?? albumAudio.ContentIdentity,
+                        Evidence = MediaEvidence.DomObserved
+                    })
+                    .ToArray();
+                if (imageTracks.Length > 0)
+                {
+                    var tracks = imageTracks.Append(albumAudio with
+                    {
+                        Kind = MediaTrackKind.Audio,
+                        ContentIdentity = owner ?? albumAudio.ContentIdentity
+                    }).ToArray();
+                    variants.Add(MediaVariant.FromTracks(
+                        $"相册视频（{imageTracks.Length} 张）",
+                        null,
+                        null,
+                        null,
+                        "album",
+                        tracks) with
+                    {
+                        ContentIdentity = owner,
+                        RecoveryPageUrl = page
+                    });
+                }
+            }
+        }
+
         foreach (var item in videos)
         {
-            var bestAudio = audios.FirstOrDefault(audio => CanPair(item, audio));
+            var bestAudio = audios
+                .Where(audio => CanPair(item, audio))
+                .OrderBy(audio => MediaVariantRanking.IsFlvLike(audio.Track) ? 1 : 0)
+                .ThenByDescending(audio => audio.Track.ContentLength ?? audio.Track.Bandwidth ?? 0)
+                .FirstOrDefault();
             var track = item.Track;
             if (track.Kind == MediaTrackKind.Combined)
             {
@@ -1388,11 +1500,20 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
 
         var videoId = video.Track.ContentIdentity;
         var audioId = audio.Track.ContentIdentity;
-        if (videoId is null || audioId is null || videoId != audioId)
+        if (videoId is not null && audioId is not null)
+            return videoId == audioId;
+
+        // Orphan tracks on a shared feed host must not invent a pair.
+        if (videoId is null && audioId is null)
             return false;
 
-        // Matching content identity is authoritative. Douyin/TikTok BGM duration often
-        // differs from the clipped video timeline and must not block pairing.
+        // One-sided stamp: require the stamped id to match page ownership when the URL
+        // itself encodes a content id; otherwise trust SamePage (active feed item).
+        var stamped = videoId ?? audioId!;
+        var pageOwner = MediaOwnership.ForPage(video.Page, null);
+        if (pageOwner is not null)
+            return stamped == pageOwner;
+
         return true;
     }
 
@@ -1541,6 +1662,15 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             .Select(t => MediaUrlNormalizer.Normalize(t.SourceUrl))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+        var owner = video.SiteContentId is null ? null : "id:" + video.SiteContentId;
+        var pairedAudio = video.Variants
+            .SelectMany(v => v.Tracks)
+            .Where(t => t.Kind is MediaTrackKind.Audio or MediaTrackKind.Combined)
+            .OrderByDescending(t => t.ContentLength ?? t.Bandwidth ?? 0)
+            .FirstOrDefault();
+        if (pairedAudio is { Kind: MediaTrackKind.Combined })
+            pairedAudio = pairedAudio with { Kind = MediaTrackKind.Audio, TrackId = "audio-extract", Codec = null };
+
         var injected = new List<MediaVariant>();
         var index = 0;
         foreach (var observed in browserVideos)
@@ -1554,7 +1684,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 : "mp4";
             var track = new MediaTrack(
                 $"browser-video-{index++}",
-                observed.KindHint,
+                observed.KindHint == MediaTrackKind.Audio ? MediaTrackKind.Video : observed.KindHint,
                 observed.Url,
                 null,
                 container,
@@ -1565,17 +1695,20 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 IsValidated = true,
                 BrowserObserved = true,
                 Evidence = MediaEvidence.BrowserObserved,
-                ContentIdentity = video.SiteContentId is null ? null : "id:" + video.SiteContentId
+                ContentIdentity = owner
             };
+            var tracks = pairedAudio is null
+                ? new[] { track }
+                : new[] { track, pairedAudio with { ContentIdentity = owner ?? pairedAudio.ContentIdentity } };
             injected.Add(MediaVariant.FromTracks(
-                $"视频 (浏览器实播)",
+                pairedAudio is null ? "视频 (浏览器实播)" : "视频 (浏览器实播+音轨)",
                 null,
                 null,
                 null,
-                container,
-                [track]) with
+                pairedAudio is null ? container : "mkv",
+                tracks) with
             {
-                ContentIdentity = track.ContentIdentity,
+                ContentIdentity = owner,
                 RecoveryPageUrl = video.PageUrl
             });
         }

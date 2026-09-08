@@ -5,7 +5,9 @@ public enum MediaTrackKind
     Video,
     Audio,
     Combined,
-    Unknown
+    Unknown,
+    /// <summary>Still image used in album/slideshow variants (Douyin photo mode).</summary>
+    Image
 }
 
 public sealed record MediaTrack(
