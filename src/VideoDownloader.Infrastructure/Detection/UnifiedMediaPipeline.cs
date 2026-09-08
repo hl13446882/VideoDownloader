@@ -438,12 +438,23 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
     }
 
     /// <summary>
-    /// True when Douyin/TikTok CDN reports a known payload smaller than a displayable object.
-    /// Does not apply to Bilibili / YouTube / generic CDNs.
+    /// True when Douyin/TikTok CDN reports a known payload smaller than a downloadable object.
+    /// Video/Combined use display size; audio uses a lower floor so short BGM is kept while
+    /// MSE Range crumbs (~1KiB) are still dropped. Does not apply to other sites.
     /// </summary>
-    public static bool IsInsufficientByteDanceDownloadObject(Uri url, long? contentLength) =>
-        contentLength is > 0 and < MediaResourceSizeFilter.MinDisplayBytes &&
-        IsByteDanceOrTikTokMediaCdn(url);
+    public static bool IsInsufficientByteDanceDownloadObject(Uri url, long? contentLength)
+    {
+        if (contentLength is null or <= 0)
+            return false;
+        if (!IsByteDanceOrTikTokMediaCdn(url))
+            return false;
+
+        var kind = InferKindFromMime(null, url);
+        var min = kind == MediaTrackKind.Audio
+            ? MediaResourceSizeFilter.MinStrongMimeBytes
+            : MediaResourceSizeFilter.MinDisplayBytes;
+        return contentLength < min;
+    }
 
     internal static string? ExtractContentIdFromUrl(Uri url)
     {
@@ -1507,13 +1518,19 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             }
             else
             {
+                // Douyin/TikTok: when no audio candidate survived discovery, still expose a
+                // browser-proven progressive object as Combined so download is not blocked.
+                var promoteCombined = item.Track.BrowserObserved &&
+                    audios.Length == 0 &&
+                    IsByteDanceOrTikTokMediaCdn(item.Track.SourceUrl) &&
+                    !IsInsufficientByteDanceDownloadObject(item.Track.SourceUrl, item.Track.ContentLength);
                 variants.Add(MediaVariant.FromTracks(
-                    FormatVideoLabel(item.Height, audios.Length > 0 ? "音轨待匹配" : "无音轨"),
+                    FormatVideoLabel(item.Height, promoteCombined ? null : (audios.Length > 0 ? "音轨待匹配" : "无音轨")),
                     null,
                     item.Height,
                     track.Bandwidth,
                     track.Container,
-                    [track]));
+                    [promoteCombined ? track with { Kind = MediaTrackKind.Combined } : track]));
             }
         }
 

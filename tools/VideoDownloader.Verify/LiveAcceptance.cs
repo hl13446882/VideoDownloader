@@ -592,25 +592,50 @@ public partial class MainWindow
         foreach(var header in request.Headers.Where(h=>!h.Key.Equals("Range",StringComparison.OrdinalIgnoreCase)))
         {info.ArgumentList.Add("-H");info.ArgumentList.Add(header.Key+": "+string.Join(", ",header.Value));}
         using var process=Process.Start(info)!;
-        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(420));
-        var output=process.StandardOutput.ReadToEndAsync();var errors=process.StandardError.ReadToEndAsync();
+        var stdout=process.StandardOutput.ReadToEndAsync();
+        var stderr=process.StandardError.ReadToEndAsync();
+        var deadline=DateTime.UtcNow.AddSeconds(600);
         try
         {
-            await process.WaitForExitAsync(timeout.Token);
-            await Task.WhenAll(output,errors);
-            var bytes=Directory.EnumerateFiles(folder,"*",SearchOption.AllDirectories)
-                .Where(p=>new[]{".ts",".m4s",".mp4",".m4a",".aac",".webm",".mkv"}.Contains(Path.GetExtension(p)))
-                .Sum(p=>new FileInfo(p).Length);
-            // Exit 0 with substantial bytes under the cap = short playlist finished completely.
-            var complete=process.ExitCode==0 && bytes>=64*1024 && bytes<minBytes;
-            var ok=(process.ExitCode==0&&bytes>=minBytes) || complete;
-            return(ok,$"N_m3u8DL-RE proof: exit={process.ExitCode}, mediaBytes={bytes}, complete={complete}");
+            while(DateTime.UtcNow<deadline)
+            {
+                var bytes=SumMediaBytes(folder);
+                if(bytes>=minBytes)
+                {
+                    try{process.Kill(true);}catch{/* best-effort */}
+                    return(true,$"N_m3u8DL-RE proof: early-stop mediaBytes={bytes}");
+                }
+                if(process.HasExited)
+                {
+                    await Task.WhenAll(stdout,stderr);
+                    // Exit 0 with substantial bytes under the cap = short playlist finished completely.
+                    var complete=process.ExitCode==0 && bytes>=64*1024 && bytes<minBytes;
+                    var ok=(process.ExitCode==0&&bytes>=minBytes) || complete;
+                    return(ok,$"N_m3u8DL-RE proof: exit={process.ExitCode}, mediaBytes={bytes}, complete={complete}");
+                }
+                await Task.Delay(1500);
+            }
+            var partial=SumMediaBytes(folder);
+            try{process.Kill(true);}catch{/* best-effort */}
+            return(false,$"N_m3u8DL-RE proof: timeout mediaBytes={partial}");
         }
         finally
         {
-            if(!process.HasExited) process.Kill(true);
+            if(!process.HasExited) try{process.Kill(true);}catch{/* best-effort */}
             try{Directory.Delete(folder,true);}catch{/* best-effort */}
         }
+    }
+
+    private static long SumMediaBytes(string folder)
+    {
+        if(!Directory.Exists(folder)) return 0;
+        try
+        {
+            return Directory.EnumerateFiles(folder,"*",SearchOption.AllDirectories)
+                .Where(p=>new[]{".ts",".m4s",".mp4",".m4a",".aac",".webm",".mkv"}.Contains(Path.GetExtension(p)))
+                .Sum(p=>{try{return new FileInfo(p).Length;}catch{return 0L;}});
+        }
+        catch { return 0; }
     }
 
     private async Task<(bool Ok,string Note)> ReadManifestSegmentAsync(MediaTrack track)
