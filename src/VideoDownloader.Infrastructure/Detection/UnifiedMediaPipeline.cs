@@ -1479,7 +1479,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             if (track.Kind == MediaTrackKind.Combined)
             {
                 variants.Add(MediaVariant.FromTracks(
-                    $"视频 {FormatHeight(item.Height)}",
+                    FormatVideoLabel(item.Height),
                     null,
                     item.Height,
                     track.Bandwidth,
@@ -1498,7 +1498,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             if (bestAudio is not null && CanPair(item, bestAudio))
             {
                 variants.Add(MediaVariant.FromTracks(
-                    $"视频 {FormatHeight(item.Height)}",
+                    FormatVideoLabel(item.Height),
                     null,
                     item.Height,
                     (track.Bandwidth ?? 0) + (bestAudio.Track.Bandwidth ?? 0),
@@ -1508,7 +1508,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             else
             {
                 variants.Add(MediaVariant.FromTracks(
-                    $"视频 {FormatHeight(item.Height)}（{(audios.Length > 0 ? "音轨待匹配" : "无音轨")}）",
+                    FormatVideoLabel(item.Height, audios.Length > 0 ? "音轨待匹配" : "无音轨"),
                     null,
                     item.Height,
                     track.Bandwidth,
@@ -1818,7 +1818,12 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         "v", "id", "modal_id", "aweme_id", "video_id", "bvid"
     };
 
-    private static string FormatHeight(int? height) => height is > 0 ? $"{height}p" : "默认";
+    /// <summary>User-facing variant title. Never invent "默认" when height is unknown.</summary>
+    private static string FormatVideoLabel(int? height, string? note = null)
+    {
+        var label = height is > 0 ? $"视频 {height}p" : "视频";
+        return string.IsNullOrWhiteSpace(note) ? label : $"{label}（{note}）";
+    }
 
     private static string FormatAudioLabel(Probed audio)
     {
@@ -1828,7 +1833,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             return $"{audio.Track.Bandwidth / 1000}kbps";
         if (audio.Duration > 0)
             return $"{audio.Duration:F0}s";
-        return "默认";
+        return "音轨";
     }
 
     private static string FormatBytes(long bytes)
