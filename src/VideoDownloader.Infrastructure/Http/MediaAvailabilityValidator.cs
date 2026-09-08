@@ -67,12 +67,19 @@ public sealed class MediaAvailabilityValidator(IHttpClientFactory clients, IRequ
             }
             if (text.StartsWith('<') || text.StartsWith('{') || text.StartsWith('[') || mime.Contains("html") || mime.Contains("json"))
                 throw new DownloadException(ErrorCodes.InvalidFormat, "Response is a document, not media bytes.");
-            if (!LooksLikeMedia(data.AsSpan(0, count)))
+            if (!(track.Kind == MediaTrackKind.Image ? LooksLikeImage(data.AsSpan(0, count)) : LooksLikeMedia(data.AsSpan(0, count))))
                 throw new DownloadException(ErrorCodes.InvalidFormat, "Media sample has no recognized container header.");
             return;
         }
         throw new DownloadException(ErrorCodes.NetTimeout, "Media redirect limit exceeded.");
     }
+
+    internal static bool LooksLikeImage(ReadOnlySpan<byte> b) =>
+        b.Length >= 12 && (b.StartsWith(new byte[] { 0xff, 0xd8, 0xff }) ||
+            b.StartsWith(new byte[] { 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a }) ||
+            (b.StartsWith("RIFF"u8) && b.Slice(8, 4).SequenceEqual("WEBP"u8)) ||
+            (b.Slice(4, 4).SequenceEqual("ftyp"u8) &&
+             (b.Slice(8, 4).SequenceEqual("avif"u8) || b.Slice(8, 4).SequenceEqual("heic"u8))));
 
     internal static bool LooksLikeMedia(ReadOnlySpan<byte> b) =>
         b.Length >= 8 && (b.Slice(4, 4).SequenceEqual("ftyp"u8) || b.Slice(4, 4).SequenceEqual("styp"u8) ||

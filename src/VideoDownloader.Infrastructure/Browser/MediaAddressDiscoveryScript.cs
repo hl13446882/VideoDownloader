@@ -13,7 +13,8 @@ internal static class MediaAddressDiscoveryScript
           const looksMedia = value =>
             /\.(mp4|webm|m4a|mp3|m3u8|mpd|aac|ogg|m4s|flv)(?:[?#]|$)/i.test(value) ||
             /\/(?:videoplayback|playurl|index\.m3u8)\b/i.test(value) ||
-            /[?&](?:url|src|file|video|path)=https?:/i.test(value);
+            /[?&](?:url|src|file|video|path)=https?:/i.test(value) ||
+            /(?:qlplayer|parse|player).*[?&]url=/i.test(value);
           const visit = (value, base, depth = 0, key = '') => {
             if (depth > 16 || urls.size >= 64) return;
             if (typeof value === 'string') {
@@ -47,6 +48,26 @@ internal static class MediaAddressDiscoveryScript
               try { if (frame.contentDocument) scan(frame.contentDocument, depth + 1); } catch {}
           };
           scan(document, 0);
+          try {
+            if (window.player_aaaa?.url && looksMedia(window.player_aaaa.url)) add(window.player_aaaa.url, document.baseURI);
+            if (window.MacPlayer?.PlayUrl && looksMedia(window.MacPlayer.PlayUrl)) add(window.MacPlayer.PlayUrl, document.baseURI);
+          } catch {}
+          // DPlayer / hls.js: video.src is often blob:, real playlist is only in options or Network.
+          try {
+            const dpUrl = window.dp?.options?.video?.url;
+            if (typeof dpUrl === 'string' && looksMedia(dpUrl)) add(dpUrl, document.baseURI);
+            for (const el of Array.from(document.querySelectorAll('.dplayer')).slice(0, 8)) {
+              const inst = el.dplayer || el.__dplayer || el._dplayer;
+              const u = inst?.options?.video?.url;
+              if (typeof u === 'string' && looksMedia(u)) add(u, document.baseURI);
+            }
+          } catch {}
+          try {
+            for (const entry of performance.getEntriesByType('resource')) {
+              const name = entry && entry.name;
+              if (typeof name === 'string' && looksMedia(name)) add(name, document.baseURI);
+            }
+          } catch {}
           return Array.from(urls).map(url => ({url}));
         })()
         """;

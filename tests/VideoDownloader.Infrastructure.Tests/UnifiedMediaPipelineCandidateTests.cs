@@ -8,6 +8,14 @@ namespace VideoDownloader.Infrastructure.Tests;
 public class UnifiedMediaPipelineCandidateTests
 {
     [Theory]
+    [InlineData("https://v3.douyinvod.com/video/tos/cn/item/media-audio-und-mp4a/?mime_type=video_mp4", "video/mp4", MediaTrackKind.Audio)]
+    [InlineData("https://v3.douyinvod.com/video/tos/cn/item/media-video-avc1/?mime_type=video_mp4", "video/mp4", MediaTrackKind.Video)]
+    public void TrackPathOverridesGenericContainerMime(string url, string mime, MediaTrackKind expected)
+    {
+        Assert.Equal(expected, UnifiedMediaPipeline.InferKindFromMime(mime, new Uri(url)));
+    }
+
+    [Theory]
     [InlineData("https://cdn.example.com/play/videoplayback?mime=video/mp4", null, null, null, true)]
     [InlineData("https://cdn.example.com/a/b/c.m4s", null, null, 2_000_000L, true)]
     [InlineData("https://cdn.example.com/a/b/c.m4s", null, null, 8_000L, false)]

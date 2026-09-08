@@ -91,7 +91,7 @@ internal static class VideoObservationScript
               else if(v&&typeof v==='object'){
                 for(const k of ['urlList','url_list','download_url_list','display_image','origin','url']){
                   const child=v[k];
-                  if(Array.isArray(child)) child.forEach(push);
+                  if(Array.isArray(child)) { const first=child.find(u=>typeof u==='string' && /^https?:/i.test(u)); if(first) push(first); }
                   else if(typeof child==='string') push(child);
                 }
               }
@@ -107,6 +107,11 @@ internal static class VideoObservationScript
           const observeAlbumPost = () => {
             // Douyin/TikTok photo mode: carousel images + BGM, often no <video>.
             let record=null;
+            const currentRecord=playerRecord(activePlayer());
+            const expectedId=(location.search.match(/modal_id=(\d{10,})/)||[])[1]
+              || (location.pathname.match(/\/(?:video|note)\/(\d{10,})/)||[])[1]
+              || String(currentRecord?.aweme_id||currentRecord?.itemId||currentRecord?.videoId||currentRecord?.id||'');
+            if(!expectedId) return null;
             const roots=[];
             const push=v=>{if(v&&typeof v==='object')roots.push(v);};
             try{
@@ -125,7 +130,7 @@ internal static class VideoObservationScript
               const hasImages = !!(value.images||value.image_list||value.image_post_info||value.imagePost||value.image_infos);
               const hasMusic = !!(value.music||value.audio||value.playAddr||value.play_addr);
               const id = value.aweme_id||value.itemId||value.videoId||value.id||value.modal_id||value.note_id;
-              if(hasImages && (hasMusic||id) && (value.desc||value.description||value.title||id)) return value;
+              if(hasImages && String(id)===expectedId && (hasMusic||id) && (value.desc||value.description||value.title||id)) return value;
               if(Array.isArray(value)){
                 for(const c of value.slice(0,40)){const r=find(c,depth+1); if(r) return r;}
               }else{
@@ -135,7 +140,8 @@ internal static class VideoObservationScript
             };
             for(const root of roots){ record=find(root,0); if(record) break; }
             if(!record){
-              // DOM fallback: large in-view images + any audio
+              if(!/\/note\//i.test(location.pathname)) return null;
+              // Explicit note pages may expose only DOM stills and BGM.
               const imgs=[...document.querySelectorAll('img')].filter(e=>{
                 const r=e.getBoundingClientRect();
                 const src=e.currentSrc||e.src||'';
@@ -145,6 +151,7 @@ internal static class VideoObservationScript
               const audio=[...document.querySelectorAll('audio,video')].find(e=>
                 /^https?:/i.test(e.currentSrc||e.src||'') &&
                 (e.tagName==='AUDIO' || (e.tagName==='VIDEO' && (e.duration>0 || e.seekable?.length))));
+              if(imgs.length<2 && !/\/note\//i.test(location.pathname)) return null;
               if(imgs.length<1) return null;
               const modal=(location.search.match(/modal_id=(\d{10,})/)||[])[1];
               const pathId=(location.pathname.match(/\/(?:video|note)\/(\d{10,})/)||[])[1];
@@ -165,6 +172,7 @@ internal static class VideoObservationScript
               };
             }
             const images=collectImageUrls(record);
+            if(images.length<2 && !/\/note\//i.test(location.pathname)) return null;
             if(images.length<1) return null;
             const music=record.music||{};
             const audioUrls=[];
@@ -228,13 +236,22 @@ internal static class VideoObservationScript
             };
           };
           window.__vdObserve = () => {
-            // Note / album posts may still mount a tiny <video> for BGM; prefer album when images exist.
+            // Note / album posts may still mount a tiny <video> for BGM; prefer album when multiple stills exist.
             const albumEarly = observeAlbumPost();
-            if (albumEarly?.images?.length > 0) return albumEarly;
+            if (albumEarly?.images?.length > 1 ||
+                (albumEarly?.images?.length > 0 && /\/note\//i.test(location.pathname)))
+              return albumEarly;
             const active = activePlayer();
             if (!active) {
               const bili = observeDocumentMeta();
-              return bili;
+              if(bili) return bili;
+              if(window.player_aaaa || window.player_data || window.MacPlayer){
+                const player=window.player_aaaa||window.player_data||{};
+                const heading=document.querySelector('.player-title,h2.title,.title h2,h2,h1');
+                const caption=String(player.vod_data?.vod_name||heading?.textContent||document.title||'').trim();
+                return {type:'vd-video-identity',identity:pageKey(location.href),caption,href:location.href,media:[]};
+              }
+              return null;
             }
             const record=playerRecord(active);
             let scope = active, explicit = record ? 'content:'+(record.aweme_id||record.itemId||record.videoId||record.id) : '',
@@ -361,11 +378,68 @@ internal static class VideoObservationScript
             // Always harvest album stills when present on the same identity.
             if(!observation.images?.length){
               const album=observeAlbumPost();
-              if(album?.images?.length){
+              if(album?.images?.length && album.identity===observation.identity){
                 observation.images=album.images;
                 observation.album=true;
                 for(const u of album.media||[]) observation.media.push(u);
               }
+            }
+            observation.media=[...new Set(observation.media)];
+            // Bilibili DASH playinfo (video+audio baseUrl) when yt-dlp is blocked by 412.
+            try{
+              const playinfo=window.__playinfo__?.data||window.__playinfo__||
+                window.__INITIAL_STATE__?.videoData?.playInfo||
+                window.__INITIAL_STATE__?.vp?.dash;
+              const dash=playinfo?.dash||playinfo?.result?.dash||playinfo;
+              const pushDash=list=>{
+                if(!Array.isArray(list)) return;
+                for(const item of list.slice(0,12)){
+                  const u=item?.baseUrl||item?.base_url||item?.backupUrl?.[0]||item?.backup_url?.[0];
+                  if(typeof u==='string' && /\.(m3u8|mpd|mp4|webm|m4a|mp3)([?#]|$)/i.test(u)) observation.media.push(u);
+                }
+              };
+              if(dash){ pushDash(dash.video); pushDash(dash.audio); }
+            }catch{}
+            // MacCMS / generic player bootstrap (player_aaaa / MacPlayer / parse iframe).
+            try{
+              const player=window.player_aaaa||window.player_data||null;
+              if(player){
+                if(!observation.caption && player.vod_data?.vod_name)
+                  observation.caption=String(player.vod_data.vod_name).trim();
+                if(!observation.identity && player.id)
+                  observation.identity=location.host+':content:'+player.id;
+                for(const key of ['url']){
+                  const u=player[key];
+                  if(typeof u==='string' && /\.(m3u8|mpd|mp4|webm|m4a|mp3)([?#]|$)/i.test(u)) observation.media.push(u);
+                }
+              }
+              if(window.MacPlayer){
+                if(typeof MacPlayer.PlayUrl==='string' && /\.(m3u8|mpd|mp4|webm|m4a|mp3)([?#]|$)/i.test(MacPlayer.PlayUrl))
+                  observation.media.push(MacPlayer.PlayUrl);
+              }
+            }catch{}
+            // DPlayer + hls.js (MSE/blob): harvest playlist URL only, never page copy.
+            try{
+              const pushMedia=u=>{
+                if(typeof u==='string' && /\.(m3u8|mpd|mp4|webm|m4a|mp3)([?#]|$)/i.test(u))
+                  observation.media.push(u);
+              };
+              pushMedia(window.dp?.options?.video?.url);
+              for(const el of Array.from(document.querySelectorAll('.dplayer')).slice(0,8)){
+                const inst=el.dplayer||el.__dplayer||el._dplayer;
+                pushMedia(inst?.options?.video?.url);
+              }
+              for(const entry of performance.getEntriesByType('resource'))
+                pushMedia(entry?.name);
+            }catch{}
+            if(!observation.caption){
+              const h=document.querySelector('h1,h2.title,.title h2,.player-title,h2');
+              if(h) observation.caption=(h.textContent||'').trim().replace(/\s+/g,' ').slice(0,120);
+            }
+            // Generic sites: document.title is an allowed caption fallback.
+            if(!observation.caption){
+              const t=String(document.title||'').trim().replace(/\s+/g,' ');
+              if(t && !/\.(m4s|ts|m3u8|mpd|flv)([?#]|$)/i.test(t)) observation.caption=t.slice(0,160);
             }
             observation.media=[...new Set(observation.media)];
             return observation;

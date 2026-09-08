@@ -63,18 +63,34 @@ public class DownloadFileNameBuilderTests
     }
 
     [Fact]
-    public void Build_Generic_FallsBackToCleanTitle()
+    public void Build_Generic_FallsBackToHostDateResolution()
     {
         var video = CreateVideo(
             SiteIds.Generic,
             null,
             "public.mp4",
-            new Uri("http://localhost:5088/"),
+            new Uri("https://ally.trytcrae.cc/archives/274269/"),
             null);
 
         var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
+        var day = DateTimeOffset.Now.ToString("yyyyMMdd");
 
-        Assert.Equal("public.mp4_1080p", name);
+        Assert.EndsWith($"_{day}_1080p", name);
+        Assert.DoesNotContain("archives", name);
+        Assert.DoesNotContain("public.mp4", name);
+        Assert.True(new System.Globalization.StringInfo(name).LengthInTextElements
+                    <= DownloadFileNameBuilder.MaxStemLength);
+    }
+
+    [Fact]
+    public void BuildHostDateResolutionFallback_UsesHostWithoutPath()
+    {
+        var stamp = new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.FromHours(8));
+        var name = DownloadFileNameBuilder.BuildHostDateResolutionFallback(
+            new Uri("https://www.example.com/a/b?x=1"),
+            height: 720,
+            now: stamp);
+        Assert.Equal("example.com_20260908_720p", name);
     }
 
     [Fact]

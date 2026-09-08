@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -54,6 +55,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         lock (_gate)
         {
             if (sessionId!=SessionId || string.IsNullOrWhiteSpace(caption) || caption==_title) return;
+            // Do not let transport filenames overwrite a real caption / page title.
+            if (IsWeakCaption(caption) && !IsWeakCaption(_title)) return;
             _title=caption.Trim();
             Publish(_generation.Token, forceEmit: true);
         }
@@ -206,6 +209,10 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         if (_page is not null && e.PageUrl is not null && !SamePage(e.PageUrl, _page))
             return Task.CompletedTask;
 
+        // Drop CDN leftovers from the previous site after a host change (Bilibili→MacCMS etc.).
+        if (IsLikelyCrossSiteLeak(page, e.Url))
+            return Task.CompletedTask;
+
         // Bind page early so subsequent events in this cycle have a fallback.
         _page ??= page;
 
@@ -327,21 +334,26 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         return IsStrongMediaMime(e.MimeType);
     }
 
-    private static MediaTrackKind InferKindFromMime(string? mime, Uri? url = null)
+    internal static MediaTrackKind InferKindFromMime(string? mime, Uri? url = null)
     {
         if (url is not null)
         {
             var full = url.AbsoluteUri;
-            if (full.Contains("mime_type=video", StringComparison.OrdinalIgnoreCase) ||
-                full.Contains("mimetype=video", StringComparison.OrdinalIgnoreCase) ||
-                full.Contains("/video/tos/", StringComparison.OrdinalIgnoreCase) ||
-                full.Contains("media_type=video", StringComparison.OrdinalIgnoreCase))
-                return MediaTrackKind.Video;
-            if (full.Contains("mime_type=audio", StringComparison.OrdinalIgnoreCase) ||
+            var path = url.AbsolutePath;
+            if (path.Contains("/media-audio-", StringComparison.OrdinalIgnoreCase) ||
+                path.Contains("-30216", StringComparison.OrdinalIgnoreCase) ||
+                path.Contains("-30280", StringComparison.OrdinalIgnoreCase) ||
+                full.Contains("mime_type=audio", StringComparison.OrdinalIgnoreCase) ||
                 full.Contains("mimetype=audio", StringComparison.OrdinalIgnoreCase) ||
                 full.Contains("/audio/tos/", StringComparison.OrdinalIgnoreCase) ||
                 full.Contains("media_type=audio", StringComparison.OrdinalIgnoreCase))
                 return MediaTrackKind.Audio;
+            if (full.Contains("mime_type=video", StringComparison.OrdinalIgnoreCase) ||
+                full.Contains("mimetype=video", StringComparison.OrdinalIgnoreCase) ||
+                full.Contains("/video/tos/", StringComparison.OrdinalIgnoreCase) ||
+                full.Contains("media_type=video", StringComparison.OrdinalIgnoreCase) ||
+                path.Contains("-300", StringComparison.OrdinalIgnoreCase))
+                return MediaTrackKind.Video;
         }
 
         if (mime is null) return MediaTrackKind.Combined;
@@ -400,7 +412,9 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                         title.ValueKind == JsonValueKind.String &&
                         !string.IsNullOrWhiteSpace(title.GetString()))
                     {
-                        _title = title.GetString()!.Trim();
+                        var text = title.GetString()!.Trim();
+                        if (!IsWeakCaption(text))
+                            _title = text;
                         break;
                     }
                 }
@@ -412,7 +426,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                         if (Uri.TryCreate(pageUrl, item.GetString(), out var url) &&
                             !MediaUrlNormalizer.IsLikelySegment(url) &&
                             !LooksLikeJunkPath(url) &&
-                            !LooksLikeImageCdn(url))
+                            !LooksLikeImageCdn(url) &&
+                            !IsLikelyCrossSiteLeak(pageUrl, url))
                         {
                             if (primary && MediaOwnership.ForPage(pageUrl, _observedIdentity) is { } owner)
                                 _owners[MediaUrlNormalizer.Normalize(url)] = owner;
@@ -457,6 +472,10 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             {
             }
         }
+
+        // Generic pages: document.title is an allowed caption fallback (never transport filenames).
+        if (IsWeakCaption(_title) && !IsWeakCaption(pageTitle))
+            _title = pageTitle!.Trim();
 
         Publish(_generation.Token);
         if (runExternal)
@@ -593,8 +612,6 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             full.Contains("play_addr", StringComparison.OrdinalIgnoreCase) ||
             full.Contains("downloadaddr", StringComparison.OrdinalIgnoreCase) ||
             full.Contains("playaddr", StringComparison.OrdinalIgnoreCase) ||
-            (full.Contains("player", StringComparison.OrdinalIgnoreCase) &&
-             full.Contains("url=", StringComparison.OrdinalIgnoreCase)) ||
             path.Contains("/video/", StringComparison.OrdinalIgnoreCase) ||
             path.Contains("/audio/", StringComparison.OrdinalIgnoreCase) ||
             path.Contains("/mediasource/", StringComparison.OrdinalIgnoreCase) ||
@@ -628,6 +645,12 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
 
         return true;
     }
+
+    private static bool IsManifestAddress(Uri url, string? mime) =>
+        url.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) ||
+        url.AbsolutePath.EndsWith(".mpd", StringComparison.OrdinalIgnoreCase) ||
+        mime?.Contains("mpegurl", StringComparison.OrdinalIgnoreCase) == true ||
+        mime?.Contains("dash+xml", StringComparison.OrdinalIgnoreCase) == true;
 
     private static bool IsStrongMediaMime(string? mime) =>
         mime is not null &&
@@ -721,6 +744,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                     Probed? found;
                     BrowserObservedMedia? evidence = null;
                     var trustBrowserObservation = observed &&
+                        !IsManifestAddress(probeUrl, mime) &&
                         _browserObserved.TryGetValue(mediaKey, out evidence) &&
                         (knownLength is null ||
                          knownLength >= MediaResourceSizeFilter.MinStrongMimeBytes ||
@@ -821,6 +845,14 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         request.Headers.Remove("Range");
         request.Headers.Remove("If-Range");
         var headers = string.Concat(request.Headers.Select(h => $"{h.Key}: {string.Join(", ", h.Value)}\r\n"));
+        if (manifestKind == "hls")
+        {
+            // HLS segments may use opaque or image-like paths. Classify their bytes,
+            // while keeping playlist access restricted to network protocols.
+            foreach (var arg in new[] { "-protocol_whitelist", "http,https,tcp,tls,crypto",
+                         "-allowed_extensions", "ALL", "-allowed_segment_extensions", "ALL", "-extension_picky", "0" })
+                psi.ArgumentList.Add(arg);
+        }
         foreach (var arg in new[]
                  {
                      "-v", "error", "-rw_timeout", "10000000", "-headers", headers,
@@ -839,9 +871,14 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         var stderr = process.StandardError.ReadToEndAsync(timeout.Token);
         await process.WaitForExitAsync(timeout.Token);
         var json = await stdout;
-        await stderr;
+        var probeError = await stderr;
         // A plausible URL is still only a candidate; a failed validation is never a valid result.
-        if (process.ExitCode != 0) return null;
+        if (process.ExitCode != 0)
+        {
+            _logger.LogInformation("Stream inspection failed host={Host} detail={Detail}", url.Host,
+                probeError.Length > 1600 ? probeError[..1600] : probeError);
+            return null;
+        }
 
         using var doc = JsonDocument.Parse(json);
         if (!doc.RootElement.TryGetProperty("streams", out var streamsEl))
@@ -1217,17 +1254,16 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
     {
         var page = all[0].Page;
         var sourceName = Path.GetFileName(all.Select(a => a.Track.SourceUrl.AbsolutePath)
-            .FirstOrDefault(path => !string.IsNullOrWhiteSpace(path)) ?? "");
-        // Never fall back to the bare host: feed pages share one host and that title fails
-        // caption ownership checks while looking like a real video title.
-        // Rebuilding tracks must not replace an existing content caption with a transport filename.
-        var title = !string.IsNullOrWhiteSpace(_title)
+            .FirstOrDefault(path => !string.IsNullOrWhiteSpace(path) &&
+                                    !IsWeakCaption(Path.GetFileName(path))) ?? "");
+        // Caption only (document.title allowed). Filename fallback is DownloadFileNameBuilder.Build — not here.
+        var title = !IsWeakCaption(_title)
             ? _title!
-            : !string.IsNullOrWhiteSpace(extractedCaption)
-                ? extractedCaption
-            : IsDirectMediaPage(page) && !string.IsNullOrWhiteSpace(sourceName)
+            : !IsWeakCaption(extractedCaption)
+                ? extractedCaption!
+            : IsDirectMediaPage(page) && !IsWeakCaption(sourceName)
                 ? sourceName!
-                : string.IsNullOrWhiteSpace(sourceName) ? "视频" : sourceName;
+                : !IsWeakCaption(sourceName) ? sourceName! : "视频";
 
         var variants = all.Where(a => a.Manifest is not null).SelectMany(a => a.Manifest!.Variants)
             .Where(v => v.Tracks.Count > 1).ToList();
@@ -1247,7 +1283,9 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             .ToArray();
 
         // Photo / album mode: equal-duration image slideshow + BGM.
-        if (_albumImages.Count > 0)
+        // Require 2+ stills, or a Douyin/TikTok note page with at least one still.
+        var albumMin = page.AbsolutePath.Contains("/note/", StringComparison.OrdinalIgnoreCase) ? 1 : 2;
+        if (_albumImages.Count >= albumMin)
         {
             var albumAudio = audios.FirstOrDefault()?.Track
                 ?? singleTracks.Select(a => a.Track).FirstOrDefault(t => t.Kind is MediaTrackKind.Audio or MediaTrackKind.Combined);
@@ -1480,17 +1518,38 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
 
     private static string PreferDisplayTitle(string local, string external)
     {
-        static bool Weak(string? value) =>
-            string.IsNullOrWhiteSpace(value) ||
-            value is "视频" ||
-            value.Contains('.', StringComparison.Ordinal) && !value.Contains(' ', StringComparison.Ordinal) &&
+        if (!IsWeakCaption(local)) return local;
+        if (!IsWeakCaption(external)) return external;
+        return string.IsNullOrWhiteSpace(local) ? external : local;
+    }
+
+    /// <summary>
+    /// Empty, placeholder, host-looking, or transport/segment filenames — not a usable caption.
+    /// Generic pages may fall back to document.title instead.
+    /// </summary>
+    internal static bool IsWeakCaption(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return true;
+        if (value is "视频") return true;
+        if (value.Contains('.', StringComparison.Ordinal) && !value.Contains(' ', StringComparison.Ordinal) &&
             (value.EndsWith(".com", StringComparison.OrdinalIgnoreCase) ||
              value.EndsWith(".tv", StringComparison.OrdinalIgnoreCase) ||
-             value.StartsWith("www.", StringComparison.OrdinalIgnoreCase));
-
-        if (!Weak(local)) return local;
-        if (!Weak(external)) return external;
-        return string.IsNullOrWhiteSpace(local) ? external : local;
+             value.EndsWith(".cc", StringComparison.OrdinalIgnoreCase) ||
+             value.StartsWith("www.", StringComparison.OrdinalIgnoreCase)))
+            return true;
+        if (value.EndsWith(".m4s", StringComparison.OrdinalIgnoreCase) ||
+            value.EndsWith(".ts", StringComparison.OrdinalIgnoreCase) ||
+            value.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) ||
+            value.EndsWith(".mpd", StringComparison.OrdinalIgnoreCase) ||
+            value.EndsWith(".flv", StringComparison.OrdinalIgnoreCase))
+            return true;
+        // Bare media filenames without spaces (0626_1.m4s already covered; also foo.mp4).
+        if (!value.Contains(' ', StringComparison.Ordinal) &&
+            Path.HasExtension(value) &&
+            value.Length <= 64 &&
+            Regex.IsMatch(value, @"^[\w.-]+\.(mp4|webm|m4a|mp3|aac|mkv)$", RegexOptions.IgnoreCase))
+            return true;
+        return false;
     }
 
     private static bool CanPair(Probed video, Probed audio)
@@ -1515,6 +1574,36 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             return stamped == pageOwner;
 
         return true;
+    }
+
+    private static bool IsLikelyCrossSiteLeak(Uri page, Uri media)
+    {
+        var pageHost = page.Host;
+        var mediaHost = media.Host;
+        var pageBili = pageHost.Contains("bilibili", StringComparison.OrdinalIgnoreCase);
+        var mediaBili = mediaHost.Contains("bilivideo", StringComparison.OrdinalIgnoreCase) ||
+                        mediaHost.Contains("bilibili", StringComparison.OrdinalIgnoreCase) ||
+                        (mediaHost.Contains("akamaized", StringComparison.OrdinalIgnoreCase) &&
+                         media.AbsolutePath.Contains("upos", StringComparison.OrdinalIgnoreCase));
+        if (mediaBili && !pageBili)
+            return true;
+
+        var pageDy = pageHost.Contains("douyin", StringComparison.OrdinalIgnoreCase) ||
+                     pageHost.Contains("iesdouyin", StringComparison.OrdinalIgnoreCase);
+        var mediaDy = mediaHost.Contains("douyin", StringComparison.OrdinalIgnoreCase) ||
+                      mediaHost.Contains("byteicdn", StringComparison.OrdinalIgnoreCase) ||
+                      mediaHost.Contains("zjcdn", StringComparison.OrdinalIgnoreCase) ||
+                      mediaHost.Contains("douyinvod", StringComparison.OrdinalIgnoreCase) ||
+                      mediaHost.Contains("douyincdn", StringComparison.OrdinalIgnoreCase);
+        if (mediaDy && !pageDy && !pageHost.Contains("tiktok", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var pageTt = pageHost.Contains("tiktok", StringComparison.OrdinalIgnoreCase);
+        var mediaTt = mediaHost.Contains("tiktok", StringComparison.OrdinalIgnoreCase);
+        if (mediaTt && !pageTt && !pageDy)
+            return true;
+
+        return false;
     }
 
     private static bool SamePage(Uri a, Uri b) =>
@@ -1650,6 +1739,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
     private DetectedVideo OverlayBrowserObservedVideos(DetectedVideo video)
     {
         var browserVideos = _browserObserved.Values
+            .Where(o => !IsManifestAddress(o.Url, o.Mime))
             .Where(o => o.KindHint is MediaTrackKind.Video or MediaTrackKind.Combined)
             .GroupBy(o => MediaUrlNormalizer.Normalize(o.Url), StringComparer.OrdinalIgnoreCase)
             .Select(g => g.First())

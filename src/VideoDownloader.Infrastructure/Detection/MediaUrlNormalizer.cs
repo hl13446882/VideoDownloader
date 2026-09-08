@@ -32,7 +32,7 @@ public static class MediaUrlNormalizer
              file.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase)))
             return true;
 
-        if (System.Text.RegularExpressions.Regex.IsMatch(file, @"^\d{1,6}\.(m4s|ts)$",
+        if (System.Text.RegularExpressions.Regex.IsMatch(file, @"^\d{1,6}(?:_\d+)?\.(m4s|ts)$",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase))
             return true;
 

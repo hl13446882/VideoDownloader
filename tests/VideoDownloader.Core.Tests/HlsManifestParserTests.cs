@@ -110,7 +110,8 @@ public class HlsManifestParserTests
             RequestContext.CreateEmpty());
 
         var track = Assert.Single(Assert.Single(result.Variants).Tracks);
-        Assert.Equal(MediaTrackKind.Unknown, track.Kind);
+        Assert.Equal(MediaTrackKind.Combined, track.Kind);
+        Assert.True(track.IsValidated);
         Assert.Null(track.Hls);
     }
 

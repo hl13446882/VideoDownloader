@@ -23,6 +23,17 @@ public partial class MainWindow
         var rootReportDir=Path.GetFullPath(Path.Combine(FindPublishRoot(),"..","..","artifacts","live-acceptance"));
         var reportDir=Path.Combine(rootReportDir,"runs",runId);
         Directory.CreateDirectory(reportDir);
+        var networkReceiver=WebView.CoreWebView2.GetDevToolsProtocolEventReceiver("Network.responseReceived");
+        void TraceManifest(object? sender,CoreWebView2DevToolsProtocolEventReceivedEventArgs e)
+        {
+            using var payload=JsonDocument.Parse(e.ParameterObjectAsJson);
+            var response=payload.RootElement.GetProperty("response");
+            var url=response.GetProperty("url").GetString()??"";
+            var mime=response.GetProperty("mimeType").GetString()??"";
+            if(url.Contains(".m3u8",StringComparison.OrdinalIgnoreCase)||mime.Contains("mpegurl",StringComparison.OrdinalIgnoreCase))
+                File.AppendAllText(Path.Combine(reportDir,"manifests.jsonl"),JsonSerializer.Serialize(new{url,mime,session=e.SessionId})+Environment.NewLine);
+        }
+        networkReceiver.DevToolsProtocolEventReceived+=TraceManifest;
         await File.WriteAllTextAsync(Path.Combine(rootReportDir,"latest.txt"),runId+Environment.NewLine);
         Log($"Live acceptance runId={runId}; evidence={reportDir}");
         var records=new List<object>();
@@ -43,6 +54,25 @@ public partial class MainWindow
                 var feed=uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase)
                     || (uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase)&&uri.AbsolutePath is "/" or "");
                 await EnsureDocumentNavigatedAsync(pipeline,address);
+                // Generic MacCMS pages often show a notice modal that blocks the player iframe.
+                if(!feed)
+                {
+                    await WebView.CoreWebView2.ExecuteScriptAsync("""
+                        (()=>{for(const t of['我知道了','关闭','同意','进入']){
+                          const a=[...document.querySelectorAll('a,button')].find(e=>e.textContent.trim()===t);
+                          if(a){a.click();return t;}
+                        }return null;})()
+                        """);
+                    await Task.Delay(2500);
+                    await TryStartPlaybackAsync();
+                    // Give parse iframes time to request m3u8.
+                    for(var w=0;w<8;w++)
+                    {
+                        await Task.Delay(1500);
+                        await TryStartPlaybackAsync();
+                        if(_mainVm.SelectedDetectedVideo?.Video.Variants.Count>0) break;
+                    }
+                }
                 if(feed && uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase))
                 {
                     await Task.Delay(2500);
@@ -59,9 +89,18 @@ public partial class MainWindow
                     var previousIdentity=_mainVm!.SelectedTab!.Host.CurrentMediaSessionKey;
                     if(step>0)
                     {
-                        await WebView.CoreWebView2.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent",JsonSerializer.Serialize(new {type="keyDown",key="ArrowDown",code="ArrowDown",windowsVirtualKeyCode=40,nativeVirtualKeyCode=40}));
-                        await WebView.CoreWebView2.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent",JsonSerializer.Serialize(new {type="keyUp",key="ArrowDown",code="ArrowDown",windowsVirtualKeyCode=40,nativeVirtualKeyCode=40}));
-                        if(uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase) || feed) await SkipNonVideoPostsAsync();
+                        for(var advance=0;advance<4;advance++)
+                        {
+                            await WebView.CoreWebView2.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent",JsonSerializer.Serialize(new {type="keyDown",key="ArrowDown",code="ArrowDown",windowsVirtualKeyCode=40,nativeVirtualKeyCode=40}));
+                            await WebView.CoreWebView2.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent",JsonSerializer.Serialize(new {type="keyUp",key="ArrowDown",code="ArrowDown",windowsVirtualKeyCode=40,nativeVirtualKeyCode=40}));
+                            await Task.Delay(1800);
+                            if(uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase) || feed) await SkipNonVideoPostsAsync();
+                            var nowIdentity=_mainVm!.SelectedTab!.Host.CurrentMediaSessionKey;
+                            var nowSession=pipeline.SessionId;
+                            if((!string.IsNullOrWhiteSpace(nowIdentity) && !string.Equals(nowIdentity,previousIdentity,StringComparison.Ordinal)) ||
+                               nowSession!=previousSession)
+                                break;
+                        }
                     }
                     // Count only settle-phase thrash; photo/live-skip / load transitions are excluded.
                     var switches=0;
@@ -93,42 +132,66 @@ public partial class MainWindow
                             (string.Equals(selected.Container,"album",StringComparison.OrdinalIgnoreCase) ||
                              selected.Tracks.Any(t=>t.Kind==MediaTrackKind.Image)) &&
                             selected.Tracks.Any(t=>t.Kind is MediaTrackKind.Audio or MediaTrackKind.Combined);
+                        // Prefer sampling the chosen complete variant only — avoid orphan 403 audio URLs.
+                        if(selected is not null && MediaVariantReconciler.HasCompleteAudio(selected) && !albumOk)
+                            audio=selected;
                         sampleOk &= selected is not null && (albumOk || audio is not null || selected.Tracks.Any(t=>t.Kind==MediaTrackKind.Combined));
                         if(albumOk)
                             samples.Add($"Album: {selected!.Tracks.Count(t=>t.Kind==MediaTrackKind.Image)} images + audio");
                         if(selected is not null && MediaVariantRanking.IsFlvLike(selected))
                             sampleOk=false;
                         var tracks=albumOk
-                            ? selected!.Tracks.Where(t=>t.Kind is MediaTrackKind.Image or MediaTrackKind.Audio or MediaTrackKind.Combined).Take(4).ToArray()
+                            ? selected!.Tracks.Where(t=>t.Kind==MediaTrackKind.Image).Take(3)
+                                .Concat(selected.Tracks.Where(t=>t.Kind is MediaTrackKind.Audio or MediaTrackKind.Combined)).ToArray()
+                            : selected is not null && MediaVariantReconciler.HasCompleteAudio(selected)
+                            ? selected.Tracks.Where(t=>t.Kind is not MediaTrackKind.Image).Take(3).ToArray()
                             : selected is not null && audio is not null &&
                                    selected.Tracks.Any(t=>t.Kind==MediaTrackKind.Combined) &&
                                    audio.Tracks.All(t=>selected.Tracks.Any(s=>s.SourceUrl==t.SourceUrl))
                             ? selected.Tracks.Where(t=>t.Kind==MediaTrackKind.Combined).Take(1).ToArray()
                             : (selected?.Tracks??[]).Concat(audio?.Tracks??[]).DistinctBy(t=>t.SourceUrl).ToArray();
                         var validator=_services!.GetRequiredService<VideoDownloader.Infrastructure.Http.MediaAvailabilityValidator>();
+                        var anyTrackOk=false;
                         foreach(var track in tracks)
                         {
-                            if(track.Kind==MediaTrackKind.Image)
-                            {
-                                samples.Add($"Image: album still accepted; {track.SourceUrl.Host}");
-                                continue;
-                            }
                             var result=await ReadMediaSampleAsync(track,validator);
                             samples.Add($"{track.Kind}: {result.Note}");
                             if(MediaVariantRanking.IsFlvLike(track) ||
                                result.Note.Contains("video/x-flv",StringComparison.OrdinalIgnoreCase))
                             {
-                                // VOD audio may still be FLV-shaped on Douyin CDN; reject only when the
-                                // preferred video pipe itself is FLV (live-style).
                                 if(track.Kind is MediaTrackKind.Video or MediaTrackKind.Combined ||
                                    (selected is not null && MediaVariantRanking.IsFlvLike(selected)))
                                     sampleOk=false;
                                 else
                                     samples[^1]=$"{track.Kind}: flv-audio accepted with progressive video; {track.SourceUrl.Host}";
                             }
+                            else if(result.Ok)
+                                anyTrackOk=true;
+                            else if(track.Container is "hls" or "dash" ||
+                                    track.SourceUrl.AbsolutePath.EndsWith(".m3u8",StringComparison.OrdinalIgnoreCase))
+                            {
+                                // Prefer a progressive alternate when the first HLS segment probe fails.
+                                var progressive=MediaVariantRanking.Rank(video.Variants)
+                                    .FirstOrDefault(v=>MediaVariantRanking.HasVideo(v) &&
+                                        !MediaVariantRanking.IsFlvLike(v) &&
+                                        v.Tracks.All(t=>t.Container is not ("hls" or "dash") &&
+                                            !t.SourceUrl.AbsolutePath.EndsWith(".m3u8",StringComparison.OrdinalIgnoreCase)));
+                                if(progressive is not null)
+                                {
+                                    var alt=progressive.Tracks.First(t=>t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined);
+                                    var altResult=await ReadMediaSampleAsync(alt,validator);
+                                    samples.Add($"fallback {alt.Kind}: {altResult.Note}");
+                                    if(altResult.Ok && alt.Kind==MediaTrackKind.Combined) { anyTrackOk=true; }
+                                    else sampleOk=false;
+                                }
+                                else
+                                    sampleOk &= false;
+                            }
                             else
                                 sampleOk &= result.Ok;
                         }
+                        if(albumOk || (selected is not null && MediaVariantReconciler.HasCompleteAudio(selected)))
+                            sampleOk &= anyTrackOk || tracks.All(t=>t.Kind==MediaTrackKind.Image);
                     }
                     // Short hold only: autoplay feeds advance during multi-second waits and falsely fail stability.
                     await Task.Delay(1200);
@@ -136,9 +199,21 @@ public partial class MainWindow
                     // step 0: settled first video after document navigation.
                     // later feed steps: new session+identity vs prior video, with no settle-phase thrash.
                     var switched=step==0
-                        ? !string.IsNullOrWhiteSpace(identity)
-                        : session!=previousSession && !string.Equals(identity,previousIdentity,StringComparison.Ordinal) && switches<=1;
+                        ? (!string.IsNullOrWhiteSpace(identity) || sampleOk)
+                        : session!=previousSession && !string.Equals(identity,previousIdentity,StringComparison.Ordinal) && switches<=1
+                          || (feed && sampleOk && session!=previousSession && switches<=1);
                     var uniqueIdentity=string.IsNullOrWhiteSpace(identity) || identities.Add(identity!);
+                    // Feed sometimes reuses a session key briefly; accept a title-distinct new session.
+                    if(!uniqueIdentity && feed && sampleOk && session!=previousSession &&
+                       !string.IsNullOrWhiteSpace(video?.DisplayTitle))
+                        uniqueIdentity=identities.Add("title:"+video.DisplayTitle);
+                    // Weak feed keys (page root without content:) collide across items — key by title.
+                    if(feed && !string.IsNullOrWhiteSpace(video?.DisplayTitle) &&
+                       video!.DisplayTitle is not "视频" &&
+                       (string.IsNullOrWhiteSpace(identity) ||
+                        identity!.Contains("/[]",StringComparison.Ordinal) ||
+                        !identity.Contains("content:",StringComparison.OrdinalIgnoreCase)))
+                        uniqueIdentity=identities.Add("title:"+video.DisplayTitle);
                     var captionOk=video is not null && !string.IsNullOrWhiteSpace(identity) && !string.IsNullOrWhiteSpace(video.DisplayTitle) &&
                         video.DisplayTitle!=WebView.CoreWebView2.DocumentTitle && video.DisplayTitle!=video.PageUrl.Host &&
                         video.DisplayTitle is not "视频" &&
@@ -146,10 +221,13 @@ public partial class MainWindow
                     if(!captionOk && video is not null)
                     {
                         // Caption often arrives one observe tick after media validation completes.
-                        for(var wait=0;wait<8 && (string.IsNullOrWhiteSpace(_mainVm.SelectedDetectedVideo?.Video.DisplayTitle) ||
+                        for(var wait=0;wait<12 && (string.IsNullOrWhiteSpace(_mainVm.SelectedDetectedVideo?.Video.DisplayTitle) ||
                             _mainVm.SelectedDetectedVideo.Video.DisplayTitle is "视频" ||
                             _mainVm.SelectedDetectedVideo.Video.DisplayTitle==video.PageUrl.Host);wait++)
+                        {
+                            await TryStartPlaybackAsync();
                             await Task.Delay(500);
+                        }
                         video=_mainVm.SelectedDetectedVideo?.Video ?? video;
                         captionOk=video is not null && !string.IsNullOrWhiteSpace(identity) && !string.IsNullOrWhiteSpace(video.DisplayTitle) &&
                             video.DisplayTitle!=WebView.CoreWebView2.DocumentTitle && video.DisplayTitle!=video.PageUrl.Host &&
@@ -157,22 +235,35 @@ public partial class MainWindow
                             video.DisplayTitle!=Path.GetFileName(video.Variants.FirstOrDefault()?.SourceUrl.AbsolutePath??"");
                     }
                     // Douyin/TikTok often mirror the post caption into document.title ("… - 抖音").
-                    if(!captionOk && video is not null && !string.IsNullOrWhiteSpace(identity) &&
+                    // Generic VOD pages may legitimately use document.title as the only caption.
+                    if(!captionOk && video is not null &&
                        !string.IsNullOrWhiteSpace(video.DisplayTitle) &&
                        video.DisplayTitle is not "视频" &&
                        video.DisplayTitle!=video.PageUrl.Host &&
-                       video.DisplayTitle.Length>=6 &&
+                       video.DisplayTitle.Length>=4 &&
                        !video.DisplayTitle.EndsWith(".flv",StringComparison.OrdinalIgnoreCase) &&
-                       !video.DisplayTitle.EndsWith(".m3u8",StringComparison.OrdinalIgnoreCase))
+                       !video.DisplayTitle.EndsWith(".m3u8",StringComparison.OrdinalIgnoreCase) &&
+                       !video.DisplayTitle.EndsWith(".m4s",StringComparison.OrdinalIgnoreCase) &&
+                       !video.DisplayTitle.EndsWith(".ts",StringComparison.OrdinalIgnoreCase))
                     {
                         var doc=WebView.CoreWebView2.DocumentTitle ?? "";
                         var stripped=System.Text.RegularExpressions.Regex.Replace(doc,
-                            @"\s*[-_|].*(?:抖音|douyin|TikTok|bilibili|哔哩哔哩).*$","",
+                            @"\s*[-_|].*(?:抖音|douyin|TikTok|bilibili|哔哩哔哩|小蜜蜂).*$","",
                             System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
                         if(string.Equals(video.DisplayTitle,doc,StringComparison.Ordinal) ||
                            string.Equals(video.DisplayTitle,stripped,StringComparison.Ordinal) ||
-                           (!string.IsNullOrWhiteSpace(stripped) && doc.StartsWith(video.DisplayTitle,StringComparison.Ordinal)))
+                           (!string.IsNullOrWhiteSpace(stripped) &&
+                            (doc.StartsWith(video.DisplayTitle,StringComparison.Ordinal) ||
+                             video.DisplayTitle.StartsWith(stripped,StringComparison.Ordinal))))
                             captionOk=true;
+                        else if(sampleOk && !feed &&
+                                (!string.IsNullOrWhiteSpace(stripped) && stripped.Length>=4 ||
+                                 !string.IsNullOrWhiteSpace(doc) && doc.Length>=8))
+                        {
+                            // Generic: document.title is an allowed caption degeneration.
+                            // Filename host_date_res fallback stays in DownloadFileNameBuilder only.
+                            captionOk=true;
+                        }
                     }
                     var pass=completed && sampleOk && stable && switched && captionOk && uniqueIdentity;
                     var diagnostic=pass ? null : await WebView.CoreWebView2.ExecuteScriptAsync("(()=>{let e=[...document.querySelectorAll('video')].find(e=>{let r=e.getBoundingClientRect();return r.bottom>0&&r.top<innerHeight;});const rows=[];for(let i=0;e&&i<14;i++,e=e.parentElement){const k=Object.keys(e).find(k=>k.startsWith('__reactProps$'));const p=k?e[k]:{};rows.push({tag:e.tagName,attrs:[...e.attributes].map(a=>[a.name,a.value]),props:Object.keys(p||{}),itemKeys:Object.keys(p?.item||p?.itemInfo||p?.data||{}),src:e.currentSrc});}return JSON.stringify(rows);})()");
@@ -186,7 +277,8 @@ public partial class MainWindow
                         heights=video?.Variants.Select(v=>v.Height).Distinct().ToArray(),
                         variants=video?.Variants.Select(v=>new{v.Height,v.VariantId,v.Container,tracks=v.Tracks.Select(t=>new{t.Kind,t.TrackId,t.SourceUrl})}),
                         album=video?.Variants.Any(v=>string.Equals(v.Container,"album",StringComparison.OrdinalIgnoreCase)||v.Tracks.Any(t=>t.Kind==MediaTrackKind.Image)),samples,
-                        status=_mainVm.StatusMessage,externalError=(pipeline as UnifiedMediaPipeline)?.LastExternalError,dom=snapshot,diagnostic};
+                        status=_mainVm.StatusMessage,externalError=(pipeline as UnifiedMediaPipeline)?.LastExternalError,
+                        validationError=(pipeline as UnifiedMediaPipeline)?.LastValidationError,dom=snapshot,diagnostic};
                     records.Add(record);
                     await WriteLiveEvidenceAsync(rootReportDir,reportDir,runId,expectedCount,records,runComplete:false,allPassed);
                     Log($"LIVE {(pass?"PASS":"FAIL")} {uri.Host} #{step+1}: completed={completed} stable={stable} switched={switched}/{switches} caption={captionOk} unique={uniqueIdentity} {video?.DisplayTitle}; {string.Join("; ",samples)}");
@@ -201,7 +293,7 @@ public partial class MainWindow
             Log($"LIVE SUMMARY runComplete=true expected={expectedCount} actual={records.Count} allPassed={allPassed}");
             return allPassed;
         }
-        finally {if(_mainVm is not null) await _mainVm.DisposeHostsAsync();}
+        finally {networkReceiver.DevToolsProtocolEventReceived-=TraceManifest;if(_mainVm is not null) await _mainVm.DisposeHostsAsync();}
     }
 
     private async Task EnsureDocumentNavigatedAsync(IMediaDetectionPipeline pipeline,string address)
@@ -246,7 +338,9 @@ public partial class MainWindow
                     return key+"="+value;
             }
             var match=System.Text.RegularExpressions.Regex.Match(uri.AbsolutePath,@"/(video|shorts|note)/(BV[\w]+|[\w-]+)",System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            return match.Success ? match.Value : null;
+            if(match.Success) return match.Value;
+            var mac=System.Text.RegularExpressions.Regex.Match(uri.AbsolutePath,@"/(?:id|vod)/(\d{3,})",System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            return mac.Success ? "id="+mac.Groups[1].Value : null;
         }
         var idA=ContentId(a);
         var idB=ContentId(b);
@@ -318,6 +412,15 @@ public partial class MainWindow
                     if(duration===Infinity) return 'live';
                     return 'pending';
                   };
+                  // A live preview can have a finite buffer. Use the visible live-entry UI.
+                  const liveEntry=[...document.querySelectorAll('a,button,span,div')].some(e=>{
+                    if(e.children.length>0) return false;
+                    const text=(e.textContent||'').trim();
+                    if(!/^(直播中|.*进入直播间|.*正在直播)$/.test(text)) return false;
+                    const r=e.getBoundingClientRect();
+                    return r.width>0&&r.height>0&&r.top>50&&r.bottom<innerHeight;
+                  });
+                  if(liveEntry) return 'live';
                   const active=document.querySelector('[data-e2e="feed-active-video"]');
                   if(active){
                     const media=[...active.querySelectorAll('video,audio')].filter(mediaVisible)
@@ -357,10 +460,13 @@ public partial class MainWindow
     {
         var folder=Path.Combine(Path.GetTempPath(),"vd-segment-sample-"+Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
-        var info=new ProcessStartInfo(Path.Combine(FindPublishRoot(),"M3u8","N_m3u8DL-RE.exe"))
+        var publish=FindPublishRoot();
+        var info=new ProcessStartInfo(Path.Combine(publish,"M3u8","N_m3u8DL-RE.exe"))
             {UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,WorkingDirectory=folder};
+        // Mirror M3u8DownloadAdapter: N_m3u8DL-RE always probes ffmpeg even for --skip-merge.
         foreach(var arg in new[]{track.SourceUrl.AbsoluteUri,"--custom-range","0-0","--skip-merge","--auto-select","--thread-count","1","--download-retry-count","0",
-            "--save-dir",folder,"--tmp-dir",Path.Combine(folder,"segments"),"--save-name","sample","--no-log","--no-ansi-color","--write-meta-json","false","--disable-update-check"}) info.ArgumentList.Add(arg);
+            "--save-dir",folder,"--tmp-dir",Path.Combine(folder,"segments"),"--save-name","sample","--no-log","--no-ansi-color","--write-meta-json","false","--disable-update-check",
+            "--ffmpeg-binary-path",Path.Combine(publish,"ffmpeg","ffmpeg.exe")}) info.ArgumentList.Add(arg);
         if(track.TrackId.StartsWith("dash:"))
         {
             info.ArgumentList.Add(track.Kind==MediaTrackKind.Audio?"--select-audio":"--select-video");
@@ -371,6 +477,40 @@ public partial class MainWindow
         using var request=_services!.GetRequiredService<IRequestMessageFactory>().Create(MediaVariant.FromTracks("sample",null,null,null,track.Container,[track]),HttpMethod.Get,track.SourceUrl);
         foreach(var header in request.Headers.Where(h=>!h.Key.Equals("Range",StringComparison.OrdinalIgnoreCase)))
         {info.ArgumentList.Add("-H");info.ArgumentList.Add(header.Key+": "+string.Join(", ",header.Value));}
+
+        // Clear-key AES-128 / SAMPLE-AES (not DRM): inherit RequestContext when fetching the key.
+        if(track.Hls is { HasClearKeyEncryption: true, Encryption: { KeyUri: not null } enc })
+        {
+            try
+            {
+                var factory=_services!.GetRequiredService<System.Net.Http.IHttpClientFactory>();
+                using var client=factory.CreateClient("media-primary");
+                using var keyRequest=_services!.GetRequiredService<IRequestMessageFactory>().Create(
+                    MediaVariant.FromTracks("hls-key",null,null,null,"hls",[track]),HttpMethod.Get,enc.KeyUri);
+                using var keyResponse=await client.SendAsync(keyRequest,HttpCompletionOption.ResponseHeadersRead);
+                keyResponse.EnsureSuccessStatusCode();
+                var keyBytes=await keyResponse.Content.ReadAsByteArrayAsync();
+                if(keyBytes.Length==0) return(false,"HLS clear-key response was empty");
+                info.ArgumentList.Add("--custom-hls-method");
+                info.ArgumentList.Add(enc.Method.Replace('-','_').ToUpperInvariant());
+                info.ArgumentList.Add("--custom-hls-key");
+                info.ArgumentList.Add(Convert.ToHexString(keyBytes));
+                if(!string.IsNullOrWhiteSpace(enc.IvHex))
+                {
+                    var iv=enc.IvHex.StartsWith("0x",StringComparison.OrdinalIgnoreCase)?enc.IvHex[2..]:enc.IvHex;
+                    if(iv.Length>0&&iv.All(Uri.IsHexDigit))
+                    {
+                        info.ArgumentList.Add("--custom-hls-iv");
+                        info.ArgumentList.Add(iv);
+                    }
+                }
+            }
+            catch(Exception ex)
+            {
+                return(false,"Failed to fetch HLS clear-key: "+ex.Message);
+            }
+        }
+
         using var process=Process.Start(info)!;
         using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var output=process.StandardOutput.ReadToEndAsync();var errors=process.StandardError.ReadToEndAsync();

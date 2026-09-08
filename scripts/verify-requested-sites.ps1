@@ -13,11 +13,13 @@ $urls=@(
     'https://www.bilibili.com/video/BV1xMtw6XEAu',
     'https://www.bilibili.com/video/BV1CXWuz3E7V/',
     'https://www.bilibili.com/video/BV1x8g56LEsz/',
-    'https://www.xmfyy.com/index.php/vod/play/id/290850/sid/1/nid/1.html'
+    'https://www.xmfyy.com/index.php/vod/play/id/290850/sid/1/nid/1.html',
+    'https://ally.trytcrae.cc/archives/274269/'
 )
 if($Sites){$urls=@($urls|Where-Object{$hostName=([Uri]$_).Host; @($Sites|Where-Object{$hostName.Contains($_)}).Count -gt 0})}
 $arguments='--live '+(($urls|ForEach-Object{'"'+$_+'"'}) -join ' ')
 $exe=Join-Path $root 'tools\VideoDownloader.Verify\bin\Release\net10.0-windows\VideoDownloader.Verify.exe'
+$startedAt=Get-Date
 $process=Start-Process -FilePath $exe -ArgumentList $arguments -WindowStyle Hidden -PassThru
 if(-not $process.WaitForExit(2400000)){
     Stop-Process -Id $process.Id -Force
@@ -30,6 +32,10 @@ if(-not (Test-Path $latest) -or -not (Test-Path $results)){
     exit 1
 }
 $payload=Get-Content -Raw $results | ConvertFrom-Json
+if((Get-Item -LiteralPath $results).LastWriteTime -lt $startedAt -or
+   (Get-Content -Raw $latest).Trim() -ne $payload.runId){
+    throw 'Live acceptance evidence does not belong to this invocation.'
+}
 if(-not $payload.runComplete){
     Write-Error "Live acceptance results are incomplete for runId=$($payload.runId)"
     exit 1

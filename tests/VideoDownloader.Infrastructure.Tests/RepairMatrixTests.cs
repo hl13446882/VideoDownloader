@@ -16,6 +16,24 @@ namespace VideoDownloader.Infrastructure.Tests;
 
 public class RepairMatrixTests
 {
+    [Theory]
+    [InlineData("FFD8FFE000104A4649460000", true)]
+    [InlineData("89504E470D0A1A0A00000000", true)]
+    [InlineData("524946462000000057454250", true)]
+    [InlineData("3C68746D6C3E64656E696564", false)]
+    [InlineData("524946462000000057415645", false)]
+    public async Task AlbumSample_RequiresImageBytes(string hex, bool valid)
+    {
+        var clients = Substitute.For<IHttpClientFactory>();
+        var handler = new Handler(_ => new(HttpStatusCode.OK) { Content = new ByteArrayContent(Convert.FromHexString(hex)) });
+        clients.CreateClient("media-primary").Returns(_ => new HttpClient(handler, false));
+        var validator = new MediaAvailabilityValidator(clients, new RequestMessageFactory(), NullLogger<MediaAvailabilityValidator>.Instance);
+        var image = new MediaTrack("image", MediaTrackKind.Image, new("https://cdn.test/image"), null, "image", null, null, RequestContext.CreateEmpty());
+        var variant = MediaVariant.FromTracks("album", null, null, null, "album", [image]);
+        if (valid) await validator.ValidateAsync(variant, default);
+        else await Assert.ThrowsAsync<DownloadException>(() => validator.ValidateAsync(variant, default));
+    }
+
     private static MediaVariant Variant(string url = "https://cdn.test/a.mp4") =>
         MediaVariant.FromCombinedTrack("720", new(url), RequestContext.CreateEmpty(), height: 720) with { ContentIdentity = "id:100" };
 

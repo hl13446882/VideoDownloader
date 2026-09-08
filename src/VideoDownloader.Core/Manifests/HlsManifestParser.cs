@@ -41,8 +41,13 @@ public static class HlsManifestParser
         bool isDrm)
     {
         // Encryption metadata is only materialized for clear-key AES and never for license DRM.
+        // Plain media playlists (no EXT-X-KEY) are still Combined — AES-128 is encryption, not a
+        // separate media type; both download via N_m3u8DL-RE once the playlist is reachable.
         var hls = TryParseClearKeyMedia(content, manifestUrl, context, isDrm);
-        var kind = hls is not null ? MediaTrackKind.Combined : MediaTrackKind.Unknown;
+        var hasSegments = content.Contains(ExtInf, StringComparison.OrdinalIgnoreCase);
+        var kind = !isDrm && (hls is not null || hasSegments)
+            ? MediaTrackKind.Combined
+            : MediaTrackKind.Unknown;
         var track = new MediaTrack(
             "hls-media",
             kind,
@@ -54,7 +59,7 @@ public static class HlsManifestParser
             context)
         {
             Hls = hls,
-            IsValidated = hls is not null
+            IsValidated = kind == MediaTrackKind.Combined
         };
         return MediaVariant.FromTracks("media", null, null, null, "hls", [track]);
     }

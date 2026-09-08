@@ -35,9 +35,18 @@ public static class MediaVariantRanking
     public static IReadOnlyList<MediaVariant> Rank(IEnumerable<MediaVariant> variants) =>
         variants
             .OrderBy(v => IsFlvLike(v) ? 1 : 0)
-            .ThenByDescending(v => string.Equals(v.Container, "album", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
+            .ThenByDescending(v =>
+                string.Equals(v.Container, "album", StringComparison.OrdinalIgnoreCase) &&
+                v.Tracks.Count(t => t.Kind == MediaTrackKind.Image) >= 2
+                    ? 1 : 0)
             .ThenByDescending(v => HasVideo(v) ? 1 : 0)
             .ThenByDescending(v => MediaVariantReconciler.HasCompleteAudio(v) ? 1 : 0)
+            // Prefer real playlists over bare fMP4/TS segments observed via MSE.
+            .ThenByDescending(v =>
+                string.Equals(v.Container, "hls", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(v.Container, "dash", StringComparison.OrdinalIgnoreCase)
+                    ? 1 : 0)
+            .ThenBy(v => v.Tracks.Any(t => MediaUrlNormalizer.IsLikelySegment(t.SourceUrl)) ? 1 : 0)
             .ThenByDescending(v => v.TotalContentLength ?? 0)
             .ThenByDescending(v => v.Bandwidth ?? 0)
             .ThenByDescending(v => v.Height ?? 0)

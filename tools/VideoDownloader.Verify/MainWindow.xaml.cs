@@ -84,6 +84,8 @@ public partial class MainWindow : Window
         _services = VideoDownloader.UI.AppServiceComposition.Build(
             configure: options =>
             {
+                options.Logging.LogPath = Path.Combine(publishRoot, "..", "..", "artifacts",
+                    "verify-diagnostics-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".log");
                 options.ExternalResolvers.Enabled = !Environment.GetCommandLineArgs().Contains("--local");
                 options.ExternalResolvers.YtDlpPath = Path.Combine(publishRoot, "tools", "yt-dlp.exe");
                 options.Download.DefaultSavePath = Path.Combine(Path.GetTempPath(), "VideoDownloaderVerifyDownloads");

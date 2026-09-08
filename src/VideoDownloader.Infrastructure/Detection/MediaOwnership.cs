@@ -17,8 +17,10 @@ internal static class MediaOwnership
             if (pair.Length == 2 && pair[0] is "v" or "id" or "video_id" or "videoId" or "modal_id" or "aweme_id" or "bvid" or "item_id" or "itemId")
                 return "id:" + Uri.UnescapeDataString(pair[1]);
         }
-        var path = Regex.Match(page.AbsolutePath, @"/(?:video|shorts|note)/([^/]+)");
+        var path = Regex.Match(page.AbsolutePath, @"/(?:video|shorts|note|archives)/([^/]+)");
         if (path.Success) return "id:" + Uri.UnescapeDataString(path.Groups[1].Value);
+        var macId = Regex.Match(page.AbsolutePath, @"/(?:id|vod)/(\d{3,})", RegexOptions.IgnoreCase);
+        if (macId.Success) return "id:" + macId.Groups[1].Value;
         return string.IsNullOrWhiteSpace(observation) ? null : "observation:" + observation;
     }
 }

@@ -176,16 +176,18 @@ public class MediaTrackReconciliationTests
         await completed.WaitAsync(TimeSpan.FromSeconds(2));
     }
 
-    [Fact]
-    public async Task LateCdpResponse_TransfersReservationToQueue_AndDisposeDrainsIt()
+    [Theory]
+    [InlineData(null)]
+    [InlineData("child-player")]
+    public async Task LateCdpResponse_TransfersReservationToQueue_AndDisposeDrainsIt(string? cdpSession)
     {
         var pipeline = Create();
         var host = new WebView2Host(Options.Create(new AppOptions()), Substitute.For<INetworkEventNormalizer>(), pipeline, NullLogger<WebView2Host>.Instance);
         try
         {
-            host.ProcessCdpRequest("""{"requestId":"1","type":"Media","request":{"url":"https://cdn.test/audio.m4a","method":"GET","headers":{}}}""");
+            host.ProcessCdpRequest("""{"requestId":"1","type":"Media","request":{"url":"https://cdn.test/audio.m4a","method":"GET","headers":{}}}""", cdpSession);
             var completed = pipeline.CompleteDiscoveryAsync(default);
-            host.ProcessCdpResponse("""{"requestId":"1","response":{"status":206,"mimeType":"audio/mp4","headers":{"content-length":"2048"}}}""");
+            host.ProcessCdpResponse("""{"requestId":"1","response":{"status":206,"mimeType":"audio/mp4","headers":{"content-length":"2048"}}}""", cdpSession);
             Assert.False(completed.IsCompleted);
             await host.DisposeAsync();
             await completed.WaitAsync(TimeSpan.FromSeconds(2));
@@ -244,6 +246,22 @@ public class MediaTrackReconciliationTests
         Assert.Equal(1, calls);
         Assert.Equal(0, published);
         Assert.NotNull(pipeline.LastValidationError);
+    }
+
+    [Fact]
+    public async Task BrowserManifestResponse_DoesNotInventCombinedMp4WithoutStreamInspection()
+    {
+        var pipeline = Create();
+        var calls = 0;
+        var published = 0;
+        pipeline.InspectOverride = (_, _, _, _) => { calls++; return Task.FromResult<UnifiedMediaPipeline.Probed?>(null); };
+        pipeline.VideoDetected += (_, _) => published++;
+        await pipeline.ProcessAsync(new(new("https://cdn.test/master.m3u8"), "GET", 200, "application/vnd.apple.mpegurl", 32000,
+            "XHR", null, Page, null, new Dictionary<string,string>(), new Dictionary<string,string>(), Context,
+            DateTimeOffset.UtcNow, NetworkEventSource.Cdp) { SessionId = pipeline.SessionId }, default);
+        await pipeline.CompleteDiscoveryAsync(default);
+        Assert.Equal(1, calls);
+        Assert.Equal(0, published);
     }
 
     [Fact]

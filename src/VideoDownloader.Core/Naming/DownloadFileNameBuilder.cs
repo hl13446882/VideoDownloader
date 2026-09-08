@@ -6,8 +6,9 @@ using VideoDownloader.Core.Models;
 namespace VideoDownloader.Core.Naming;
 
 /// <summary>
-/// Short download stem: detected copy + quality, hard-capped at 30 text characters.
-/// Extension is applied by the download engine from the real container.
+/// Short download stem from detected caption + quality, hard-capped at 30 text characters.
+/// Only entry for 文案→文件名. Extension is applied by the download engine from the real container.
+/// When caption/content-id are unusable: <c>{host}_{yyyyMMdd}_{height}p</c> (host only, no path).
 /// </summary>
 public static partial class DownloadFileNameBuilder
 {
@@ -18,14 +19,66 @@ public static partial class DownloadFileNameBuilder
     public static string Build(DetectedVideo video, MediaVariant variant)
     {
         var title = CleanTitle(video.DisplayTitle);
-        if (string.IsNullOrWhiteSpace(title))
+        if (!IsUsableStemTitle(title))
             title = CleanTitle(video.SiteContentId);
-        if (string.IsNullOrWhiteSpace(title))
-            title = "video";
+        if (!IsUsableStemTitle(title))
+        {
+            // Sole fallback for weak 文案 when building a download stem — do not invent DisplayTitle elsewhere.
+            return BuildHostDateResolutionFallback(video.PageUrl, variant.Height);
+        }
 
         var quality = variant.Height is > 0 ? $"{variant.Height}p" : null;
         var stem = string.IsNullOrWhiteSpace(quality) ? title : title + "_" + quality;
         return ClampStem(stem);
+    }
+
+    /// <summary>
+    /// Filename-only fallback used by <see cref="Build"/>:
+    /// <c>{host}_{yyyyMMdd}</c> or <c>{host}_{yyyyMMdd}_{height}p</c> (no path). Host elided to keep date/quality.
+    /// </summary>
+    public static string BuildHostDateResolutionFallback(
+        Uri pageUrl,
+        int? height = null,
+        DateTimeOffset? now = null)
+    {
+        var host = pageUrl.Host;
+        if (host.StartsWith("www.", StringComparison.OrdinalIgnoreCase) && host.Length > 4)
+            host = host[4..];
+        host = Sanitize(string.IsNullOrWhiteSpace(host) ? "video" : host);
+
+        var day = (now ?? DateTimeOffset.Now).ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+        var suffix = height is > 0
+            ? "_" + day + "_" + height.Value.ToString(CultureInfo.InvariantCulture) + "p"
+            : "_" + day;
+        var budget = MaxStemLength - TextLength(suffix);
+        var head = ElideText(host, Math.Max(1, budget));
+        if (string.IsNullOrWhiteSpace(head))
+            head = "v";
+        return head + suffix;
+    }
+
+    /// <summary>
+    /// Whether cleaned caption/content-id text is usable as a download stem source.
+    /// </summary>
+    public static bool IsUsableStemTitle(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+        if (value is "video" or "视频")
+            return false;
+        if (value.EndsWith(".m4s", StringComparison.OrdinalIgnoreCase) ||
+            value.EndsWith(".ts", StringComparison.OrdinalIgnoreCase) ||
+            value.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) ||
+            value.EndsWith(".mpd", StringComparison.OrdinalIgnoreCase) ||
+            value.EndsWith(".flv", StringComparison.OrdinalIgnoreCase))
+            return false;
+        // Bare media filenames without spaces (e.g. public.mp4).
+        if (!value.Contains(' ', StringComparison.Ordinal) &&
+            Path.HasExtension(value) &&
+            value.Length <= 64 &&
+            Regex.IsMatch(value, @"^[\w.-]+\.(mp4|webm|m4a|mp3|aac|mkv)$", RegexOptions.IgnoreCase))
+            return false;
+        return true;
     }
 
     /// <summary>

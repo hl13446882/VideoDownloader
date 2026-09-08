@@ -34,6 +34,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
     private readonly ConcurrentDictionary<string, (RawNetworkEvent Event, IDiscoveryScope Scope)> _responseBodies = new();
     private Task? _consumerTask;
     private CancellationTokenSource? _consumerCts;
+    private CoreWebView2DevToolsProtocolEventReceiver? _cdpAttachedReceiver;
     private bool _cdpEnabled;
     private Uri? _lastDocumentUrl;
     private string? _lastPageNotificationKey;
@@ -639,6 +640,9 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         if (_core is null || _cdpEnabled)
             return;
 
+        _cdpAttachedReceiver = _core.GetDevToolsProtocolEventReceiver("Target.attachedToTarget");
+        _cdpAttachedReceiver.DevToolsProtocolEventReceived += OnCdpAttachedToTarget;
+
         // Flatten OOPIF / player iframe targets so cross-origin HLS (MacCMS etc.) is visible.
         try
         {
@@ -662,6 +666,25 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         _cdpFailedReceiver.DevToolsProtocolEventReceived += OnCdpLoadingFailed;
         _cdpEnabled = true;
     }
+
+    private async void OnCdpAttachedToTarget(object? sender, CoreWebView2DevToolsProtocolEventReceivedEventArgs e)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(e.ParameterObjectAsJson);
+            var session = doc.RootElement.GetProperty("sessionId").GetString()!;
+            if (_core is null) return;
+            await _core.CallDevToolsProtocolMethodForSessionAsync(session, "Network.enable", "{}");
+            await _core.CallDevToolsProtocolMethodForSessionAsync(session, "Target.setAutoAttach",
+                """{"autoAttach":true,"waitForDebuggerOnStart":false,"flatten":true}""");
+            _logger.LogInformation("Child target network enabled type={Type}",
+                doc.RootElement.GetProperty("targetInfo").GetProperty("type").GetString());
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "Child target network setup failed"); }
+    }
+
+    private static string CdpRequestKey(string? session, string id) =>
+        string.IsNullOrEmpty(session) ? id : session + ":" + id;
 
     private async Task NotifyCurrentDocumentIdentityAsync()
     {
@@ -754,15 +777,15 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
     }
 
     private void OnCdpRequestWillBeSent(object? sender, CoreWebView2DevToolsProtocolEventReceivedEventArgs e)
-        => ProcessCdpRequest(e.ParameterObjectAsJson);
+        => ProcessCdpRequest(e.ParameterObjectAsJson, e.SessionId);
 
-    internal void ProcessCdpRequest(string json)
+    internal void ProcessCdpRequest(string json, string? cdpSession = null)
     {
         try
         {
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
-            var requestId = root.GetProperty("requestId").GetString() ?? Guid.NewGuid().ToString();
+            var requestId = CdpRequestKey(cdpSession, root.GetProperty("requestId").GetString() ?? Guid.NewGuid().ToString());
             var request = root.GetProperty("request");
             var url = request.GetProperty("url").GetString();
             if (string.IsNullOrEmpty(url) || url.StartsWith("blob:", StringComparison.OrdinalIgnoreCase))
@@ -816,15 +839,15 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
     }
 
     private void OnCdpResponseReceived(object? sender, CoreWebView2DevToolsProtocolEventReceivedEventArgs e)
-        => ProcessCdpResponse(e.ParameterObjectAsJson);
+        => ProcessCdpResponse(e.ParameterObjectAsJson, e.SessionId);
 
-    internal void ProcessCdpResponse(string json)
+    internal void ProcessCdpResponse(string json, string? cdpSession = null)
     {
         try
         {
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
-            var requestId = root.GetProperty("requestId").GetString() ?? string.Empty;
+            var requestId = CdpRequestKey(cdpSession, root.GetProperty("requestId").GetString() ?? string.Empty);
             if (!_pendingRequests.TryRemove(requestId, out var pending))
                 return;
             using var requestScope = pending.Scope;
@@ -875,7 +898,8 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
     private void OnCdpLoadingFailed(object? sender, CoreWebView2DevToolsProtocolEventReceivedEventArgs e)
     {
         using var doc = JsonDocument.Parse(e.ParameterObjectAsJson);
-        var id = doc.RootElement.GetProperty("requestId").GetString()!;
+        var nativeId = doc.RootElement.GetProperty("requestId").GetString()!;
+        var id = CdpRequestKey(e.SessionId, nativeId);
         if (_responseBodies.TryRemove(id, out var pending)) pending.Scope.Dispose();
         if (_pendingRequests.TryRemove(id, out var request)) request.Scope?.Dispose();
     }
@@ -885,14 +909,15 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         try
         {
             using var doc = JsonDocument.Parse(e.ParameterObjectAsJson);
-            var id = doc.RootElement.GetProperty("requestId").GetString()!;
+            var nativeId = doc.RootElement.GetProperty("requestId").GetString()!;
+            var id = CdpRequestKey(e.SessionId, nativeId);
             if (!_responseBodies.TryRemove(id, out var pending)) return;
             using var scope = pending.Scope;
             if (_core is null || !_captureEnabled || pending.Event.SessionId != _pipeline.SessionId ||
                 doc.RootElement.GetProperty("encodedDataLength").GetDouble() > 2097152) return;
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            var response = await _core.CallDevToolsProtocolMethodAsync("Network.getResponseBody",
-                JsonSerializer.Serialize(new { requestId = id })).WaitAsync(timeout.Token);
+            var response = await _core.CallDevToolsProtocolMethodForSessionAsync(e.SessionId, "Network.getResponseBody",
+                JsonSerializer.Serialize(new { requestId = nativeId })).WaitAsync(timeout.Token);
             using var payload = JsonDocument.Parse(response);
             var body = payload.RootElement.GetProperty("body").GetString() ?? "";
             if (body.Length > 2796204) return;
@@ -1085,6 +1110,8 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             _core.WebMessageReceived -= OnWebMessageReceived;
         }
 
+        if (_cdpAttachedReceiver is not null)
+            _cdpAttachedReceiver.DevToolsProtocolEventReceived -= OnCdpAttachedToTarget;
         if (_cdpRequestReceiver is not null)
             _cdpRequestReceiver.DevToolsProtocolEventReceived -= OnCdpRequestWillBeSent;
 
