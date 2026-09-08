@@ -34,6 +34,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
     private ConcurrentDictionary<string, byte> _pending = new();
     private ConcurrentDictionary<string, Probed> _media = new();
     private ConcurrentDictionary<string, DetectedVideo> _externalVideos = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Normalized URL → browser-observed progressive media (CDP Media/200/206).</summary>
+    private ConcurrentDictionary<string, BrowserObservedMedia> _browserObserved = new(StringComparer.OrdinalIgnoreCase);
     private DetectedVideo? _lastBuilt;
     private CancellationTokenSource _generation = new();
     private CancellationTokenSource _validationBudget = new();
@@ -163,6 +165,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         _owners = new(StringComparer.Ordinal);
         _validationErrors = new(StringComparer.Ordinal);
         _externalVideos = new(StringComparer.OrdinalIgnoreCase);
+        _browserObserved = new(StringComparer.OrdinalIgnoreCase);
         while (_probeDecisions.TryTake(out _)) { }
         _page = null;
         _title = null;
@@ -204,16 +207,70 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             !e.Url.AbsoluteUri.Contains("mime=audio", StringComparison.OrdinalIgnoreCase))
             return Task.CompletedTask;
 
+        var browserPlay = IsBrowserPlayEvidence(e);
+
         // Segments thrash the 3 ffprobe slots and almost never yield a displayable item.
-        if (MediaUrlNormalizer.IsLikelySegment(e.Url))
+        // Browser Media/200/206 play evidence overrides segment morphology (TikTok Range playAddr).
+        if (MediaUrlNormalizer.IsLikelySegment(e.Url) && !browserPlay)
             return Task.CompletedTask;
 
-        if (!IsCandidate(e.Url, e.MimeType, e.ResourceType, e.ContentLength))
+        if (!IsCandidate(e.Url, e.MimeType, e.ResourceType, e.ContentLength) && !browserPlay)
             return Task.CompletedTask;
 
-        Queue(e.Url, page, e.RequestContext, e.ContentLength, ct, e.MimeType);
+        if (browserPlay)
+        {
+            var key = MediaUrlNormalizer.Normalize(e.Url);
+            _browserObserved[key] = new BrowserObservedMedia(
+                e.Url,
+                e.MimeType,
+                InferKindFromMime(e.MimeType),
+                e.RequestContext);
+            RecordDecision(new("network", KindLabel(InferKindFromMime(e.MimeType)), MediaOwnership.ForPage(page, _observedIdentity),
+                "accepted", "browser_observed", e.Url.Host,
+                $"status={e.StatusCode};type={e.ResourceType};mime={e.MimeType}"));
+            _logger.LogInformation(
+                "Browser-observed media session={Session} host={Host} status={Status} type={Type} mime={Mime}",
+                e.SessionId, e.Url.Host, e.StatusCode, e.ResourceType, e.MimeType);
+        }
+
+        Queue(e.Url, page, e.RequestContext, e.ContentLength, ct, e.MimeType, browserObserved: browserPlay);
         return Task.CompletedTask;
     }
+
+    /// <summary>
+    /// CDP already successfully delivered this resource to the playing document.
+    /// Stronger accessibility proof than a later out-of-band sample GET.
+    /// </summary>
+    internal static bool IsBrowserPlayEvidence(NormalizedNetworkEvent e)
+    {
+        if (e.StatusCode is not (200 or 206))
+            return false;
+
+        if (e.ResourceType is not null &&
+            e.ResourceType.Equals("Media", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return IsStrongMediaMime(e.MimeType);
+    }
+
+    private static MediaTrackKind InferKindFromMime(string? mime)
+    {
+        if (mime is null) return MediaTrackKind.Combined;
+        if (mime.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) &&
+            !mime.StartsWith("video/", StringComparison.OrdinalIgnoreCase))
+            return MediaTrackKind.Audio;
+        if (mime.StartsWith("video/", StringComparison.OrdinalIgnoreCase) &&
+            !mime.Contains("audio", StringComparison.OrdinalIgnoreCase))
+            return MediaTrackKind.Video;
+        return MediaTrackKind.Combined;
+    }
+
+    private static string KindLabel(MediaTrackKind kind) => kind switch
+    {
+        MediaTrackKind.Audio => "audio",
+        MediaTrackKind.Video => "video",
+        _ => "av"
+    };
 
     public Task ProbePageAsync(Uri pageUrl, string? pageTitle, string? pageScriptJson,
         RequestContext context, CancellationToken ct, bool runExternal = false)
@@ -385,7 +442,9 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         if (resourceType is not null &&
             resourceType.Equals("Media", StringComparison.OrdinalIgnoreCase))
         {
-            return contentLength is null or 0 or >= MediaResourceSizeFilter.MinDisplayBytes;
+            // CDP ResourceType=Media is authoritative. Range responses often report a tiny
+            // Content-Length for the first window — do not treat that as "not a video".
+            return true;
         }
 
         var path = url.AbsolutePath;
@@ -472,15 +531,15 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                path.Contains("/sprite") || path.Contains("/emoji") || path.Contains("/static/image");
     }
 
-    private void Queue(Uri url, Uri page, RequestContext context, long? knownLength, CancellationToken ct, string? mime = null, bool primary = false)
+    private void Queue(Uri url, Uri page, RequestContext context, long? knownLength, CancellationToken ct, string? mime = null, bool primary = false, bool browserObserved = false)
     {
         if (url.Scheme is not ("http" or "https"))
             return;
 
-        // Weak small responses may be junk; strong MIME still goes through stream validation.
+        // Weak small responses may be junk; strong MIME / browser play still go through.
         // (ABR/range chunks report tiny Content-Length while the media itself is large).
         var ranged = IsRangedOrVolatileMediaUrl(url);
-        if (!ranged && !IsStrongMediaMime(mime) &&
+        if (!browserObserved && !ranged && !IsStrongMediaMime(mime) &&
             knownLength is > 0 and < MediaResourceSizeFilter.MinStrongMimeBytes &&
             !url.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) &&
             !url.AbsolutePath.EndsWith(".mpd", StringComparison.OrdinalIgnoreCase))
@@ -511,6 +570,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         var results = _media;
         var errors = _validationErrors;
         var slots = primary ? _primarySlots : _slots;
+        var observed = browserObserved || _browserObserved.ContainsKey(mediaKey);
         _ = ProbeAsync();
 
         async Task ProbeAsync()
@@ -521,9 +581,21 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 await slots.WaitAsync(validation.Token);
                 try
                 {
-                    var found = await (InspectOverride is { } inspect
-                        ? inspect(probeUrl, page, context, validation.Token)
-                        : InspectAsync(probeUrl, page, context, validation.Token, mime));
+                    Probed? found;
+                    if (observed && _browserObserved.TryGetValue(mediaKey, out var evidence))
+                    {
+                        // Browser already fetched this URL successfully — do not ffprobe/re-GET.
+                        found = FromBrowserObservation(page, evidence);
+                        RecordDecision(new("network", KindLabel(evidence.KindHint), MediaOwnership.ForPage(page, _observedIdentity),
+                            "accepted", "browser_observed_promoted", evidence.Url.Host));
+                    }
+                    else
+                    {
+                        found = await (InspectOverride is { } inspect
+                            ? inspect(probeUrl, page, context, validation.Token)
+                            : InspectAsync(probeUrl, page, context, validation.Token, mime));
+                    }
+
                     if (found is not null && !validation.IsCancellationRequested)
                     {
                         results[mediaKey] = found;
@@ -553,6 +625,25 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             }
             finally { work.Dispose(); }
         }
+    }
+
+    private static Probed FromBrowserObservation(Uri page, BrowserObservedMedia evidence)
+    {
+        var container = evidence.Mime?.Contains("webm", StringComparison.OrdinalIgnoreCase) == true ? "webm" : "mp4";
+        var track = new MediaTrack(
+            "browser-media",
+            evidence.KindHint,
+            evidence.Url,
+            null,
+            container,
+            null,
+            null,
+            evidence.Context)
+        {
+            IsValidated = true,
+            BrowserObserved = true
+        };
+        return new Probed(page, track, 0, null);
     }
 
     private static bool IsRangedOrVolatileMediaUrl(Uri url)
@@ -747,12 +838,15 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                             continue;
                         }
 
+                        // Prefer browser-play facts over an independent sample GET (TikTok CDN).
+                        var stamped = StampBrowserObserved(video);
+
                         bool StillCurrent() =>
                             !generation.IsCancellationRequested && sessionId == SessionId &&
                             _page is not null && SamePage(pageUrl, _page);
 
                         var (validated, videoFailure) = await ProbeSampleGate.ValidateAndRecoverAsync(
-                            video,
+                            stamped,
                             pageUrl,
                             owner ?? (video.SiteContentId is null ? null : "id:" + video.SiteContentId),
                             context,
@@ -1312,6 +1406,45 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         if (resolved.Variants.Count == 0) return null;
         return new(page,resolved.Variants[0].Tracks[0],0,resolved.Variants.Max(v=>v.Height),resolved);
     }
+
+    private DetectedVideo StampBrowserObserved(DetectedVideo video)
+    {
+        if (_browserObserved.IsEmpty)
+            return video;
+
+        var variants = video.Variants.Select(v =>
+        {
+            var tracks = v.Tracks.Select(t =>
+            {
+                if (!IsBrowserObservedUrl(t.SourceUrl))
+                    return t;
+                return t with { IsValidated = true, BrowserObserved = true };
+            }).ToArray();
+            return v with { Tracks = tracks };
+        }).ToArray();
+        return video with { Variants = variants };
+    }
+
+    private bool IsBrowserObservedUrl(Uri url)
+    {
+        var key = MediaUrlNormalizer.Normalize(url);
+        if (_browserObserved.ContainsKey(key))
+            return true;
+        // TikTok CDN often rotates query signatures between CDP and yt-dlp; path session match is enough.
+        foreach (var observed in _browserObserved.Values)
+        {
+            if (MediaUrlNormalizer.IsSameMedia(observed.Url, url) ||
+                MediaUrlNormalizer.IsSameSession(observed.Url, url))
+                return true;
+        }
+        return false;
+    }
+
+    internal sealed record BrowserObservedMedia(
+        Uri Url,
+        string? Mime,
+        MediaTrackKind KindHint,
+        RequestContext Context);
 
     internal sealed record Probed(Uri Page, MediaTrack Track, double Duration, int? Height, ManifestResolutionResult? Manifest = null);
 }

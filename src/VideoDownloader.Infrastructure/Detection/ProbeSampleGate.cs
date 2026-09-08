@@ -33,6 +33,10 @@ internal static class ProbeSampleGate
 
         async Task<(bool Ok, string? Code)> SampleAsync(MediaVariant variant)
         {
+            // Browser CDP already proved accessibility; an out-of-band GET often 403s on TikTok.
+            if (variant.Tracks.Any(t => t.BrowserObserved))
+                return (true, null);
+
             if (variant.Tracks.Any(t => t.Container is "hls" or "dash"))
                 return (true, null);
 

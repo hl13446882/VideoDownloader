@@ -22,6 +22,12 @@ public sealed record MediaTrack(
     public bool IsValidated { get; init; }
 
     /// <summary>
+    /// True when WebView2 CDP observed a successful Media/200/206 fetch for this URL.
+    /// Stronger than a later independent sample GET (TikTok CDN often 403s the latter).
+    /// </summary>
+    public bool BrowserObserved { get; init; }
+
+    /// <summary>
     /// Present only for clear-key encrypted HLS media playlists. Null for all other media.
     /// </summary>
     public HlsMedia? Hls { get; init; }
