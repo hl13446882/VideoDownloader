@@ -6,9 +6,9 @@ using VideoDownloader.Core.Models;
 namespace VideoDownloader.Core.Naming;
 
 /// <summary>
-/// Short download stem from detected caption + quality, hard-capped at 30 text characters.
-/// Only entry for 文案→文件名. Extension is applied by the download engine from the real container.
-/// When caption/content-id are unusable: <c>{host}_{yyyyMMdd}_{height}p</c> (host only, no path).
+/// Queue/download stem: caption (文案) first; generic may use page title; optional <c>_{height}p</c> only.
+/// Hard-capped at 30 text characters. No size/container/channel/id noise.
+/// Last-resort fallback: <c>{host}_{yyyyMMdd}_{height}p</c>.
 /// </summary>
 public static partial class DownloadFileNameBuilder
 {
@@ -18,49 +18,29 @@ public static partial class DownloadFileNameBuilder
 
     public static string Build(DetectedVideo video, MediaVariant variant)
     {
-        var title = CleanTitle(video.DisplayTitle);
-        if (!IsUsableStemTitle(title))
-            title = CleanTitle(video.SiteContentId);
+        // 1) Prefer 文案 / page title carried on DisplayTitle (meta stripped).
+        // 2) Never use SiteContentId / author / size / container as the stem.
+        // 3) Bare transport names (public.mp4) are not captions — fall back to host+date.
+        var title = LooksLikeBareMediaFileName(video.DisplayTitle)
+            ? string.Empty
+            : CleanTitle(video.DisplayTitle);
         if (!IsUsableStemTitle(title))
         {
-            // Sole fallback for weak 文案 when building a download stem — do not invent DisplayTitle elsewhere.
             title = BuildHostDateResolutionFallback(video.PageUrl, null);
         }
 
-        var quality = variant.Height is > 0 ? $"{variant.Height}p" : null;
-        var size = variant.TotalContentLength is > 0 ? FormatSizeToken(variant.TotalContentLength.Value) : null;
-        var format = string.IsNullOrWhiteSpace(variant.Container) ||
-                     variant.Container.Equals("album", StringComparison.OrdinalIgnoreCase)
-            ? null
-            : variant.Container;
-
-        var suffixParts = new[] { quality, size, format }.Where(s => !string.IsNullOrWhiteSpace(s)).ToArray();
-        if (suffixParts.Length == 0)
+        var quality = variant.Height is > 0
+            ? variant.Height.Value.ToString(CultureInfo.InvariantCulture) + "p"
+            : null;
+        if (quality is null)
             return ClampStem(title);
 
-        var suffix = "_" + string.Join("_", suffixParts);
-        // Prefer keeping size/format; elide title to fit MaxStemLength.
+        var suffix = "_" + quality;
         var budget = MaxStemLength - TextLength(suffix);
         var head = ElideText(title, Math.Max(1, budget));
         if (string.IsNullOrWhiteSpace(head))
             head = "v";
         return ClampStem(head + suffix);
-    }
-
-    private static string FormatSizeToken(long bytes)
-    {
-        string[] units = ["B", "KB", "MB", "GB"];
-        double size = bytes;
-        var i = 0;
-        while (size >= 1024 && i < units.Length - 1)
-        {
-            size /= 1024;
-            i++;
-        }
-
-        return i == 0
-            ? $"{bytes}B"
-            : string.Create(CultureInfo.InvariantCulture, $"{size:0.#}{units[i]}");
     }
 
     /// <summary>
@@ -89,13 +69,15 @@ public static partial class DownloadFileNameBuilder
     }
 
     /// <summary>
-    /// Whether cleaned caption/content-id text is usable as a download stem source.
+    /// Whether cleaned caption/page-title text is usable as a download stem source.
     /// </summary>
     public static bool IsUsableStemTitle(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
             return false;
-        if (value is "video" or "视频")
+        if (value is "video" or "视频" or "相册")
+            return false;
+        if (Regex.IsMatch(value, @"^视频\d+$", RegexOptions.CultureInvariant))
             return false;
         if (value.EndsWith(".m4s", StringComparison.OrdinalIgnoreCase) ||
             value.EndsWith(".ts", StringComparison.OrdinalIgnoreCase) ||
@@ -103,13 +85,19 @@ public static partial class DownloadFileNameBuilder
             value.EndsWith(".mpd", StringComparison.OrdinalIgnoreCase) ||
             value.EndsWith(".flv", StringComparison.OrdinalIgnoreCase))
             return false;
-        // Bare media filenames without spaces (e.g. public.mp4).
-        if (!value.Contains(' ', StringComparison.Ordinal) &&
-            Path.HasExtension(value) &&
-            value.Length <= 64 &&
-            Regex.IsMatch(value, @"^[\w.-]+\.(mp4|webm|m4a|mp3|aac|mkv)$", RegexOptions.IgnoreCase))
+        if (LooksLikeBareMediaFileName(value))
             return false;
         return true;
+    }
+
+    /// <summary>True when the title is just a CDN/transport file name (e.g. <c>public.mp4</c>).</summary>
+    public static bool LooksLikeBareMediaFileName(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+        var first = value.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries)[0];
+        return first.Length <= 64 &&
+               Regex.IsMatch(first, @"^[\w.-]+\.(mp4|webm|m4a|mp3|aac|mkv)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
 
     /// <summary>
@@ -213,8 +201,10 @@ public static partial class DownloadFileNameBuilder
         cleaned = WhitespaceRegex().Replace(cleaned, " ").Trim();
         // Remove spaces to preserve more title text within the filename budget.
         cleaned = cleaned.Replace(" ", "", StringComparison.Ordinal);
-        // Strip detection meta glued onto DisplayTitle (e.g. "标题1080p12.1MBmp4").
+        // Strip detection meta glued onto DisplayTitle (resolution/size/container).
         cleaned = TrailingDetectionMetaRegex().Replace(cleaned, string.Empty);
+        // Drop "· 2" multi-card suffixes that are not part of the caption.
+        cleaned = MultiCardSuffixRegex().Replace(cleaned, string.Empty);
         return cleaned;
     }
 
@@ -271,7 +261,10 @@ public static partial class DownloadFileNameBuilder
     [GeneratedRegex(@"_+")]
     private static partial Regex DuplicateSeparatorRegex();
 
-    // height + size + container as appended by MediaDescriptorMapper.AppendDetectedMeta after spaces are removed.
+    [GeneratedRegex(@"·\d+$")]
+    private static partial Regex MultiCardSuffixRegex();
+
+    // height + size + container as appended by MediaDescriptorMapper after spaces are removed.
     [GeneratedRegex(
         @"(?:\d{3,4}p)?(?:\d+(?:\.\d+)?(?:B|KB|MB|GB))?(?:mp4|webm|mkv|m4a|mka|hls|dash)?$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]

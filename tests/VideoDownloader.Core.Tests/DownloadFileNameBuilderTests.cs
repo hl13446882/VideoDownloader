@@ -9,20 +9,22 @@ public class DownloadFileNameBuilderTests
     [InlineData("mp4")]
     [InlineData("mkv")]
     [InlineData("mka")]
-    public void Build_PreservesKnownSizeAndContainer_ForLongAndFallbackTitles(string container)
+    public void Build_UsesCaptionAndResolution_Only_NoSizeOrContainer(string container)
     {
-        foreach (var title in new[] { "", new string('长', 80) })
+        foreach (var title in new[] { "短标题", new string('长', 80) })
         {
             var video = CreateVideo(SiteIds.Generic, null, title, new Uri("https://example.com/watch"), null);
             var variant = video.Variants[0] with { Container = container };
             var name = DownloadFileNameBuilder.Build(video, variant);
-            Assert.EndsWith("_1080p_100B_" + container, name);
+            Assert.EndsWith("_1080p", name);
+            Assert.DoesNotContain("100B", name, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(container, name, StringComparison.OrdinalIgnoreCase);
             Assert.True(new System.Globalization.StringInfo(name).LengthInTextElements <= DownloadFileNameBuilder.MaxStemLength);
         }
     }
 
     [Fact]
-    public void Build_UsesDetectedCopyAndQuality_Within30Chars()
+    public void Build_UsesDetectedCopyAndResolution_Within30Chars()
     {
         var video = CreateVideo(
             SiteIds.YouTube,
@@ -34,8 +36,10 @@ public class DownloadFileNameBuilderTests
         var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
 
         Assert.DoesNotContain("CreatorName", name);
+        Assert.DoesNotContain("abc123", name);
         Assert.Contains("UsefulClip", name);
-        Assert.EndsWith("_1080p_100B_mp4", name);
+        Assert.EndsWith("_1080p", name);
+        Assert.DoesNotContain("mp4", name, StringComparison.OrdinalIgnoreCase);
         Assert.True(name.Length <= DownloadFileNameBuilder.MaxStemLength);
     }
 
@@ -52,9 +56,10 @@ public class DownloadFileNameBuilderTests
         var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
 
         Assert.DoesNotContain("#", name);
+        Assert.DoesNotContain("发布者", name);
         Assert.True(new System.Globalization.StringInfo(name).LengthInTextElements
                     <= DownloadFileNameBuilder.MaxStemLength);
-        Assert.Contains("1080p", name);
+        Assert.EndsWith("_1080p", name);
     }
 
     [Fact]
@@ -69,11 +74,11 @@ public class DownloadFileNameBuilderTests
 
         var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
 
-        Assert.DoesNotContain("9.8MB9.8MB", name, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("mp4_mp4", name, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("9.8MB", name, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("mp4", name, StringComparison.OrdinalIgnoreCase);
         Assert.True(new System.Globalization.StringInfo(name).LengthInTextElements
                     <= DownloadFileNameBuilder.MaxStemLength);
-        Assert.Contains("1080p", name);
+        Assert.EndsWith("_1080p", name);
     }
 
     [Fact]
@@ -92,13 +97,13 @@ public class DownloadFileNameBuilderTests
         Assert.DoesNotContain('*', name);
         Assert.DoesNotContain('/', name);
         Assert.Contains("\uFF0A", name);
-        Assert.EndsWith("_1080p_100B_mp4", name);
+        Assert.EndsWith("_1080p", name);
         Assert.True(new System.Globalization.StringInfo(name).LengthInTextElements
                     <= DownloadFileNameBuilder.MaxStemLength);
     }
 
     [Fact]
-    public void Build_Generic_FallsBackToHostDateResolution()
+    public void Build_Generic_FallsBackToHostDate_WhenTitleIsTransportName()
     {
         var video = CreateVideo(
             SiteIds.Generic,
@@ -110,11 +115,29 @@ public class DownloadFileNameBuilderTests
         var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
         var day = DateTimeOffset.Now.ToString("yyyyMMdd");
 
-        Assert.EndsWith("_1080p_100B_mp4", name);
+        Assert.Contains(day, name);
+        Assert.EndsWith("_1080p", name);
         Assert.DoesNotContain("archives", name);
         Assert.DoesNotContain("public.mp4", name);
+        Assert.DoesNotContain("mp4", name, StringComparison.OrdinalIgnoreCase);
         Assert.True(new System.Globalization.StringInfo(name).LengthInTextElements
                     <= DownloadFileNameBuilder.MaxStemLength);
+    }
+
+    [Fact]
+    public void Build_Generic_UsesPageTitle_WhenPresent()
+    {
+        var video = CreateVideo(
+            SiteIds.Generic,
+            null,
+            "凤凰娇探 - 在线观看",
+            new Uri("https://www.xmfyy.com/index.php/vod/play/id/1.html"),
+            null);
+
+        var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
+        Assert.Contains("凤凰娇探", name);
+        Assert.EndsWith("_1080p", name);
+        Assert.DoesNotContain("xmfyy", name, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

@@ -236,20 +236,33 @@ public partial class MainWindow
                             }
                             else
                             {
-                                // Transient CDN timeout: try another progressive track before failing.
-                                var alt=MediaVariantRanking.Rank(video.Variants)
-                                    .SelectMany(v=>v.Tracks)
-                                    .Where(t=>t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
-                                    .Where(t=>t.SourceUrl!=track.SourceUrl)
-                                    .Where(t=>!UnifiedMediaPipeline.IsDouyinPlayGateway(t.SourceUrl))
-                                    .FirstOrDefault();
-                                if(alt is not null &&
-                                   result.Note.Contains("NET_TIMEOUT",StringComparison.OrdinalIgnoreCase))
+                                // Bad progressive sample (expired playAddr / effectcdn HTML): try other VOD URLs.
+                                var needAlt=!result.Ok &&
+                                    (result.Note.Contains("NET_TIMEOUT",StringComparison.OrdinalIgnoreCase) ||
+                                     result.Note.Contains("INVALID_FORMAT",StringComparison.OrdinalIgnoreCase) ||
+                                     result.Note.Contains("container header",StringComparison.OrdinalIgnoreCase) ||
+                                     result.Note.Contains("document",StringComparison.OrdinalIgnoreCase) ||
+                                     result.Note.Contains("HTTP 403",StringComparison.OrdinalIgnoreCase) ||
+                                     result.Note.Contains("HTTP_403",StringComparison.OrdinalIgnoreCase));
+                                if(needAlt)
                                 {
-                                    var altResult=await ReadMediaSampleAsync(alt,validator);
-                                    samples.Add($"retry {alt.Kind}: {altResult.Note}");
-                                    if(altResult.Ok) anyTrackOk=true;
-                                    else sampleOk &= false;
+                                    var alts=MediaVariantRanking.Rank(video.Variants)
+                                        .SelectMany(v=>v.Tracks.Select(t=>(v,t)))
+                                        .Where(x=>x.t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
+                                        .Where(x=>x.t.SourceUrl!=track.SourceUrl)
+                                        .Where(x=>!UnifiedMediaPipeline.IsDouyinPlayGateway(x.t.SourceUrl))
+                                        .Select(x=>x.t)
+                                        .DistinctBy(t=>t.SourceUrl.AbsoluteUri)
+                                        .Take(4)
+                                        .ToArray();
+                                    var altOk=false;
+                                    foreach(var alt in alts)
+                                    {
+                                        var altResult=await ReadMediaSampleAsync(alt,validator);
+                                        samples.Add($"retry {alt.Kind}/{alt.SourceUrl.Host}: {altResult.Note}");
+                                        if(altResult.Ok){ anyTrackOk=true; altOk=true; selected=MediaVariantRanking.Rank(video.Variants).FirstOrDefault(v=>v.Tracks.Any(t=>t.SourceUrl==alt.SourceUrl))??selected; break; }
+                                    }
+                                    if(!altOk) sampleOk &= false;
                                 }
                                 else
                                     sampleOk &= result.Ok;
@@ -259,6 +272,7 @@ public partial class MainWindow
                             sampleOk &= anyTrackOk || tracks.All(t=>t.Kind==MediaTrackKind.Image);
 
                         // Product gate: ≥20 MiB downloaded, or the shorter object finishes completely.
+                        // Download runs after settle; Mix/radio autoplay must not flip non-feed stable.
                         if(sampleOk && selected is not null)
                         {
                             var proof=await ProveVariantDownloadAsync(video,selected,reportDir,ordinal);
@@ -268,7 +282,11 @@ public partial class MainWindow
                     }
                     // Short hold only: autoplay feeds advance during multi-second waits and falsely fail stability.
                     await Task.Delay(1200);
-                    var stable=pipeline.SessionId==session && switches<=1;
+                    // Non-feed: only settle-phase MediaSession thrash counts. Session drift during a
+                    // multi-minute download proof (YouTube Mix) is ignored once media was locked.
+                    var stable=feed
+                        ? pipeline.SessionId==session && switches<=1
+                        : switches<=1;
                     // step 0: settled first video after document navigation.
                     // later feed steps: new session+identity vs prior video, with no settle-phase thrash.
                     var switched=step==0
@@ -349,24 +367,25 @@ public partial class MainWindow
                     var metadataOk=preferred is not null && video is not null;
                     if(metadataOk)
                     {
+                        // Filename/title policy: caption (or page title) + optional resolution only — no size/container.
                         var stem=VideoDownloader.Core.Naming.DownloadFileNameBuilder.Build(video!,preferred!);
-                        if(preferred!.TotalContentLength is >0)
+                        metadataOk &= !string.IsNullOrWhiteSpace(stem);
+                        if(preferred!.Height is >0)
                         {
-                            double size=preferred.TotalContentLength.Value;
-                            string[] units=["B","KB","MB","GB"];
-                            var unit=0;
-                            while(size>=1024 && unit<units.Length-1){size/=1024;unit++;}
-                            var token=size.ToString("0.#",System.Globalization.CultureInfo.InvariantCulture)+units[unit];
-                            metadataOk &= video!.DisplayTitle.Contains(token,StringComparison.OrdinalIgnoreCase) && stem.Contains(token,StringComparison.OrdinalIgnoreCase);
+                            var token=preferred.Height.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)+"p";
+                            metadataOk &= stem.Contains(token,StringComparison.OrdinalIgnoreCase);
                         }
-                        if(!string.IsNullOrWhiteSpace(preferred.Container) && preferred.Container!="album")
-                            metadataOk &= video!.DisplayTitle.Contains(preferred.Container,StringComparison.OrdinalIgnoreCase) && stem.Contains(preferred.Container,StringComparison.OrdinalIgnoreCase);
+                        metadataOk &= !stem.Contains("MB",StringComparison.OrdinalIgnoreCase)
+                                      && !stem.EndsWith("_mp4",StringComparison.OrdinalIgnoreCase)
+                                      && !stem.EndsWith("_webm",StringComparison.OrdinalIgnoreCase);
                     }
                     var formatCount=video?.Variants.Where(v=>v.Tracks.Any(t=>t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined))
                         .Select(v=>(v.Height,v.Container,v.VideoCodec)).Distinct().Count()??0;
                     var requiresLadder=video?.SiteId is SiteIds.YouTube or SiteIds.Bilibili;
                     var formatsOk=requiresLadder ? formatCount>1 : formatCount>0 || preferred?.Tracks.Any(t=>t.Kind==MediaTrackKind.Image)==true;
                     var pass=completed && sampleOk && stable && switched && captionOk && uniqueIdentity && cardCountOk && noDuplicateAudio && metadataOk && formatsOk;
+                    if(!pass)
+                        Log($"LIVE gate {uri.Host} #{step+1}: completed={completed} sampleOk={sampleOk} stable={stable} switched={switched} caption={captionOk} unique={uniqueIdentity} cards={cardCount}/{cardCountOk} noDupAudio={noDuplicateAudio} metadata={metadataOk} formats={formatCount}/{formatsOk}");
                     var diagnostic=pass ? null : await WebView.CoreWebView2.ExecuteScriptAsync("(()=>{let e=[...document.querySelectorAll('video')].find(e=>{let r=e.getBoundingClientRect();return r.bottom>0&&r.top<innerHeight;});const rows=[];for(let i=0;e&&i<14;i++,e=e.parentElement){const k=Object.keys(e).find(k=>k.startsWith('__reactProps$'));const p=k?e[k]:{};rows.push({tag:e.tagName,attrs:[...e.attributes].map(a=>[a.name,a.value]),props:Object.keys(p||{}),itemKeys:Object.keys(p?.item||p?.itemInfo||p?.data||{}),src:e.currentSrc});}return JSON.stringify(rows);})()");
                     allPassed &= pass;
                     _mainVm.SelectedTab.Host.MediaSessionChanged-=Switched;

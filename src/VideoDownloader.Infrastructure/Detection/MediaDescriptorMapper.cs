@@ -56,49 +56,19 @@ public static class MediaDescriptorMapper
         };
     }
 
-    /// <summary>Append known size/format tokens onto caption for UI + filename stem.</summary>
+    /// <summary>UI caption may show resolution only — size/format belong to variant details, not the title.</summary>
     public static string AppendDetectedMeta(string title, MediaVariant? variant)
     {
         if (variant is null || string.IsNullOrWhiteSpace(title))
             return title;
 
-        var bits = new List<string>();
-        if (variant.Height is > 0)
-            bits.Add(variant.Height.Value.ToString(CultureInfo.InvariantCulture) + "p");
-
-        var size = variant.TotalContentLength;
-        if (size is > 0)
-            bits.Add(FormatBytes(size.Value));
-
-        if (!string.IsNullOrWhiteSpace(variant.Container) &&
-            !variant.Container.Equals("album", StringComparison.OrdinalIgnoreCase) &&
-            !title.Contains(variant.Container, StringComparison.OrdinalIgnoreCase))
-            bits.Add(variant.Container!);
-
-        if (bits.Count == 0)
+        if (variant.Height is not > 0)
             return title;
 
-        // Avoid double-appending when caption already carries the tokens.
-        var suffix = string.Join(" ", bits);
-        if (title.Contains(suffix, StringComparison.OrdinalIgnoreCase))
+        var bit = variant.Height.Value.ToString(CultureInfo.InvariantCulture) + "p";
+        if (title.Contains(bit, StringComparison.OrdinalIgnoreCase))
             return title;
-        return title.TrimEnd() + " " + suffix;
-    }
-
-    private static string FormatBytes(long bytes)
-    {
-        string[] units = ["B", "KB", "MB", "GB"];
-        double size = bytes;
-        var i = 0;
-        while (size >= 1024 && i < units.Length - 1)
-        {
-            size /= 1024;
-            i++;
-        }
-
-        return i == 0
-            ? $"{bytes}B"
-            : string.Create(CultureInfo.InvariantCulture, $"{size:0.#}{units[i]}");
+        return title.TrimEnd() + " " + bit;
     }
 
     private static IReadOnlyList<MediaVariant> BuildVariants(MediaDescriptor descriptor)
