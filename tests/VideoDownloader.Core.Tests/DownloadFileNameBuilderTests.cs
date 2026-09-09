@@ -5,6 +5,22 @@ namespace VideoDownloader.Core.Tests;
 
 public class DownloadFileNameBuilderTests
 {
+    [Theory]
+    [InlineData("mp4")]
+    [InlineData("mkv")]
+    [InlineData("mka")]
+    public void Build_PreservesKnownSizeAndContainer_ForLongAndFallbackTitles(string container)
+    {
+        foreach (var title in new[] { "", new string('长', 80) })
+        {
+            var video = CreateVideo(SiteIds.Generic, null, title, new Uri("https://example.com/watch"), null);
+            var variant = video.Variants[0] with { Container = container };
+            var name = DownloadFileNameBuilder.Build(video, variant);
+            Assert.EndsWith("_1080p_100B_" + container, name);
+            Assert.True(new System.Globalization.StringInfo(name).LengthInTextElements <= DownloadFileNameBuilder.MaxStemLength);
+        }
+    }
+
     [Fact]
     public void Build_UsesDetectedCopyAndQuality_Within30Chars()
     {
@@ -19,7 +35,7 @@ public class DownloadFileNameBuilderTests
 
         Assert.DoesNotContain("CreatorName", name);
         Assert.Contains("UsefulClip", name);
-        Assert.EndsWith("_1080p", name);
+        Assert.EndsWith("_1080p_100B_mp4", name);
         Assert.True(name.Length <= DownloadFileNameBuilder.MaxStemLength);
     }
 
@@ -42,6 +58,25 @@ public class DownloadFileNameBuilderTests
     }
 
     [Fact]
+    public void Build_StripsGluedDetectionMeta_BeforeClamp()
+    {
+        var video = CreateVideo(
+            SiteIds.Douyin,
+            "aweme1",
+            "蓝天白云下听蒙语鸿雁太治愈了 9.8MB mp4",
+            new Uri("https://www.douyin.com/video/1"),
+            null);
+
+        var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
+
+        Assert.DoesNotContain("9.8MB9.8MB", name, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("mp4_mp4", name, StringComparison.OrdinalIgnoreCase);
+        Assert.True(new System.Globalization.StringInfo(name).LengthInTextElements
+                    <= DownloadFileNameBuilder.MaxStemLength);
+        Assert.Contains("1080p", name);
+    }
+
+    [Fact]
     public void Build_CleansIllegalCharacters_AndElidesMiddle()
     {
         var video = CreateVideo(
@@ -57,7 +92,7 @@ public class DownloadFileNameBuilderTests
         Assert.DoesNotContain('*', name);
         Assert.DoesNotContain('/', name);
         Assert.Contains("\uFF0A", name);
-        Assert.EndsWith("_1080p", name);
+        Assert.EndsWith("_1080p_100B_mp4", name);
         Assert.True(new System.Globalization.StringInfo(name).LengthInTextElements
                     <= DownloadFileNameBuilder.MaxStemLength);
     }
@@ -75,7 +110,7 @@ public class DownloadFileNameBuilderTests
         var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
         var day = DateTimeOffset.Now.ToString("yyyyMMdd");
 
-        Assert.EndsWith($"_{day}_1080p", name);
+        Assert.EndsWith("_1080p_100B_mp4", name);
         Assert.DoesNotContain("archives", name);
         Assert.DoesNotContain("public.mp4", name);
         Assert.True(new System.Globalization.StringInfo(name).LengthInTextElements

@@ -353,6 +353,29 @@ public class ExclusiveSiteDetectionTests
     }
 
     [Fact]
+    public async Task Douyin_Rejects_Silent_MediaVideo_When_No_Progressive()
+    {
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var page = new Uri("https://www.douyin.com/video/7682715203741568283");
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "v",
+            """{"identity":"content:7682715203741568283","album":false,"media":[]}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://v3.douyinvod.com/video/tos/cn/x/media-video-hvc1/?mime_type=video_mp4") with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 50_000_000
+        }, CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+
+        Assert.Null(last);
+        Assert.True(detector.Failed);
+        Assert.Equal("douyin_no_media", detector.FailureReason);
+    }
+
+    [Fact]
     public async Task Douyin_MediaVideo_Pairs_With_MediaAudio()
     {
         var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);

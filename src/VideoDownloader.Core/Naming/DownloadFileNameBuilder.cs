@@ -213,6 +213,8 @@ public static partial class DownloadFileNameBuilder
         cleaned = WhitespaceRegex().Replace(cleaned, " ").Trim();
         // Remove spaces to preserve more title text within the filename budget.
         cleaned = cleaned.Replace(" ", "", StringComparison.Ordinal);
+        // Strip detection meta glued onto DisplayTitle (e.g. "标题1080p12.1MBmp4").
+        cleaned = TrailingDetectionMetaRegex().Replace(cleaned, string.Empty);
         return cleaned;
     }
 
@@ -268,4 +270,10 @@ public static partial class DownloadFileNameBuilder
 
     [GeneratedRegex(@"_+")]
     private static partial Regex DuplicateSeparatorRegex();
+
+    // height + size + container as appended by MediaDescriptorMapper.AppendDetectedMeta after spaces are removed.
+    [GeneratedRegex(
+        @"(?:\d{3,4}p)?(?:\d+(?:\.\d+)?(?:B|KB|MB|GB))?(?:mp4|webm|mkv|m4a|mka|hls|dash)?$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex TrailingDetectionMetaRegex();
 }

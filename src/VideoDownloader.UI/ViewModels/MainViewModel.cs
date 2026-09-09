@@ -214,7 +214,7 @@ public sealed partial class DownloadJobViewModel : ObservableObject
     }
 
     public string DisplayName => Job.DisplayName;
-    public string DisplayNameEllipsized => EllipsizeMiddle(Job.DisplayName, 28);
+    public string DisplayNameEllipsized => EllipsizeMiddle(Job.DisplayName, 30);
     public string ExtensionLabel => Path.GetExtension(Job.TargetPath);
 
     [ObservableProperty]
@@ -279,13 +279,21 @@ public sealed partial class DownloadJobViewModel : ObservableObject
 
     public static string EllipsizeMiddle(string value, int maxChars)
     {
-        if (string.IsNullOrEmpty(value) || value.Length <= maxChars)
+        if (string.IsNullOrEmpty(value) || maxChars <= 0)
+            return value ?? string.Empty;
+
+        var info = new System.Globalization.StringInfo(value);
+        if (info.LengthInTextElements <= maxChars)
             return value;
 
-        var keep = Math.Max(4, (maxChars - 1) / 2);
-        var start = value[..keep];
-        var end = value[^keep..];
-        return start + "*" + end;
+        if (maxChars == 1)
+            return "*";
+
+        var prefixLength = (maxChars - 1) / 2;
+        var suffixLength = maxChars - 1 - prefixLength;
+        var prefix = info.SubstringByTextElements(0, prefixLength);
+        var suffix = info.SubstringByTextElements(info.LengthInTextElements - suffixLength, suffixLength);
+        return prefix + "*" + suffix;
     }
 
     private static string FormatBytes(long bytes)

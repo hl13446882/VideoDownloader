@@ -305,14 +305,17 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         if (ranked.Count == 0)
             return null;
 
+        // Prefer muxed progressive — media-video fMP4 often fails remux / is incomplete alone.
+        var combined = ranked.FirstOrDefault(t =>
+            t.Kind == MediaTrackKind.Combined &&
+            !DouyinPlayEvidence.IsPlayGateway(t.SourceUrl) &&
+            !t.SourceUrl.AbsolutePath.Contains("/media-video-", StringComparison.OrdinalIgnoreCase));
+        if (combined is not null)
+            return combined;
+
         var best = ranked[0];
-        // Silent media-video without a paired audio → fall back to muxed progressive.
         if (best.Kind == MediaTrackKind.Video && !hasAudio)
-        {
-            var combined = ranked.FirstOrDefault(t => t.Kind == MediaTrackKind.Combined);
-            if (combined is not null)
-                return combined;
-        }
+            return null;
 
         return best;
     }
@@ -324,11 +327,13 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 
         var score = 0;
         if (DouyinPlayEvidence.IsPlayGateway(t.SourceUrl)) score -= 2000;
+        if (t.SourceUrl.AbsolutePath.Contains("/media-video-", StringComparison.OrdinalIgnoreCase))
+            score -= hasAudioPair ? 200 : 900;
         if (DouyinPlayEvidence.IsStrongVodHost(t.SourceUrl)) score += 1000;
         if (t.BrowserObserved) score += 500;
-        if (t.Kind == MediaTrackKind.Combined) score += 400;
+        if (t.Kind == MediaTrackKind.Combined) score += 800;
         if (t.Kind == MediaTrackKind.Video)
-            score += hasAudioPair ? 200 : -300;
+            score += hasAudioPair ? 150 : -400;
         if (t.ContentLength is >= 1L * 1024 * 1024) score += 50;
         if (t.ContentLength is > 0 and < MediaResourceSizeFilter.MinDisplayBytes) score -= 500;
         score += (int)Math.Min(t.ContentLength ?? 0, int.MaxValue) / (1024 * 1024);
