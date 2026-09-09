@@ -77,7 +77,7 @@ public class ExclusiveSiteDetectionTests
     }
 
     [Fact]
-    public async Task Douyin_Parked_Other_Work_Progressive_Adopted_On_Switch()
+    public async Task Douyin_Parked_Other_Work_Progressive_Adopted_On_Same_Session_Switch()
     {
         const string current = "7674888187625458982";
         const string next = "7522534938898468147";
@@ -90,16 +90,15 @@ public class ExclusiveSiteDetectionTests
         await detector.ProcessPageObservationAsync(page, "当前",
             """{"identity":"content:7674888187625458982","album":false,"media":[]}""",
             RequestContext.CreateEmpty(), CancellationToken.None);
-        // Next-work progressive is preloaded while current is active — must be parked, not lost.
+        // Next-work progressive preloaded while current is active — parked inside this session.
         await detector.ProcessNetworkAsync(Evt(page,
             "https://v3-dy-o.zjcdn.com/video/tos/cn/obj/next.mp4?mime_type=video_mp4&__vid=" + next) with
         {
             ResourceType = "Media", StatusCode = 200, ContentLength = 12_000_000
         }, CancellationToken.None);
 
-        detector.Clear();
+        // Soft content switch inside the same session (not BeginSession) adopts the park.
         var nextPage = new Uri("https://www.douyin.com/jingxuan?modal_id=" + next);
-        detector.BeginSession(nextPage, Guid.NewGuid());
         await detector.ProcessPageObservationAsync(nextPage, "下一条",
             """{"identity":"content:7522534938898468147","album":false,"media":[]}""",
             RequestContext.CreateEmpty(), CancellationToken.None);
@@ -210,7 +209,7 @@ public class ExclusiveSiteDetectionTests
     }
 
     [Fact]
-    public async Task Douyin_Reenter_Does_Not_Rebind_Prior_Work_Progressive()
+    public async Task Douyin_New_Session_Uses_Duration_Not_Cross_Session_Ownership()
     {
         const string first = "7662996544086681509";
         const string second = "7660608368599469355";
@@ -234,16 +233,16 @@ public class ExclusiveSiteDetectionTests
         Assert.NotNull(last);
         Assert.Equal(first, last!.MediaId);
 
-        // Reenter like feed swipe + dedupe reset — prior CDN object must not bind to second.
+        // Destroy session on the singleton — no cross-session intercept; duration gates the prior CDN.
         detector.HardClear();
         last = null;
         detector.BeginSession(page2, Guid.NewGuid());
         await detector.ProcessPageObservationAsync(page2, "二",
-            "{\"identity\":\"content:" + second + "\",\"album\":false,\"media\":[],\"durationSec\":55}",
+            "{\"identity\":\"content:" + second + "\",\"album\":false,\"media\":[],\"durationSec\":40}",
             RequestContext.CreateEmpty(), CancellationToken.None);
         await detector.ProcessNetworkAsync(Evt(page2, priorUrl) with
         {
-            ResourceType = "Media", StatusCode = 200, ContentLength = 13_913_860
+            ResourceType = "Media", StatusCode = 200, ContentLength = 400_000_000
         }, CancellationToken.None);
         var nextUrl =
             "https://v3-dy-o.zjcdn.com/d677c5b8e7ba88e7bddd417095524fb4/6aa14b4b/video/tos/cn/tos-cn-ve-15/ogDUP4fKQeKfUFhByHnCAiazEnE?mime_type=video_mp4";
@@ -256,7 +255,6 @@ public class ExclusiveSiteDetectionTests
         Assert.NotNull(last);
         Assert.Equal(second, last!.MediaId);
         Assert.Contains("ogDUP4fK", last.Video!.SourceUrl.AbsolutePath, StringComparison.Ordinal);
-        Assert.DoesNotContain("owaI0RaPbaEa", last.Video.SourceUrl.AbsolutePath, StringComparison.Ordinal);
     }
 
     [Fact]

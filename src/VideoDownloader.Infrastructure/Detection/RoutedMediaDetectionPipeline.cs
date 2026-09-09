@@ -93,7 +93,7 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
 
     /// <summary>
     /// Destroy the previous singleton-detector session and enter exactly one fresh run for
-    /// <paramref name="pageUrl"/> (exclusive BeginSession, or Generic clear).
+    /// <paramref name="pageUrl"/>. Parks / ownership from the old session do not survive.
     /// </summary>
     public void Reenter(Uri pageUrl)
     {

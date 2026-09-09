@@ -9,9 +9,10 @@ using VideoDownloader.Core.Models;
 namespace VideoDownloader.Infrastructure.Detection.Sites.Douyin;
 
 /// <summary>
-/// Exclusive Douyin detector (process singleton). Owns Video and Album modes;
-/// <see cref="BeginSession"/> destroys the previous run on this instance.
-/// Never falls back to Generic/Unified.
+/// Exclusive Douyin detector — one process-wide instance, one active session.
+/// Interception/bind state lives only inside the current session.
+/// <see cref="BeginSession"/> atomically destroys the previous session on this instance.
+/// Network/DOM/async results must match <see cref="DouyinDetectionSession.SessionId"/>.
 /// </summary>
 public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 {
@@ -22,19 +23,6 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
     private string? _failureReason;
     /// <summary>True after a matching page observation sealed the current aweme (not merely page URL id).</summary>
     private bool _observationSealed;
-    /// <summary>
-    /// Progressive CDN seen while another aweme was active. Survives Clear/BeginSession so feed
-    /// swipe can adopt a preload that the browser will not re-request.
-    /// </summary>
-    private readonly Dictionary<string, List<MediaTrack>> _parkedByContentId =
-        new(StringComparer.Ordinal);
-
-    /// <summary>
-    /// Progressive CDN path → aweme id. Survives BeginSession/Reenter so a prior work's
-    /// muxed object is never rebound to the next feed item after network dedupe reset.
-    /// </summary>
-    private readonly Dictionary<string, string> _progressiveOwnerByResourceKey =
-        new(StringComparer.Ordinal);
 
     public DouyinMediaDetector(ILogger<DouyinMediaDetector> logger)
     {
@@ -53,58 +41,52 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
     public void BeginSession(Uri pageUrl, Guid sessionId)
     {
         lock (_gate)
-        {
-            _session.Reset();
-            _session.SessionId = sessionId;
-            _session.PageUrl = pageUrl;
-            _failed = false;
-            _failureReason = null;
-            _observationSealed = false;
-            var id = DouyinIdentity.ExtractAwemeId(pageUrl);
-            _session.SwitchContent(id, DouyinContentMode.Unknown);
-            if (id is not null)
-                AdoptParked(id);
-            _logger.LogInformation(
-                "[DetectionRouter] Site=Douyin Detector={Detector} Exclusive=true GenericPipeline=Bypassed page={Path}",
-                Name, pageUrl.AbsolutePath);
-        }
+            BeginSessionUnlocked(pageUrl, sessionId);
+    }
+
+    private void BeginSessionUnlocked(Uri pageUrl, Guid sessionId)
+    {
+        // 1–6: cancel/wipe old session. 7–9: open the only active run on this singleton.
+        DestroySessionUnlocked();
+        _session.SessionId = sessionId;
+        _session.PageUrl = pageUrl;
+        var id = DouyinIdentity.ExtractAwemeId(pageUrl);
+        _session.SwitchContent(id, DouyinContentMode.Unknown);
+        _logger.LogInformation(
+            "[DetectionRouter] Site=Douyin Detector={Detector} Exclusive=true GenericPipeline=Bypassed session={Session} page={Path}",
+            Name, sessionId, pageUrl.AbsolutePath);
     }
 
     public void Clear()
     {
         lock (_gate)
-        {
-            // Do NOT park current progressive here: wrongly-bound unbound CDN would resurrect
-            // under the old aweme after soft-nav and cause wrong-id downloads.
-            // Soft Clear keeps _parkedByContentId so feed swipe can still AdoptParked.
-            ClearUnlocked(wipeParked: false);
-        }
+            DestroySessionUnlocked();
     }
 
     /// <inheritdoc />
     public void HardClear()
     {
         lock (_gate)
-            ClearUnlocked(wipeParked: true);
+            DestroySessionUnlocked();
     }
 
-    private void ClearUnlocked(bool wipeParked)
+    private void DestroySessionUnlocked()
     {
-        _session.Reset();
+        _session.Destroy();
         _failed = false;
         _failureReason = null;
         _observationSealed = false;
-        if (wipeParked)
-            _parkedByContentId.Clear();
     }
+
+    private bool IsCurrentSession(Guid eventSessionId) =>
+        _session.SessionId != Guid.Empty &&
+        (eventSessionId == Guid.Empty || eventSessionId == _session.SessionId);
 
     public Task ProcessNetworkAsync(NormalizedNetworkEvent networkEvent, CancellationToken ct)
     {
         lock (_gate)
         {
-            // Never permanently block network ingestion after a failed Complete —
-            // feed soft-nav / late playAddr must still accumulate candidates.
-            if (_session.PageUrl is null)
+            if (_session.PageUrl is null || !IsCurrentSession(networkEvent.SessionId))
                 return Task.CompletedTask;
             if (networkEvent.StatusCode is not (200 or 206 or null))
                 return Task.CompletedTask;
@@ -166,8 +148,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             }
 
             var ownerTag = ResolveNetworkContentIdentity(urlId, isMse, length, networkEvent.Url);
-            // Observation already listed / network already bound an owned progressive —
-            // ignore further anonymous CDN preloads (still allow ResourceKey upserts).
+            // Session-local only: after this run owns a progressive, ignore further anonymous preloads.
             if (ownerTag is null &&
                 urlId is null &&
                 _observationSealed &&
@@ -275,7 +256,11 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         lock (_gate)
         {
             if (_session.PageUrl is null)
-                BeginSession(pageUrl, _session.SessionId == Guid.Empty ? Guid.NewGuid() : _session.SessionId);
+                BeginSessionUnlocked(pageUrl, _session.SessionId == Guid.Empty ? Guid.NewGuid() : _session.SessionId);
+
+            // Stale observation after Reenter must not mutate the new session.
+            if (_session.SessionId == Guid.Empty)
+                return Task.CompletedTask;
 
             _session.PageUrl = pageUrl;
             _session.Context = EnrichContext(context);
@@ -350,8 +335,13 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
     public Task CompleteAsync(CancellationToken ct)
     {
         MediaDescriptor? descriptor;
+        Guid sessionId;
         lock (_gate)
         {
+            sessionId = _session.SessionId;
+            if (sessionId == Guid.Empty)
+                return Task.CompletedTask;
+
             descriptor = BuildDescriptor();
             if (descriptor is null)
             {
@@ -381,6 +371,13 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 TruncatePath(descriptor.Video?.SourceUrl.AbsolutePath ?? ""),
                 descriptor.Video?.Kind,
                 descriptor.Formats.Count, descriptor.MediaId);
+        }
+
+        // Drop result if a newer BeginSession already replaced this run.
+        lock (_gate)
+        {
+            if (_session.SessionId != sessionId)
+                return Task.CompletedTask;
         }
 
         DescriptorsReady?.Invoke(this, [descriptor]);
@@ -722,24 +719,24 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             IsMseTrack = false
         };
 
-        if (!_parkedByContentId.TryGetValue(urlId, out var list))
+        if (!_session.ParkedByContentId.TryGetValue(urlId, out var list))
         {
             list = [];
-            _parkedByContentId[urlId] = list;
+            _session.ParkedByContentId[urlId] = list;
         }
 
         Upsert(list, track);
-        // Bound memory across long feed sessions.
-        if (_parkedByContentId.Count > 24)
+        // Bound memory within this session.
+        if (_session.ParkedByContentId.Count > 24)
         {
-            foreach (var stale in _parkedByContentId.Keys.Take(_parkedByContentId.Count - 16).ToList())
-                _parkedByContentId.Remove(stale);
+            foreach (var stale in _session.ParkedByContentId.Keys.Take(_session.ParkedByContentId.Count - 16).ToList())
+                _session.ParkedByContentId.Remove(stale);
         }
     }
 
     private void AdoptParked(string contentId)
     {
-        if (!_parkedByContentId.Remove(contentId, out var parked) || parked.Count == 0)
+        if (!_session.ParkedByContentId.Remove(contentId, out var parked) || parked.Count == 0)
             return;
 
         foreach (var track in parked)
@@ -809,11 +806,11 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         if (string.IsNullOrWhiteSpace(contentId))
             return;
         var key = ResourceKey(url);
-        _progressiveOwnerByResourceKey[key] = contentId;
-        if (_progressiveOwnerByResourceKey.Count <= 64)
+        _session.ProgressiveOwnerByResourceKey[key] = contentId;
+        if (_session.ProgressiveOwnerByResourceKey.Count <= 64)
             return;
-        foreach (var stale in _progressiveOwnerByResourceKey.Keys.Take(_progressiveOwnerByResourceKey.Count - 48).ToList())
-            _progressiveOwnerByResourceKey.Remove(stale);
+        foreach (var stale in _session.ProgressiveOwnerByResourceKey.Keys.Take(_session.ProgressiveOwnerByResourceKey.Count - 48).ToList())
+            _session.ProgressiveOwnerByResourceKey.Remove(stale);
     }
 
     private bool TryGetForeignProgressiveOwner(Uri url, out string foreignOwner)
@@ -821,7 +818,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         foreignOwner = "";
         if (_session.CurrentContentId is null)
             return false;
-        if (!_progressiveOwnerByResourceKey.TryGetValue(ResourceKey(url), out var owner))
+        if (!_session.ProgressiveOwnerByResourceKey.TryGetValue(ResourceKey(url), out var owner))
             return false;
         if (string.Equals(owner, _session.CurrentContentId, StringComparison.Ordinal))
             return false;

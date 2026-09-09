@@ -7,7 +7,10 @@ using VideoDownloader.Core.Models;
 
 namespace VideoDownloader.Infrastructure.Detection.Sites.TikTok;
 
-/// <summary>Exclusive TikTok detector — no shared Douyin/Generic detection methods.</summary>
+/// <summary>
+/// Exclusive TikTok detector — one process-wide instance, one active session.
+/// <see cref="BeginSession"/> destroys the previous session on this instance.
+/// </summary>
 public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
 {
     private static readonly Regex VideoIdPath = new(
@@ -27,6 +30,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
     private bool _album;
     private bool _failed;
     private string? _failureReason;
+    private CancellationTokenSource _lifetime = new();
 
     public TikTokMediaDetector(ILogger<TikTokMediaDetector> logger) => _logger = logger;
 
@@ -48,8 +52,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
             _pageUrl = pageUrl;
             _contentId = ExtractVideoId(pageUrl);
             _logger.LogInformation(
-                "[DetectionRouter] Site=TikTok Detector={Detector} Exclusive=true GenericPipeline=Bypassed page={Path}",
-                Name, pageUrl.AbsolutePath);
+                "[DetectionRouter] Site=TikTok Detector={Detector} Exclusive=true GenericPipeline=Bypassed session={Session} page={Path}",
+                Name, sessionId, pageUrl.AbsolutePath);
         }
     }
 
@@ -58,11 +62,36 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         lock (_gate) ClearUnlocked();
     }
 
+    public void HardClear()
+    {
+        lock (_gate) ClearUnlocked();
+    }
+
+    private void ClearUnlocked()
+    {
+        try { _lifetime.Cancel(); }
+        catch (ObjectDisposedException) { }
+        _lifetime.Dispose();
+        _lifetime = new CancellationTokenSource();
+        _sessionId = Guid.Empty;
+        _pageUrl = null;
+        _contentId = null;
+        _caption = null;
+        _context = RequestContext.CreateEmpty();
+        _videos.Clear();
+        _audios.Clear();
+        _images.Clear();
+        _album = false;
+        _failed = false;
+        _failureReason = null;
+    }
+
     public Task ProcessNetworkAsync(NormalizedNetworkEvent e, CancellationToken ct)
     {
         lock (_gate)
         {
             if (_pageUrl is null || _failed) return Task.CompletedTask;
+            if (e.SessionId != Guid.Empty && e.SessionId != _sessionId) return Task.CompletedTask;
             if (e.StatusCode is not (200 or 206 or null)) return Task.CompletedTask;
 
             if (_album)
@@ -201,21 +230,6 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
             }
         }
         catch (JsonException) { }
-    }
-
-    private void ClearUnlocked()
-    {
-        _sessionId = Guid.Empty;
-        _pageUrl = null;
-        _contentId = null;
-        _caption = null;
-        _context = RequestContext.CreateEmpty();
-        _videos.Clear();
-        _audios.Clear();
-        _images.Clear();
-        _album = false;
-        _failed = false;
-        _failureReason = null;
     }
 
     private void AddImage(Uri url, RequestContext ctx)

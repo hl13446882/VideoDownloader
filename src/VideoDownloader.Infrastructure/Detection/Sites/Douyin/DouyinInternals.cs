@@ -336,10 +336,17 @@ internal sealed class DouyinDetectionSession
     /// <summary>Active player duration in seconds from page observation (when known).</summary>
     public double? ObservedDurationSec { get; set; }
     public RequestContext Context { get; set; } = RequestContext.CreateEmpty();
+    public CancellationTokenSource Lifetime { get; private set; } = new();
 
     public List<MediaTrack> VideoCandidates { get; } = [];
     public List<MediaTrack> AudioCandidates { get; } = [];
     public List<AlbumImageItem> AlbumImages { get; } = [];
+    /// <summary>Other-aweme progressive seen in this session only.</summary>
+    public Dictionary<string, List<MediaTrack>> ParkedByContentId { get; } =
+        new(StringComparer.Ordinal);
+    /// <summary>Progressive CDN path → aweme id within this session only.</summary>
+    public Dictionary<string, string> ProgressiveOwnerByResourceKey { get; } =
+        new(StringComparer.Ordinal);
 
     public void SwitchContent(string? contentId, DouyinContentMode mode)
     {
@@ -379,6 +386,16 @@ internal sealed class DouyinDetectionSession
         AlbumImages.Clear();
     }
 
+    /// <summary>Cancel async work and wipe every field belonging to this session.</summary>
+    public void Destroy()
+    {
+        try { Lifetime.Cancel(); }
+        catch (ObjectDisposedException) { /* already torn down */ }
+        Lifetime.Dispose();
+        Lifetime = new CancellationTokenSource();
+        Reset();
+    }
+
     public void Reset()
     {
         SessionId = Guid.Empty;
@@ -391,5 +408,7 @@ internal sealed class DouyinDetectionSession
         VideoCandidates.Clear();
         AudioCandidates.Clear();
         AlbumImages.Clear();
+        ParkedByContentId.Clear();
+        ProgressiveOwnerByResourceKey.Clear();
     }
 }

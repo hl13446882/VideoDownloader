@@ -11,8 +11,9 @@ public interface ISiteDetectionRouter
 /// <summary>
 /// Exclusive site media detector. Exactly one process-wide instance per site
 /// (Douyin / TikTok / YouTube / Bilibili). Never construct a second instance.
-/// <see cref="BeginSession"/> destroys any previous session on this instance and
-/// starts the only active run; <see cref="Clear"/> / <see cref="HardClear"/> tear it down.
+/// One active session at a time: <see cref="BeginSession"/> atomically destroys the
+/// previous session on this instance. All interception/candidates are session-scoped;
+/// async results must be dropped when their SessionId is no longer current.
 /// </summary>
 public interface IExclusiveSiteMediaDetector
 {
@@ -26,9 +27,7 @@ public interface IExclusiveSiteMediaDetector
     /// <summary>Tear down the active session on this singleton.</summary>
     void Clear();
 
-    /// <summary>
-    /// Tear down the active session including any soft-nav parks.
-    /// </summary>
+    /// <summary>Same as <see cref="Clear"/> for exclusive detectors (full session destroy).</summary>
     void HardClear() => Clear();
 
     Task ProcessNetworkAsync(NormalizedNetworkEvent networkEvent, CancellationToken ct);
