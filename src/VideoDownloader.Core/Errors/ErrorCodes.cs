@@ -25,4 +25,6 @@ public static class ErrorCodes
     public const string AudioOnly = "AUDIO_ONLY";
     /// <summary>Ordinary downloader rejected an MSE/partial track that is not a complete progressive source.</summary>
     public const string MseTrackNotDownloadable = "MSE_TRACK_NOT_DOWNLOADABLE";
+    /// <summary>HTTP finished but payload is shorter than Content-Range / too small to be a real VOD file.</summary>
+    public const string IncompleteDownload = "INCOMPLETE_DOWNLOAD";
 }

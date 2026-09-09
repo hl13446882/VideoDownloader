@@ -63,7 +63,9 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
     {
         lock (_gate)
         {
-            if (_session.PageUrl is null || _failed)
+            // Never permanently block network ingestion after a failed Complete —
+            // feed soft-nav / late playAddr must still accumulate candidates.
+            if (_session.PageUrl is null)
                 return Task.CompletedTask;
             if (networkEvent.StatusCode is not (200 or 206 or null))
                 return Task.CompletedTask;
@@ -188,7 +190,12 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             var idChanged = contentId is not null &&
                             !string.Equals(contentId, _session.CurrentContentId, StringComparison.Ordinal);
             if (modeChanged || idChanged)
+            {
                 _session.SwitchContent(contentId, mode == DouyinContentMode.Unknown ? _session.CurrentMode : mode);
+                // New work / mode: allow another Complete attempt and keep collecting.
+                _failed = false;
+                _failureReason = null;
+            }
             else if (contentId is not null)
                 _session.CurrentContentId ??= contentId;
 
@@ -229,6 +236,8 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 return Task.CompletedTask;
             }
 
+            _failed = false;
+            _failureReason = null;
             _logger.LogInformation(
                 "[DouyinSelect] session={Session} selected={Host}{Path} kind={Kind} formats={Formats} reason=progressive_muxed",
                 _session.SessionId,
@@ -308,9 +317,11 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         foreach (var track in videos
                      .Where(t => !DouyinPlayEvidence.IsNonDownloadableHost(t.SourceUrl) &&
                                  !DouyinPlayEvidence.IsLivePullHost(t.SourceUrl) &&
+                                 !DouyinPlayEvidence.IsPlayGateway(t.SourceUrl) &&
                                  !t.IsMseTrack &&
                                  !DouyinPlayEvidence.IsMseVideoPath(t.SourceUrl) &&
-                                 t.Kind == MediaTrackKind.Combined)
+                                 t.Kind == MediaTrackKind.Combined &&
+                                 !DouyinPlayEvidence.IsSuspiciousTinyProgressive(t))
                      .OrderByDescending(t => ScoreTrack(t)))
         {
             list.Add(new MediaVariant(
@@ -334,17 +345,23 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 
     private static MediaTrack? SelectBestVideo(IReadOnlyList<MediaTrack> videos, IReadOnlyList<MediaTrack> audios)
     {
-        // Hard rule: media-video / MSE tracks are never ordinary download sources —
-        // not even as Video+Audio remux fallback.
-        return videos
+        // Hard rule: media-video / MSE tracks are never ordinary download sources.
+        var progressive = videos
             .Where(t => !DouyinPlayEvidence.IsNonDownloadableHost(t.SourceUrl) &&
                         !DouyinPlayEvidence.IsLivePullHost(t.SourceUrl) &&
                         !t.IsMseTrack &&
                         !DouyinPlayEvidence.IsMseVideoPath(t.SourceUrl) &&
                         !DouyinPlayEvidence.IsPlayGateway(t.SourceUrl) &&
-                        t.Kind == MediaTrackKind.Combined)
+                        t.Kind == MediaTrackKind.Combined &&
+                        !DouyinPlayEvidence.IsSuspiciousTinyProgressive(t))
             .OrderByDescending(t => ScoreTrack(t, audios.Count > 0))
-            .FirstOrDefault();
+            .ToList();
+
+        // Prefer known large objects over unknown-length crumbs when both exist.
+        var sized = progressive.Where(t => t.ContentLength is >= MediaResourceSizeFilter.MinProgressiveVideoBytes).ToList();
+        if (sized.Count > 0)
+            return sized[0];
+        return progressive.FirstOrDefault();
     }
 
     private static int ScoreTrack(MediaTrack t, bool hasAudioPair = true)
@@ -353,6 +370,8 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             return int.MinValue / 4;
         if (t.IsMseTrack || DouyinPlayEvidence.IsMseAdaptivePath(t.SourceUrl))
             return int.MinValue / 8;
+        if (DouyinPlayEvidence.IsSuspiciousTinyProgressive(t))
+            return int.MinValue / 16;
 
         var score = 0;
         if (DouyinPlayEvidence.IsPlayGateway(t.SourceUrl)) score -= 2000;
@@ -361,8 +380,11 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         if (t.Kind == MediaTrackKind.Combined) score += 800;
         if (t.Kind == MediaTrackKind.Video)
             score += hasAudioPair ? 150 : -400;
+        if (t.ContentLength is >= MediaResourceSizeFilter.MinProgressiveVideoBytes) score += 200;
         if (t.ContentLength is >= 1L * 1024 * 1024) score += 50;
         if (t.ContentLength is > 0 and < MediaResourceSizeFilter.MinDisplayBytes) score -= 500;
+        // Demote ultra-low Douyin quality crumbs (br/qs) that often yield ~200KB shells.
+        score += DouyinPlayEvidence.ScorePlayQualityHint(t.SourceUrl);
         score += (int)Math.Min(t.ContentLength ?? 0, int.MaxValue) / (1024 * 1024);
         return score;
     }

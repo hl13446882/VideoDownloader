@@ -147,6 +147,38 @@ internal static class DouyinPlayEvidence
     public static bool IsMseAudioPath(Uri url) =>
         url.AbsolutePath.Contains("/media-audio-", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Known-too-small progressive objects (~200KB shells without moov) must not be download variants.
+    /// </summary>
+    public static bool IsSuspiciousTinyProgressive(MediaTrack track) =>
+        !track.IsMseTrack &&
+        track.Kind == MediaTrackKind.Combined &&
+        track.ContentLength is > 0 and < MediaResourceSizeFilter.MinProgressiveVideoBytes;
+
+    /// <summary>Soft quality hint from Douyin CDN query (br/qs). Higher is better.</summary>
+    public static int ScorePlayQualityHint(Uri url)
+    {
+        var q = url.Query;
+        var score = 0;
+        var br = MatchQueryLong(q, "br");
+        if (br is > 0)
+        {
+            if (br < 600) score -= 400;
+            else if (br >= 1200) score += 80;
+        }
+
+        var qs = MatchQueryLong(q, "qs");
+        // qs=12 often accompanies tiny preview objects in feed.
+        if (qs is >= 10) score -= 300;
+        return score;
+    }
+
+    private static long? MatchQueryLong(string query, string key)
+    {
+        var m = Regex.Match(query, $@"[?&]{key}=(\d+)", RegexOptions.IgnoreCase);
+        return m.Success && long.TryParse(m.Groups[1].Value, out var v) ? v : null;
+    }
+
     public static bool IsBrowserPlay(NormalizedNetworkEvent e) =>
         e.StatusCode is 200 or 206 &&
         (string.Equals(e.ResourceType, "Media", StringComparison.OrdinalIgnoreCase) ||

@@ -6,6 +6,8 @@ public static class MediaResourceSizeFilter
 {
     public const long MinDisplayBytes = 64 * 1024;
     public const long MinStrongMimeBytes = 1024;
+    /// <summary>Floor for a credible progressive Douyin/TikTok VOD object (rejects ~200KB crumbs).</summary>
+    public const long MinProgressiveVideoBytes = 512 * 1024;
 
     public static bool ShouldExcludeFromDisplay(MediaResource resource, CandidateKind kind)
     {

@@ -859,6 +859,41 @@ public sealed partial class MainViewModel : ObservableObject
         var token = _probeCts.Token;
         try
         {
+            SetStatusKey("status.probeManual");
+            // Match auto session: settle + DOM grace so CDN playAddr can arrive before seal.
+            await Task.Delay(TimeSpan.FromSeconds(2), token);
+            if (generation != _pageGeneration)
+                return;
+
+            var host = SelectedTab?.Host;
+            if (host is not null)
+            {
+                for (var grace = 0; grace < 5; grace++)
+                {
+                    if (generation != _pageGeneration || token.IsCancellationRequested)
+                        return;
+                    try
+                    {
+                        await host.ProbeCurrentPageAsync(token);
+                    }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested)
+                    {
+                        return;
+                    }
+                    catch
+                    {
+                        // Probe warnings must not abort manual discovery.
+                    }
+
+                    var found = false;
+                    await Application.Current.Dispatcher.InvokeAsync(() =>
+                        found = DetectedVideos.Count > 0);
+                    if (found)
+                        break;
+                    await Task.Delay(TimeSpan.FromSeconds(1.2), token);
+                }
+            }
+
             await RunPagePassAsync(pageUrl, pageTitle, token, generation, runExternal: true);
             await Application.Current.Dispatcher.InvokeAsync(() =>
             {

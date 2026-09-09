@@ -533,6 +533,54 @@ public class ExclusiveSiteDetectionTests
     }
 
     [Fact]
+    public async Task Douyin_Rejects_Known_Tiny_Progressive_Shell()
+    {
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var page = new Uri("https://www.douyin.com/?recommend=1");
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "空气都是香的",
+            """{"identity":"content:7680819823879075706","album":false,"media":[]}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://v3-web-prime.douyinvod.com/video/tos/cn/obj/tiny.mp4?mime_type=video_mp4&br=456&qs=12") with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 204_801
+        }, CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.Null(last);
+        Assert.True(detector.Failed);
+        Assert.Equal("douyin_no_media", detector.FailureReason);
+    }
+
+    [Fact]
+    public async Task Douyin_Failed_Complete_Does_Not_Block_Later_Progressive()
+    {
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var page = new Uri("https://www.douyin.com/?recommend=1");
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "t",
+            """{"identity":"content:1","album":false,"media":[]}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.True(detector.Failed);
+
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://v3-dy-o.zjcdn.com/video/tos/cn/obj/full.mp4?mime_type=video_mp4") with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 8_000_000
+        }, CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+
+        Assert.NotNull(last);
+        Assert.False(detector.Failed);
+        Assert.Contains("full.mp4", last!.Video!.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task TikTok_Exclusive_Positive_Path()
     {
         var detector = new TikTokMediaDetector(NullLogger<TikTokMediaDetector>.Instance);

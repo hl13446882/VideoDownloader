@@ -187,25 +187,29 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
             }
             if (!_exclusiveCompleted)
             {
-                _exclusiveCompleted = true;
                 if (exclusive.Failed)
                 {
                     _logger.LogWarning(
                         "Exclusive detection failed site={Site} detector={Detector} reason={Reason} (GenericPipeline=NotUsed)",
                         exclusive.Site, exclusive.Name, exclusive.FailureReason);
                     _lastBuilt = [];
-                    PageProbed?.Invoke(this, []);
-                }
-                else if (_lastBuilt.Count == 0)
-                {
-                    _logger.LogInformation(
-                        "Exclusive detection completed with no descriptors site={Site} detector={Detector}",
-                        exclusive.Site, exclusive.Name);
+                    // Do NOT latch completed-on-failure: late CDN media must be sealable later.
                     PageProbed?.Invoke(this, []);
                 }
                 else
                 {
-                    PageProbed?.Invoke(this, _lastBuilt);
+                    _exclusiveCompleted = true;
+                    if (_lastBuilt.Count == 0)
+                    {
+                        _logger.LogInformation(
+                            "Exclusive detection completed with no descriptors site={Site} detector={Detector}",
+                            exclusive.Site, exclusive.Name);
+                        PageProbed?.Invoke(this, []);
+                    }
+                    else
+                    {
+                        PageProbed?.Invoke(this, _lastBuilt);
+                    }
                 }
             }
         }

@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using VideoDownloader.Core.Contracts;
+using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Infrastructure.Configuration;
@@ -276,7 +277,42 @@ public sealed class HttpMediaDownloader
                 await checkpointAsync();
         }
 
+        // After reading the body: never treat a short 206 window / tiny object as a finished VOD.
+        EnsureDownloadLooksComplete(job, response, offset);
+
         return offset;
+    }
+
+    private static void EnsureDownloadLooksComplete(DownloadJob job, HttpResponseMessage response, long startOffset)
+    {
+        var range = response.Content.Headers.ContentRange;
+        if (startOffset == 0 &&
+            response.StatusCode == HttpStatusCode.PartialContent &&
+            range?.Length is long entity &&
+            range.To is long to &&
+            to + 1 < entity)
+        {
+            throw new DownloadException(
+                ErrorCodes.IncompleteDownload,
+                $"Partial 206 window ended at {to + 1} of {entity} bytes.");
+        }
+
+        if (job.TotalBytes is long expected && expected > 0 && job.DownloadedBytes + 1024 < expected)
+        {
+            throw new DownloadException(
+                ErrorCodes.IncompleteDownload,
+                $"Downloaded {job.DownloadedBytes} of {expected} bytes.");
+        }
+
+        var minBytes = job.Variant.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
+            ? MediaResourceSizeFilter.MinProgressiveVideoBytes
+            : MediaResourceSizeFilter.MinDisplayBytes;
+        if (job.DownloadedBytes > 0 && job.DownloadedBytes < minBytes)
+        {
+            throw new DownloadException(
+                ErrorCodes.IncompleteDownload,
+                $"Downloaded object is only {job.DownloadedBytes} bytes (below credible media floor).");
+        }
     }
 
     private static MediaResource BuildResource(MediaVariant variant, DownloadJob job) =>
