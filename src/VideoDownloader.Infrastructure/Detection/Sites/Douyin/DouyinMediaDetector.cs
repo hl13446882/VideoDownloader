@@ -17,6 +17,8 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
     private readonly object _gate = new();
     private bool _failed;
     private string? _failureReason;
+    /// <summary>True after a matching page observation sealed the current aweme (not merely page URL id).</summary>
+    private bool _observationSealed;
 
     public DouyinMediaDetector(ILogger<DouyinMediaDetector> logger)
     {
@@ -41,6 +43,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             _session.PageUrl = pageUrl;
             _failed = false;
             _failureReason = null;
+            _observationSealed = false;
             var id = DouyinIdentity.ExtractAwemeId(pageUrl);
             _session.SwitchContent(id, DouyinContentMode.Unknown);
             _logger.LogInformation(
@@ -56,6 +59,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             _session.Reset();
             _failed = false;
             _failureReason = null;
+            _observationSealed = false;
         }
     }
 
@@ -110,6 +114,26 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 
             var kind = DouyinPlayEvidence.InferKind(networkEvent.Url, networkEvent.MimeType);
             var isMse = DouyinPlayEvidence.IsMseAdaptivePath(networkEvent.Url);
+            var ownerTag = ResolveNetworkContentIdentity(urlId, networkEvent.Url, isMse);
+            // Observation already listed owned progressive URLs — ignore anonymous CDN preloads
+            // (still allow ResourceKey upserts of the same object via alternate hosts).
+            if (ownerTag is null &&
+                urlId is null &&
+                _observationSealed &&
+                HasObservationOwnedProgressive())
+            {
+                var key = ResourceKey(networkEvent.Url);
+                var known = _session.VideoCandidates.Any(t =>
+                    string.Equals(ResourceKey(t.SourceUrl), key, StringComparison.Ordinal));
+                if (!known)
+                {
+                    _logger.LogInformation(
+                        "Douyin skip unbound preload after owned observation host={Host} path={Path}",
+                        networkEvent.Url.Host, TruncatePath(networkEvent.Url.AbsolutePath));
+                    return Task.CompletedTask;
+                }
+            }
+
             var ctx = EnrichContext(networkEvent.RequestContext);
             var length = DouyinPlayEvidence.GetEntityLength(networkEvent);
             // Never promote MSE tracks to Combined — even if mime says video.
@@ -135,10 +159,9 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 Evidence = DouyinPlayEvidence.IsBrowserPlay(networkEvent)
                     ? MediaEvidence.BrowserObserved
                     : MediaEvidence.Heuristic,
-                ContentIdentity = urlId is not null ? "id:" + urlId :
-                    _session.VideoCandidates.Concat(_session.AudioCandidates)
-                        .FirstOrDefault(t => ResourceKey(t.SourceUrl) == ResourceKey(networkEvent.Url) &&
-                                             BelongsToCurrent(t))?.ContentIdentity,
+                // Prefer explicit URL aweme id; otherwise bind only after observation sealed
+                // the work (feed CDN progressive rarely embeds aweme ids).
+                ContentIdentity = ownerTag,
                 IsMseTrack = isMse
             };
 
@@ -205,9 +228,19 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 // New work / mode: allow another Complete attempt and keep collecting.
                 _failed = false;
                 _failureReason = null;
+                // Hard id change clears candidates inside SwitchContent; soft null→id keeps them unbound.
+                if (idChanged &&
+                    _session.VideoCandidates.Count == 0 &&
+                    _session.AudioCandidates.Count == 0)
+                    _observationSealed = false;
             }
             else if (contentId is not null)
                 _session.CurrentContentId ??= contentId;
+
+            // Matching observation for the active aweme — unlocks binding of id-less CDN progressive.
+            if (contentId is not null &&
+                string.Equals(contentId, _session.CurrentContentId, StringComparison.Ordinal))
+                _observationSealed = true;
 
             if (!string.IsNullOrWhiteSpace(pageTitle) && string.IsNullOrWhiteSpace(_session.Caption))
                 _session.Caption = pageTitle.Trim();
@@ -571,9 +604,46 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         return context with { Referer = referer, Origin = origin };
     }
 
-    private bool BelongsToCurrent(MediaTrack track) =>
-        _session.CurrentContentId is not null &&
-        track.ContentIdentity == "id:" + _session.CurrentContentId;
+    /// <summary>
+    /// Keep tracks for the active aweme. Unbound CDN objects stay selectable only after they were
+    /// explicitly attributed (URL id or post-observation bind). Pre-identity preloads stay out.
+    /// </summary>
+    private bool BelongsToCurrent(MediaTrack track)
+    {
+        if (_session.CurrentContentId is null)
+            return true;
+        if (string.IsNullOrWhiteSpace(track.ContentIdentity))
+            return false;
+        return track.ContentIdentity == "id:" + _session.CurrentContentId;
+    }
+
+    private string? ResolveNetworkContentIdentity(string? urlId, Uri url, bool isMse)
+    {
+        if (urlId is not null)
+            return "id:" + urlId;
+
+        // Page URL alone is not enough — wait for a matching observation so /video/{id}
+        // does not inherit anonymous ad preloads. Empty observation media then allows
+        // feed progressive CDN objects that omit aweme ids.
+        if (!_observationSealed || _session.CurrentContentId is null || isMse)
+            return null;
+
+        if (HasObservationOwnedProgressive())
+            return null;
+
+        return "id:" + _session.CurrentContentId;
+    }
+
+    private bool HasObservationOwnedProgressive()
+    {
+        if (_session.CurrentContentId is null)
+            return false;
+        var tag = "id:" + _session.CurrentContentId;
+        return _session.VideoCandidates.Any(t =>
+            t.ContentIdentity == tag &&
+            !t.IsMseTrack &&
+            t.Evidence == MediaEvidence.DomObserved);
+    }
 
     private static string ResourceKey(Uri url)
     {

@@ -594,6 +594,30 @@ public class ExclusiveSiteDetectionTests
     }
 
     [Fact]
+    public async Task Douyin_Unbound_Progressive_Belongs_To_Current_Work()
+    {
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var page = new Uri("https://www.douyin.com/jingxuan?modal_id=7680898097882840454");
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "作品",
+            """{"identity":"content:7680898097882840454","album":false,"media":[]}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        // CDN progressive URLs typically omit aweme id query — must still be selectable.
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://v3-dy-o.zjcdn.com/hash/video/tos/cn/tos-cn-ve-15/obj123?mime_type=video_mp4") with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 35_000_000
+        }, CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.NotNull(last);
+        Assert.Equal(MediaTrackKind.Combined, last!.Video!.Kind);
+        Assert.Contains("zjcdn", last.Video.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
+        Assert.False(detector.Failed);
+    }
+
+    [Fact]
     public async Task Douyin_Rejects_Known_Tiny_Progressive_Shell()
     {
         var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
