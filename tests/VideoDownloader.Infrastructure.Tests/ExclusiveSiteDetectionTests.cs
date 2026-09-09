@@ -45,35 +45,35 @@ public class ExclusiveSiteDetectionTests
     }
 
     [Fact]
-    public async Task Douyin_Clear_Parks_Current_Progressive_For_Same_Work_Relaunch()
+    public async Task Douyin_Second_Unbound_Progressive_Does_Not_Bind_To_Current()
     {
-        const string id = "7683109159823577727";
+        const string id = "7672351780155575579";
         var page = new Uri("https://www.douyin.com/jingxuan?modal_id=" + id);
         var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
         detector.BeginSession(page, Guid.NewGuid());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, rows) => last = rows.Single();
 
-        await detector.ProcessPageObservationAsync(page, "长视频",
-            """{"identity":"content:7683109159823577727","album":false,"media":[]}""",
+        await detector.ProcessPageObservationAsync(page, "当前",
+            """{"identity":"content:7672351780155575579","album":false,"media":[]}""",
             RequestContext.CreateEmpty(), CancellationToken.None);
         await detector.ProcessNetworkAsync(Evt(page,
-            "https://v3-web-prime.douyinvod.com/video/tos/cn/tos-cn-ve-15/ocGfQGUPICNPAQI9Oe76BnnBHYYe8AMagoAaLV/?mime_type=video_mp4") with
+            "https://v3-dy-o.zjcdn.com/video/tos/cn/tos-cn-ve-15/o03RIkiiwcCJp8VCAQBAEwQ9eO1?mime_type=video_mp4") with
         {
-            ResourceType = "Media", StatusCode = 200, ContentLength = 80_000_000
+            ResourceType = "Media", StatusCode = 200, ContentLength = 8_000_000
         }, CancellationToken.None);
-
-        // Soft-nav thrash: Clear wipes candidates but must park progressive for same aweme.
-        detector.Clear();
-        detector.BeginSession(page, Guid.NewGuid());
-        await detector.ProcessPageObservationAsync(page, "长视频",
-            """{"identity":"content:7683109159823577727","album":false,"media":[]}""",
-            RequestContext.CreateEmpty(), CancellationToken.None);
+        // Next-feed preload without __vid must not inherit the active work (黄龄错下).
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://v3-dy-o.zjcdn.com/video/tos/cn/tos-cn-ve-15/ogln3iF7a7TavwYBVEimAWsiFqi?mime_type=video_mp4") with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 72_000_000
+        }, CancellationToken.None);
         await detector.CompleteAsync(CancellationToken.None);
 
         Assert.NotNull(last);
-        Assert.Contains("ocGfQGUPICNPAQI9Oe76BnnBHYYe8AMagoAaLV", last!.Video!.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
-        Assert.False(detector.Failed);
+        Assert.Contains("o03RIkiiwcCJp8VCAQBAEwQ9eO1", last!.Video!.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ogln3iF7", last.Video.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(last.Formats);
     }
 
     [Fact]

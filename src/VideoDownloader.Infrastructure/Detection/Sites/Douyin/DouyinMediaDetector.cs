@@ -64,9 +64,8 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
     {
         lock (_gate)
         {
-            // Soft-nav thrash (same aweme, new session id) must not throw away progressive
-            // already captured — browser will not re-request the cached CDN object.
-            ParkCurrentOwnedProgressive();
+            // Do NOT park current progressive here: wrongly-bound unbound CDN would resurrect
+            // under the old aweme after soft-nav and cause wrong-id downloads.
             _session.Reset();
             _failed = false;
             _failureReason = null;
@@ -127,12 +126,12 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             var kind = DouyinPlayEvidence.InferKind(networkEvent.Url, networkEvent.MimeType);
             var isMse = DouyinPlayEvidence.IsMseAdaptivePath(networkEvent.Url);
             var ownerTag = ResolveNetworkContentIdentity(urlId, networkEvent.Url, isMse);
-            // Observation already listed owned progressive URLs — ignore anonymous CDN preloads
-            // (still allow ResourceKey upserts of the same object via alternate hosts).
+            // Observation already listed / network already bound an owned progressive —
+            // ignore further anonymous CDN preloads (still allow ResourceKey upserts).
             if (ownerTag is null &&
                 urlId is null &&
                 _observationSealed &&
-                HasObservationOwnedProgressive())
+                HasOwnedProgressive())
             {
                 var key = ResourceKey(networkEvent.Url);
                 var known = _session.VideoCandidates.Any(t =>
@@ -140,7 +139,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 if (!known)
                 {
                     _logger.LogInformation(
-                        "Douyin skip unbound preload after owned observation host={Host} path={Path}",
+                        "Douyin skip unbound preload after owned progressive host={Host} path={Path}",
                         networkEvent.Url.Host, TruncatePath(networkEvent.Url.AbsolutePath));
                     return Task.CompletedTask;
                 }
@@ -615,35 +614,6 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         return context with { Referer = referer, Origin = origin };
     }
 
-    private void ParkCurrentOwnedProgressive()
-    {
-        var id = _session.CurrentContentId;
-        if (id is null)
-            return;
-
-        var owned = _session.VideoCandidates
-            .Where(t => !t.IsMseTrack &&
-                        t.Kind == MediaTrackKind.Combined &&
-                        !DouyinPlayEvidence.IsSuspiciousTinyProgressive(t) &&
-                        BelongsToCurrent(t))
-            .ToList();
-        if (owned.Count == 0)
-            return;
-
-        if (!_parkedByContentId.TryGetValue(id, out var list))
-        {
-            list = [];
-            _parkedByContentId[id] = list;
-        }
-
-        foreach (var track in owned)
-            Upsert(list, track with { ContentIdentity = "id:" + id });
-
-        _logger.LogInformation(
-            "[DouyinOwnership] parked current progressive before reset contentId={Id} count={Count}",
-            id, owned.Count);
-    }
-
     private void ParkOtherWorkProgressive(NormalizedNetworkEvent networkEvent, string urlId)
     {
         // Only park muxed progressive — MSE/audio stay out of the adopt path.
@@ -722,17 +692,19 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 
         // Page URL alone is not enough — wait for a matching observation so /video/{id}
         // does not inherit anonymous ad preloads. Empty observation media then allows
-        // feed progressive CDN objects that omit aweme ids.
+        // ONE feed progressive CDN object that omits aweme ids.
         if (!_observationSealed || _session.CurrentContentId is null || isMse)
             return null;
 
-        if (HasObservationOwnedProgressive())
+        // Never bind a second anonymous progressive — next-feed preloads often omit __vid
+        // and would otherwise inherit the active work (wrong-id downloads).
+        if (HasOwnedProgressive())
             return null;
 
         return "id:" + _session.CurrentContentId;
     }
 
-    private bool HasObservationOwnedProgressive()
+    private bool HasOwnedProgressive()
     {
         if (_session.CurrentContentId is null)
             return false;
@@ -740,7 +712,8 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         return _session.VideoCandidates.Any(t =>
             t.ContentIdentity == tag &&
             !t.IsMseTrack &&
-            t.Evidence == MediaEvidence.DomObserved);
+            t.Kind == MediaTrackKind.Combined &&
+            !DouyinPlayEvidence.IsSuspiciousTinyProgressive(t));
     }
 
     private static string ResourceKey(Uri url)

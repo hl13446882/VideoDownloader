@@ -817,10 +817,14 @@ public sealed partial class MainViewModel : ObservableObject
             var pageKey = BuildPageIdentity(pageUrl, mediaSessionKey);
             var stableIncoming = ExtractStableContentKey(mediaSessionKey, pageUrl);
             var stableCurrent = ExtractStableContentKeyFromIdentity(_currentPageIdentity);
-            // Same Douyin/TikTok aweme: ignore URL query noise / identity prefix flicker that
-            // otherwise forceReplace-wipes progressive already captured for long VODs.
+            // MediaSession flicker for the same aweme must not wipe a successful result.
+            // NavigationStarted passes mediaSessionKey=null and must always reset.
+            // Empty/failed sessions must also reset — otherwise Douyin stays stuck with
+            // douyin_no_media / stale exclusive state ("状态没清零").
             if (forceReplace &&
+                mediaSessionKey is not null &&
                 _detectionRunning &&
+                DetectedVideos.Count > 0 &&
                 stableIncoming is not null &&
                 string.Equals(stableIncoming, stableCurrent, StringComparison.Ordinal))
             {
