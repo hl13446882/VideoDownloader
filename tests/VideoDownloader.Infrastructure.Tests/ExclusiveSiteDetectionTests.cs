@@ -17,6 +17,7 @@ public class ExclusiveSiteDetectionTests
 {
     [Theory]
     [InlineData("bytes 0-4613733/52428800", 52428800L)]
+    [InlineData("bytes 0-65535/52428800", null)]
     [InlineData("bytes 0-4613733/*", null)]
     [InlineData(null, null)]
     public async Task Douyin_Partial_Response_Does_Not_Label_Chunk_As_Full_Size(string? range, long? expected)

@@ -823,7 +823,13 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         if (clearUi)
+        {
             ClearDetectedVideos();
+            // Feed soft-nav (forceReplace) must reset exclusive detectors; otherwise Douyin
+            // keeps a stale session on "/" and completes with douyin_no_media after swipe.
+            if (forceReplace)
+                ResetDetectionPipeline();
+        }
         else
             ResetDetectionPipeline();
 
@@ -1566,10 +1572,22 @@ public sealed partial class MainViewModel : ObservableObject
             return true;
 
         // Soft-nav / query-normalized pages: compare without trailing slash / fragment already normalized.
-        return string.Equals(
-            currentPage.TrimEnd('/'),
-            videoPage.TrimEnd('/'),
-            StringComparison.OrdinalIgnoreCase);
+        if (string.Equals(
+                currentPage.TrimEnd('/'),
+                videoPage.TrimEnd('/'),
+                StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        // Douyin/TikTok feed: page is often "/" while current identity keeps "?recommend=1"
+        // or "/jingxuan?modal_id=…". Same host must still accept the exclusive card.
+        if (Uri.TryCreate(currentPage, UriKind.Absolute, out var cur) &&
+            (cur.Host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
+             cur.Host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase) ||
+             cur.Host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase)) &&
+            string.Equals(cur.Host, video.PageUrl.Host, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return false;
     }
 
     private static string BuildPageIdentity(Uri pageUrl, string? mediaSessionKey = null)

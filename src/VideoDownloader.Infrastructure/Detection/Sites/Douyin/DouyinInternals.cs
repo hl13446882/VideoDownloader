@@ -113,9 +113,20 @@ internal static class DouyinPlayEvidence
         if (e.StatusCode == 206 || !string.IsNullOrWhiteSpace(range))
         {
             if (System.Net.Http.Headers.ContentRangeHeaderValue.TryParse(range, out var parsed) &&
-                parsed.Unit.Equals("bytes", StringComparison.OrdinalIgnoreCase) && parsed.HasRange &&
-                parsed.Length is > 0 && parsed.To < parsed.Length)
-                return parsed.Length;
+                parsed.Unit.Equals("bytes", StringComparison.OrdinalIgnoreCase) &&
+                parsed.HasRange &&
+                parsed.Length is > 0 &&
+                parsed.From is not null &&
+                parsed.To is not null)
+            {
+                var window = parsed.To.Value - parsed.From.Value + 1;
+                // Tiny MSE Range windows must not advertise the full VOD size — that made
+                // 64KiB crumbs look like 10MB and UI/download picked undownloadable URLs.
+                if (window <= MediaResourceSizeFilter.MinDisplayBytes)
+                    return null;
+                if (parsed.To.Value < parsed.Length.Value)
+                    return parsed.Length;
+            }
             return null;
         }
         return e.ContentLength is > 0 ? e.ContentLength : null;

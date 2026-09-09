@@ -88,6 +88,51 @@ internal static class DouyinObservationScript
             }
             return [...new Set(urls)];
           };
+          const collectDouyinPlayUrls = record => {
+            const urls=[];
+            const push=v=>{
+              if(typeof v==='string' && /^https?:/i.test(v) &&
+                 !/\.(jpg|jpeg|png|webp|gif|svg)([?#]|$)/i.test(v) &&
+                 !/(?:byteimg|douyinpic)\./i.test(v))
+                urls.push(v);
+              else if(v&&typeof v==='object'){
+                for(const k of ['urlList','url_list','playAddr','play_addr','downloadAddr','download_addr','uri','url']){
+                  const child=v[k];
+                  if(Array.isArray(child)) child.forEach(push);
+                  else push(child);
+                }
+              }
+            };
+            if(!record) return urls;
+            push(record.video||{});
+            push(record.video?.play_addr||record.video?.playAddr);
+            push(record.video?.download_addr||record.video?.downloadAddr);
+            push(record.music||{});
+            return [...new Set(urls)];
+          };
+          const findAwemeRecordById = expectedId => {
+            if(!expectedId) return null;
+            const roots=[];
+            const push=v=>{if(v&&typeof v==='object')roots.push(v);};
+            try{
+              const el=document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
+              if(el?.textContent) push(JSON.parse(el.textContent));
+            }catch{}
+            try{push(window.__UNIVERSAL_DATA_FOR_REHYDRATION__);}catch{}
+            const seen=new WeakSet(); let budget=1200;
+            const find=(value,depth)=>{
+              if(!value||typeof value!=='object'||value instanceof Node||seen.has(value)||depth>12||--budget<0) return null;
+              seen.add(value);
+              const id = value.aweme_id||value.itemId||value.videoId||value.id||value.modal_id||value.note_id;
+              const hasVideo = !!(value.video||value.playAddr||value.play_addr);
+              if(hasVideo && String(id)===String(expectedId)) return value;
+              if(Array.isArray(value)){ for(const c of value.slice(0,40)){const r=find(c,depth+1); if(r) return r;} }
+              else { for(const c of Object.values(value)){const r=find(c,depth+1); if(r) return r;} }
+              return null;
+            };
+            for(const root of roots){ const r=find(root,0); if(r) return r; }
+            return null;
+          };
           const observeDouyinAlbum = () => {
             let record=null;
             const currentRecord=playerRecord(activePlayer());
@@ -173,8 +218,14 @@ internal static class DouyinObservationScript
             const stablePage = ids.some(k => new URL(location.href).searchParams.has(k)) || /\/(video|note)\/[^/]+/.test(location.pathname);
             if(!stablePage && !explicit) return null;
             const identity = stablePage ? base : location.host + ':' + explicit;
+            const awemeId=(explicit.match(/(\d{10,})/)||[])[1]
+              || (location.search.match(/modal_id=(\d{10,})/)||[])[1]
+              || (location.pathname.match(/\/(?:video|note)\/(\d{10,})/)||[])[1];
+            const dataRecord = findAwemeRecordById(awemeId) || record;
+            const fromData = collectDouyinPlayUrls(dataRecord);
+            const fromPlayer=[active.currentSrc,active.src,...[...active.querySelectorAll('source')].map(e=>e.src)].filter(u=>/^https?:/i.test(u||''));
             return { type:'vd-video-identity', identity, caption, href:location.href,
-              media:[...new Set([active.currentSrc,active.src,...[...active.querySelectorAll('source')].map(e=>e.src)].filter(u=>/^https?:/i.test(u||'')))] };
+              media:[...new Set([...fromPlayer, ...fromData])] };
           };
           window.__vdProbe=()=>{
             const observation=window.__vdObserve(); if(!observation) return null;
