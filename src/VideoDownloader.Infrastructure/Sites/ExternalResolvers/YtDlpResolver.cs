@@ -233,19 +233,47 @@ public sealed class YtDlpResolver : IExternalSiteResolver
             return [];
         }
 
+        Diagnostics.HangProbe.Mark("ytdlp.process.start", $"pid={process.Id} url={SanitizedLogger.SanitizeUrl(resolveUrl)}");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
         using var registration = timeout.Token.Register(() =>
         {
+            Diagnostics.HangProbe.Mark("ytdlp.kill", $"pid={process.Id}");
             try { process.Kill(entireProcessTree: true); }
             catch (InvalidOperationException) { }
             catch (System.ComponentModel.Win32Exception) { }
         });
         var outputTask = process.StandardOutput.ReadToEndAsync();
         var errorTask = process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync(CancellationToken.None);
-        var output = await outputTask;
-        var error = await errorTask;
+        try
+        {
+            Diagnostics.HangProbe.Mark("ytdlp.WaitForExit.begin", $"pid={process.Id}");
+            await process.WaitForExitAsync(timeout.Token);
+            Diagnostics.HangProbe.Mark("ytdlp.WaitForExit.end", $"pid={process.Id} code={process.ExitCode}");
+        }
+        catch (OperationCanceledException)
+        {
+            Diagnostics.HangProbe.Mark("ytdlp.WaitForExit.canceled", $"pid={process.Id}");
+            try { process.Kill(entireProcessTree: true); } catch { /* ignore */ }
+            LastError = "yt-dlp 单次解析超时（30 秒）";
+            return [];
+        }
+        Diagnostics.HangProbe.Mark("ytdlp.ReadToEnd.begin", $"pid={process.Id}");
+        string output;
+        string error;
+        try
+        {
+            output = await outputTask.WaitAsync(TimeSpan.FromSeconds(10));
+            error = await errorTask.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (TimeoutException)
+        {
+            Diagnostics.HangProbe.Mark("ytdlp.ReadToEnd.TIMEOUT", $"pid={process.Id}");
+            LastError = "yt-dlp 输出读取超时";
+            try { process.Kill(entireProcessTree: true); } catch { /* ignore */ }
+            return [];
+        }
+        Diagnostics.HangProbe.Mark("ytdlp.ReadToEnd.end", $"outLen={output.Length} errLen={error.Length}");
         ct.ThrowIfCancellationRequested();
         if (timeout.IsCancellationRequested)
         {

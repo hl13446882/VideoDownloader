@@ -24,12 +24,43 @@ public static partial class DownloadFileNameBuilder
         if (!IsUsableStemTitle(title))
         {
             // Sole fallback for weak 文案 when building a download stem — do not invent DisplayTitle elsewhere.
-            return BuildHostDateResolutionFallback(video.PageUrl, variant.Height);
+            title = BuildHostDateResolutionFallback(video.PageUrl, null);
         }
 
         var quality = variant.Height is > 0 ? $"{variant.Height}p" : null;
-        var stem = string.IsNullOrWhiteSpace(quality) ? title : title + "_" + quality;
-        return ClampStem(stem);
+        var size = variant.TotalContentLength is > 0 ? FormatSizeToken(variant.TotalContentLength.Value) : null;
+        var format = string.IsNullOrWhiteSpace(variant.Container) ||
+                     variant.Container.Equals("album", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : variant.Container;
+
+        var suffixParts = new[] { quality, size, format }.Where(s => !string.IsNullOrWhiteSpace(s)).ToArray();
+        if (suffixParts.Length == 0)
+            return ClampStem(title);
+
+        var suffix = "_" + string.Join("_", suffixParts);
+        // Prefer keeping size/format; elide title to fit MaxStemLength.
+        var budget = MaxStemLength - TextLength(suffix);
+        var head = ElideText(title, Math.Max(1, budget));
+        if (string.IsNullOrWhiteSpace(head))
+            head = "v";
+        return ClampStem(head + suffix);
+    }
+
+    private static string FormatSizeToken(long bytes)
+    {
+        string[] units = ["B", "KB", "MB", "GB"];
+        double size = bytes;
+        var i = 0;
+        while (size >= 1024 && i < units.Length - 1)
+        {
+            size /= 1024;
+            i++;
+        }
+
+        return i == 0
+            ? $"{bytes}B"
+            : string.Create(CultureInfo.InvariantCulture, $"{size:0.#}{units[i]}");
     }
 
     /// <summary>

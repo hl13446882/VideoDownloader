@@ -386,7 +386,9 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             return;
 
         var session = _pipeline.SessionId;
+        Diagnostics.HangProbe.Mark("host.probe.begin", $"session={session:N} page={CurrentPageUrl.AbsoluteUri}");
         var scriptJson = await ExecuteProbeScriptAsync(ct);
+        Diagnostics.HangProbe.Mark("host.probe.afterScript", $"session={session:N} jsonLen={scriptJson?.Length ?? 0}");
         ct.ThrowIfCancellationRequested();
         if (session != _pipeline.SessionId || !_captureEnabled) return;
         var pageUrl = ExtractPageUrl(scriptJson) ?? CurrentPageUrl;
@@ -398,7 +400,9 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         // Do NOT NotifyPageIdentityChanged here — probe href/title jitter was restarting
         // the full detection cycle (Clear) and canceling ffprobe before results appeared.
         var context = CaptureCurrentContext(pageUrl, pageUrl);
+        Diagnostics.HangProbe.Mark("host.probe.beforePipeline", pageUrl.AbsoluteUri);
         await _pipeline.ProbePageAsync(pageUrl, title, scriptJson, context, ct, runExternal: false);
+        Diagnostics.HangProbe.Mark("host.probe.end", $"session={_pipeline.SessionId:N}");
     }
 
     private async Task<string?> ExecuteProbeScriptAsync(CancellationToken ct)
@@ -409,6 +413,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         async Task<string?> RunAsync()
         {
             var session = _pipeline.SessionId;
+            Diagnostics.HangProbe.Mark("host.script.RunAsync", $"session={session:N} onUi={_uiDispatcher.CheckAccess()}");
             var script = """
                 (() => {
                   const observation = window.__vdProbe?.() ?? window.__vdObserve?.();
@@ -419,15 +424,19 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
                 })();
                 """.Replace("ADDRESS_DISCOVERY", MediaAddressDiscoveryScript.Expression);
             ct.ThrowIfCancellationRequested();
+            Diagnostics.HangProbe.Mark("host.script.ExecuteScript.begin", $"session={session:N}");
             var json = DecodeScriptResult(await _core.ExecuteScriptAsync(script).WaitAsync(ct));
+            Diagnostics.HangProbe.Mark("host.script.ExecuteScript.end", $"session={session:N} len={json?.Length ?? 0}");
             if (session != _pipeline.SessionId || string.IsNullOrWhiteSpace(json)) return null;
             var payload = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
             // Always harvest cross-frame player addresses (MacCMS / iframe HLS). Do not
             // gate on missing identity — pages may have a document title without media.
             try
             {
+                Diagnostics.HangProbe.Mark("host.frameDiscovery.begin", $"session={session:N}");
                 var addresses = await FrameAddressDiscovery.CollectAsync(_core.CallDevToolsProtocolMethodAsync,
                     () => session == _pipeline.SessionId && _captureEnabled, ct);
+                Diagnostics.HangProbe.Mark("host.frameDiscovery.end", $"session={session:N} count={addresses.Count}");
                 if (addresses.Count > 0)
                 {
                     if (payload["candidates"] is not System.Text.Json.Nodes.JsonArray)
@@ -445,13 +454,26 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
                     _logger.LogInformation("Address discovery session={Session} frameCandidates={Count}", session, addresses.Count);
                 }
             }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested) { _logger.LogInformation("Frame discovery timed out session={Session}", session); }
-            catch (Exception ex) when (ex is not OperationCanceledException) { _logger.LogInformation("Frame discovery unavailable session={Session} reason={Reason}", session, ex.GetType().Name); }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                Diagnostics.HangProbe.Mark("host.frameDiscovery.timeout", $"session={session:N}");
+                _logger.LogInformation("Frame discovery timed out session={Session}", session);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                Diagnostics.HangProbe.Mark("host.frameDiscovery.fail", ex.GetType().Name);
+                _logger.LogInformation("Frame discovery unavailable session={Session} reason={Reason}", session, ex.GetType().Name);
+            }
             return session == _pipeline.SessionId ? payload.ToJsonString() : null;
         }
 
         if (!_uiDispatcher.CheckAccess())
-            return await _uiDispatcher.InvokeAsync(RunAsync, DispatcherPriority.Background).Task.Unwrap();
+        {
+            Diagnostics.HangProbe.Mark("host.script.InvokeAsync.begin");
+            var result = await _uiDispatcher.InvokeAsync(RunAsync, DispatcherPriority.Background).Task.Unwrap();
+            Diagnostics.HangProbe.Mark("host.script.InvokeAsync.end");
+            return result;
+        }
 
         return await RunAsync();
     }

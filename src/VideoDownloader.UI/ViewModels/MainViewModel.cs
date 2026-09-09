@@ -10,6 +10,7 @@ using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Core.Naming;
 using VideoDownloader.Infrastructure.Browser;
+using VideoDownloader.Infrastructure.Diagnostics;
 using VideoDownloader.UI.Localization;
 
 namespace VideoDownloader.UI.ViewModels;
@@ -877,13 +878,17 @@ public sealed partial class MainViewModel : ObservableObject
     {
         try
         {
+            HangProbe.Mark("vm.session.begin", pageUrl.AbsoluteUri);
             await Application.Current.Dispatcher.InvokeAsync(() => SetStatusKey("status.probeWaiting"));
 
             // Let CDP/WebResource capture accumulate before the single page pass.
             // Feed players (blob + delayed playAddr) often need longer than a short settle.
             await Task.Delay(TimeSpan.FromSeconds(3), token);
             if (generation != _pageGeneration)
+            {
+                HangProbe.Mark("vm.session.stale.afterDelay", $"gen={generation}/{_pageGeneration}");
                 return;
+            }
 
             var host = SelectedTab?.Host;
             if (host is not null)
@@ -891,17 +896,23 @@ public sealed partial class MainViewModel : ObservableObject
                 for (var grace = 0; grace < 6; grace++)
                 {
                     if (generation != _pageGeneration || token.IsCancellationRequested)
+                    {
+                        HangProbe.Mark("vm.grace.abort", $"i={grace}");
                         return;
+                    }
                     try
                     {
+                        HangProbe.Mark("vm.grace.probe.begin", $"i={grace}");
                         await host.ProbeCurrentPageAsync(token);
+                        HangProbe.Mark("vm.grace.probe.end", $"i={grace}");
                     }
                     catch (OperationCanceledException) when (token.IsCancellationRequested)
                     {
                         return;
                     }
-                    catch
+                    catch (Exception ex)
                     {
+                        HangProbe.Mark("vm.grace.probe.fail", $"i={grace} {ex.GetType().Name}");
                         // Probe warnings must not abort the session.
                     }
 
@@ -914,6 +925,7 @@ public sealed partial class MainViewModel : ObservableObject
                         videoDenied = availability is MediaAvailabilityKind.AudioOnly
                             or MediaAvailabilityKind.VideoDenied;
                     });
+                    HangProbe.Mark("vm.grace.check", $"i={grace} found={found} denied={videoDenied}");
                     // Audio-only / video-denied is not a finished VOD discovery — keep probing DOM/network.
                     if (found && !videoDenied)
                         break;
@@ -923,7 +935,9 @@ public sealed partial class MainViewModel : ObservableObject
             }
 
             await Application.Current.Dispatcher.InvokeAsync(() => SetStatusKey("status.probeRunning"));
+            HangProbe.Mark("vm.pagePass.begin", pageUrl.AbsoluteUri);
             await RunPagePassAsync(pageUrl, pageTitle, token, generation, runExternal: true);
+            HangProbe.Mark("vm.pagePass.end", $"videos={DetectedVideos.Count}");
 
             await Application.Current.Dispatcher.InvokeAsync(() =>
             {
@@ -942,12 +956,15 @@ public sealed partial class MainViewModel : ObservableObject
                 else
                     SetStatusKey("status.probeEmptyExt", hint);
             });
+            HangProbe.Mark("vm.session.end", $"videos={DetectedVideos.Count}");
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
+            HangProbe.Mark("vm.session.canceled");
         }
         catch (Exception ex)
         {
+            HangProbe.Mark("vm.session.fail", ex.GetType().Name + " " + ex.Message);
             await Application.Current.Dispatcher.InvokeAsync(
                 () => SetStatusKey("status.probeFailed", ex.Message),
                 System.Windows.Threading.DispatcherPriority.Background);
@@ -984,8 +1001,11 @@ public sealed partial class MainViewModel : ObservableObject
                 {
                     try
                     {
+                        HangProbe.Mark("vm.pagePass.refresh.begin");
                         await tab.Host.RefreshContextSnapshotAsync(token);
+                        HangProbe.Mark("vm.pagePass.probe1.begin");
                         await tab.Host.ProbeCurrentPageAsync(token);
+                        HangProbe.Mark("vm.pagePass.probe1.end");
                     }
                     catch (OperationCanceledException) when (token.IsCancellationRequested)
                     {
@@ -993,6 +1013,7 @@ public sealed partial class MainViewModel : ObservableObject
                     }
                     catch (Exception ex)
                     {
+                        HangProbe.Mark("vm.pagePass.probe1.fail", ex.GetType().Name);
                         // Cookie/DOM probe failures must not abort the whole detection session.
                         SetStatusKey("status.contextWarn", ex.Message);
                     }
@@ -1005,13 +1026,22 @@ public sealed partial class MainViewModel : ObservableObject
                 // ProbeCurrentPageAsync already ingested DOM JSON with runExternal:false.
                 // Run external (yt-dlp) exactly when requested for this pass.
                 if (runExternal)
+                {
+                    HangProbe.Mark("vm.pagePass.pipelineExternal.begin");
                     await _pipeline.ProbePageAsync(pageUrl, pageTitle, null, context, token, runExternal: true);
+                    HangProbe.Mark("vm.pagePass.pipelineExternal.end");
+                }
 
                 // Late playAddr / network video often arrives after yt-dlp returns audio-only.
                 // One more DOM ingest before sealing discovery keeps app and verifier aligned.
                 if (runExternal && tab?.IsInitialized == true)
                 {
-                    try { await tab.Host.ProbeCurrentPageAsync(token); }
+                    try
+                    {
+                        HangProbe.Mark("vm.pagePass.probe2.begin");
+                        await tab.Host.ProbeCurrentPageAsync(token);
+                        HangProbe.Mark("vm.pagePass.probe2.end");
+                    }
                     catch (OperationCanceledException) when (token.IsCancellationRequested) { return; }
                     catch { /* enrichment only */ }
                 }
@@ -1019,7 +1049,11 @@ public sealed partial class MainViewModel : ObservableObject
             System.Windows.Threading.DispatcherPriority.Background).Task.Unwrap();
         token.ThrowIfCancellationRequested();
         if (generation == _pageGeneration)
+        {
+            HangProbe.Mark("vm.completeDiscovery.begin");
             await _pipeline.CompleteDiscoveryAsync(token);
+            HangProbe.Mark("vm.completeDiscovery.end", $"completed={_pipeline.IsCompleted}");
+        }
     }
 
     [RelayCommand]
@@ -1361,6 +1395,8 @@ public sealed partial class MainViewModel : ObservableObject
             existing.Update(video);
             existing.ReplaceVariants(video);
             RepositionDetectedVideo(existing);
+            if (IsExclusiveSiteId(video.SiteId))
+                PruneOtherVideosForPage(video.PageUrl, video.VideoId);
             if (focus)
                 FocusLargestVideoVariant(existing);
             SetStatusKey(_pipeline.IsCompleted ? "status.probeDone" : "status.probeFound", DetectedVideos.Count);
@@ -1373,10 +1409,16 @@ public sealed partial class MainViewModel : ObservableObject
         vm.ReplaceVariants(video);
         _videoMap[video.VideoId] = vm;
         InsertDetectedVideo(vm);
+        // Exclusive sites keep one card (largest/current work); Generic may keep multi-video cards.
+        if (IsExclusiveSiteId(video.SiteId))
+            PruneOtherVideosForPage(video.PageUrl, video.VideoId);
         if (focus)
             FocusLargestVideoVariant(vm);
         SetStatusKey(_pipeline.IsCompleted ? "status.probeDone" : "status.probeFound", DetectedVideos.Count);
     }
+
+    private static bool IsExclusiveSiteId(string siteId) =>
+        siteId is SiteIds.Douyin or SiteIds.TikTok or SiteIds.YouTube or SiteIds.Bilibili;
 
     private void FocusLargestVideoVariant(DetectedVideoViewModel vm)
     {

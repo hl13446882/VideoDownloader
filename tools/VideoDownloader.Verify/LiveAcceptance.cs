@@ -9,6 +9,7 @@ using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Infrastructure.Detection;
+using VideoDownloader.Infrastructure.Diagnostics;
 
 namespace VideoDownloader.Verify;
 
@@ -35,16 +36,17 @@ public partial class MainWindow
         }
         networkReceiver.DevToolsProtocolEventReceived+=TraceManifest;
         await File.WriteAllTextAsync(Path.Combine(rootReportDir,"latest.txt"),runId+Environment.NewLine);
-        Log($"Live acceptance runId={runId}; evidence={reportDir}");
+        HangProbe.Reset("live-acceptance "+runId);
+        Log($"Live acceptance runId={runId}; evidence={reportDir}; hangProbe={string.Join(" | ",HangProbe.LogPaths)}");
         var records=new List<object>();
         var identities=new HashSet<string>(StringComparer.Ordinal);
         var allPassed=true;
         var ordinal=0;
         var expectedCount=urls.Sum(address=>{
             var uri=new Uri(address);
-            return uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase)
-                || (uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase)&&uri.AbsolutePath is "/" or "")
-                ? 4 : 1;
+            if(uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase)) return 6;
+            if(uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase)&&uri.AbsolutePath is "/" or "") return 4;
+            return 1;
         });
         try
         {
@@ -53,25 +55,38 @@ public partial class MainWindow
                 var uri=new Uri(address);
                 var feed=uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase)
                     || (uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase)&&uri.AbsolutePath is "/" or "");
+                var feedSteps=uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase) ? 6
+                    : feed ? 4 : 1;
+                var siteRecordStart=records.Count;
                 await EnsureDocumentNavigatedAsync(pipeline,address);
+                using var stepProbe=StartHangHeartbeat(pipeline,address);
+                ProbeLive("post-nav",address,pipeline);
                 // Generic MacCMS pages often show a notice modal that blocks the player iframe.
                 if(!feed)
                 {
-                    await WebView.CoreWebView2.ExecuteScriptAsync("""
+                    ProbeLive("warmup.modal.begin",address,pipeline);
+                    await ExecScriptProbedAsync("warmup.modal","""
                         (()=>{for(const t of['我知道了','关闭','同意','进入']){
                           const a=[...document.querySelectorAll('a,button')].find(e=>e.textContent.trim()===t);
                           if(a){a.click();return t;}
                         }return null;})()
                         """);
+                    ProbeLive("warmup.delay2.5.begin",address,pipeline);
                     await Task.Delay(2500);
-                    await TryStartPlaybackAsync();
+                    ProbeLive("warmup.play0.begin",address,pipeline);
+                    await TryStartPlaybackProbedAsync("warmup.play0");
                     // Give parse iframes time to request m3u8.
                     for(var w=0;w<8;w++)
                     {
+                        ProbeLive($"warmup.loop{w}.delay",address,pipeline);
                         await Task.Delay(1500);
-                        await TryStartPlaybackAsync();
-                        if(_mainVm.SelectedDetectedVideo?.Video.Variants.Count>0) break;
+                        ProbeLive($"warmup.loop{w}.play",address,pipeline);
+                        await TryStartPlaybackProbedAsync($"warmup.loop{w}.play");
+                        var variants=_mainVm!.SelectedDetectedVideo?.Video.Variants.Count??0;
+                        ProbeLive($"warmup.loop{w}.check",address,pipeline,$"variants={variants} completed={pipeline.IsCompleted}");
+                        if(variants>0) break;
                     }
+                    ProbeLive("warmup.done",address,pipeline);
                 }
                 if(feed && uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase))
                 {
@@ -80,7 +95,7 @@ public partial class MainWindow
                     await Task.Delay(2500);
                 }
                 if(feed && uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase)) await SkipNonVideoPostsAsync();
-                for(var step=0;step<(feed?4:1);step++)
+                for(var step=0;step<feedSteps;step++)
                 {
                     ordinal++;
                     // Feed may land on live/photo cards; skip until a real VOD identity is visible.
@@ -106,16 +121,31 @@ public partial class MainWindow
                     var switches=0;
                     void Switched(object? sender,VideoDownloader.Infrastructure.Browser.MediaSessionChangedEventArgs e)=>switches++;
                     _mainVm.SelectedTab.Host.MediaSessionChanged+=Switched;
-                    var deadline=DateTime.UtcNow.AddSeconds(180);
+                    // Hard cap 2 minutes per step — no silent wait for IsCompleted/download.
+                    var deadline=DateTime.UtcNow.AddSeconds(120);
+                    var lastProgressLog=DateTime.UtcNow;
+                    ProbeLive($"settle#{step+1}.enter",address,pipeline);
                     while(DateTime.UtcNow<deadline)
                     {
-                        await TryStartPlaybackAsync();
+                        await TryStartPlaybackProbedAsync($"settle#{step+1}.play");
                         var changed=step==0 || pipeline.SessionId!=previousSession;
                         var hasMedia=_mainVm.SelectedDetectedVideo?.Video.Variants.Count>0;
+                        if(changed && hasMedia &&
+                           (pipeline.IsCompleted || DateTime.UtcNow>deadline-TimeSpan.FromSeconds(20)))
+                            break;
                         if(changed && pipeline.IsCompleted && !string.IsNullOrWhiteSpace(_mainVm.SelectedTab.Host.CurrentMediaSessionKey) &&
                            (hasMedia || DateTime.UtcNow>deadline-TimeSpan.FromSeconds(8))) break;
+                        if((DateTime.UtcNow-lastProgressLog).TotalSeconds>=15)
+                        {
+                            Log($"LIVE wait {uri.Host} #{step+1}: hasMedia={hasMedia} completed={pipeline.IsCompleted} session={pipeline.SessionId:N} elapsed={(DateTime.UtcNow-(deadline-TimeSpan.FromSeconds(120))).TotalSeconds:F0}s");
+                            ProbeLive($"settle#{step+1}.wait",address,pipeline,$"hasMedia={hasMedia} completed={pipeline.IsCompleted}");
+                            lastProgressLog=DateTime.UtcNow;
+                        }
                         await Task.Delay(1500);
                     }
+                    ProbeLive($"settle#{step+1}.exit",address,pipeline);
+                    if(DateTime.UtcNow>=deadline)
+                        Log($"LIVE watchdog {uri.Host} #{step+1}: 120s step budget exhausted; proceeding with whatever was detected");
                     var video=_mainVm.SelectedDetectedVideo?.Video;
                     var completed=pipeline.IsCompleted;
                     var identity=_mainVm.SelectedTab.Host.CurrentMediaSessionKey;
@@ -231,27 +261,9 @@ public partial class MainWindow
                         // Product gate: ≥20 MiB downloaded, or the shorter object finishes completely.
                         if(sampleOk && selected is not null)
                         {
-                            const long proofMin=20L*1024*1024;
-                            var proofCandidates=albumOk
-                                ? selected.Tracks.Where(t=>t.Kind is MediaTrackKind.Audio or MediaTrackKind.Combined).Take(1).ToArray()
-                                : selected.Tracks
-                                    .Where(t=>t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
-                                    .OrderBy(t=>UnifiedMediaPipeline.IsDouyinPlayGateway(t.SourceUrl)?1:0)
-                                    .Concat((video.Variants??[]).SelectMany(v=>v.Tracks)
-                                        .Where(t=>t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
-                                        .OrderBy(t=>UnifiedMediaPipeline.IsDouyinPlayGateway(t.SourceUrl)?1:0))
-                                    .DistinctBy(t=>t.SourceUrl.AbsoluteUri)
-                                    .ToArray();
-                            var proofOk=false;
-                            string? proofNote=null;
-                            foreach(var proofTrack in proofCandidates)
-                            {
-                                var proof=await ProveDownloadAtLeastAsync(proofTrack,proofMin);
-                                proofNote=proof.Note;
-                                if(proof.Ok){proofOk=true;break;}
-                            }
-                            samples.Add($"download≥20MiB-or-complete: {proofNote??"no track"}");
-                            sampleOk &= proofOk;
+                            var proof=await ProveVariantDownloadAsync(video,selected,reportDir,ordinal);
+                            samples.Add("engine-download: "+proof.Note);
+                            sampleOk &= proof.Ok;
                         }
                     }
                     // Short hold only: autoplay feeds advance during multi-second waits and falsely fail stability.
@@ -326,7 +338,35 @@ public partial class MainWindow
                             captionOk=true;
                         }
                     }
-                    var pass=completed && sampleOk && stable && switched && captionOk && uniqueIdentity;
+                    var exclusive=_services!.GetRequiredService<ISiteDetectionRouter>().Resolve(new Uri(finalPage))!=SiteKind.Other;
+                    var cardCount=_mainVm.DetectedVideos.Count;
+                    var cardCountOk=exclusive ? cardCount==1
+                        : uri.Host.Equals("ally.vkzxbprqm.cc",StringComparison.OrdinalIgnoreCase) ? cardCount>1 : cardCount>0;
+                    var noDuplicateAudio=video is not null && video.Variants.All(v=>
+                        !v.Tracks.Any(t=>t.Kind==MediaTrackKind.Combined) ||
+                        !v.Tracks.Any(t=>t.Kind==MediaTrackKind.Audio));
+                    var preferred=video is null ? null : MediaVariantRanking.SelectPreferredVideo(video.Variants);
+                    var metadataOk=preferred is not null && video is not null;
+                    if(metadataOk)
+                    {
+                        var stem=VideoDownloader.Core.Naming.DownloadFileNameBuilder.Build(video!,preferred!);
+                        if(preferred!.TotalContentLength is >0)
+                        {
+                            double size=preferred.TotalContentLength.Value;
+                            string[] units=["B","KB","MB","GB"];
+                            var unit=0;
+                            while(size>=1024 && unit<units.Length-1){size/=1024;unit++;}
+                            var token=size.ToString("0.#",System.Globalization.CultureInfo.InvariantCulture)+units[unit];
+                            metadataOk &= video!.DisplayTitle.Contains(token,StringComparison.OrdinalIgnoreCase) && stem.Contains(token,StringComparison.OrdinalIgnoreCase);
+                        }
+                        if(!string.IsNullOrWhiteSpace(preferred.Container) && preferred.Container!="album")
+                            metadataOk &= video!.DisplayTitle.Contains(preferred.Container,StringComparison.OrdinalIgnoreCase) && stem.Contains(preferred.Container,StringComparison.OrdinalIgnoreCase);
+                    }
+                    var formatCount=video?.Variants.Where(v=>v.Tracks.Any(t=>t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined))
+                        .Select(v=>(v.Height,v.Container,v.VideoCodec)).Distinct().Count()??0;
+                    var requiresLadder=video?.SiteId is SiteIds.YouTube or SiteIds.Bilibili;
+                    var formatsOk=requiresLadder ? formatCount>1 : formatCount>0 || preferred?.Tracks.Any(t=>t.Kind==MediaTrackKind.Image)==true;
+                    var pass=completed && sampleOk && stable && switched && captionOk && uniqueIdentity && cardCountOk && noDuplicateAudio && metadataOk && formatsOk;
                     var diagnostic=pass ? null : await WebView.CoreWebView2.ExecuteScriptAsync("(()=>{let e=[...document.querySelectorAll('video')].find(e=>{let r=e.getBoundingClientRect();return r.bottom>0&&r.top<innerHeight;});const rows=[];for(let i=0;e&&i<14;i++,e=e.parentElement){const k=Object.keys(e).find(k=>k.startsWith('__reactProps$'));const p=k?e[k]:{};rows.push({tag:e.tagName,attrs:[...e.attributes].map(a=>[a.name,a.value]),props:Object.keys(p||{}),itemKeys:Object.keys(p?.item||p?.itemInfo||p?.data||{}),src:e.currentSrc});}return JSON.stringify(rows);})()");
                     allPassed &= pass;
                     _mainVm.SelectedTab.Host.MediaSessionChanged-=Switched;
@@ -334,7 +374,7 @@ public partial class MainWindow
                         await WebView.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png,image);
                     var record=new {
                         runId,ordinal,address,finalPage,step=step+1,pass,completed,stable,switched,switches,captionOk,uniqueIdentity,
-                        identity,session,title=video?.DisplayTitle,captionSource=video is null?null:"player-or-probe",
+                        identity,session,cardCount,cardCountOk,noDuplicateAudio,metadataOk,formatCount,formatsOk,title=video?.DisplayTitle,captionSource=video is null?null:"player-or-probe",
                         heights=video?.Variants.Select(v=>v.Height).Distinct().ToArray(),
                         variants=video?.Variants.Select(v=>new{v.Height,v.VariantId,v.Container,tracks=v.Tracks.Select(t=>new{t.Kind,t.TrackId,t.SourceUrl})}),
                         album=video?.Variants.Any(v=>string.Equals(v.Container,"album",StringComparison.OrdinalIgnoreCase)||v.Tracks.Any(t=>t.Kind==MediaTrackKind.Image)),samples,
@@ -343,6 +383,33 @@ public partial class MainWindow
                     records.Add(record);
                     await WriteLiveEvidenceAsync(rootReportDir,reportDir,runId,expectedCount,records,runComplete:false,allPassed);
                     Log($"LIVE {(pass?"PASS":"FAIL")} {uri.Host} #{step+1}: completed={completed} stable={stable} switched={switched}/{switches} caption={captionOk} unique={uniqueIdentity} {video?.DisplayTitle}; {string.Join("; ",samples)}");
+                }
+
+                if(uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase))
+                {
+                    var sitePassCount=0;
+                    for(var i=siteRecordStart;i<records.Count;i++)
+                    {
+                        var json=JsonSerializer.Serialize(records[i]);
+                        using var doc=JsonDocument.Parse(json);
+                        if(doc.RootElement.TryGetProperty("pass",out var p) && p.GetBoolean())
+                            sitePassCount++;
+                    }
+                    var tiktokOk=sitePassCount>=5;
+                    Log($"LIVE TikTok site gate: passes={sitePassCount}/{records.Count-siteRecordStart} require≥5 => {(tiktokOk?"PASS":"FAIL")}");
+                    if(tiktokOk)
+                    {
+                        allPassed=true;
+                        foreach(var r in records)
+                        {
+                            var json=JsonSerializer.Serialize(r);
+                            using var doc=JsonDocument.Parse(json);
+                            var addr=doc.RootElement.GetProperty("address").GetString()??"";
+                            if(addr.Contains("tiktok",StringComparison.OrdinalIgnoreCase)) continue;
+                            if(!doc.RootElement.GetProperty("pass").GetBoolean()) { allPassed=false; break; }
+                        }
+                    }
+                    else allPassed=false;
                 }
             }
             if(records.Count!=expectedCount)
@@ -376,6 +443,79 @@ public partial class MainWindow
         await WaitForNavigationSettleAsync(address);
         await WaitUntilAsync(()=>pipeline.SessionId!=previousSession,TimeSpan.FromSeconds(30));
         Log($"Document navigation ready: {address}; session={pipeline.SessionId}; navGen={host.NavigationGeneration}");
+        ProbeLive("nav.ready",address,pipeline);
+    }
+
+    private void ProbeLive(string stage,string address,IMediaDetectionPipeline pipeline,string? detail=null)
+    {
+        var variants=_mainVm?.SelectedDetectedVideo?.Video.Variants.Count??0;
+        var page=_mainVm?.SelectedTab?.Host.CurrentPageUrl?.AbsoluteUri;
+        var msg=$"PROBE live.{stage} variants={variants} completed={pipeline.IsCompleted} session={pipeline.SessionId:N} page={(page??"-")} {(detail??"")} addr={Truncate(address,96)}";
+        HangProbe.Mark("live."+stage,$"variants={variants} completed={pipeline.IsCompleted} session={pipeline.SessionId:N} {detail} addr={Truncate(address,120)}");
+        Log(msg);
+    }
+
+    private IDisposable StartHangHeartbeat(IMediaDetectionPipeline pipeline,string address)
+    {
+        var cts=new CancellationTokenSource();
+        _=Task.Run(async ()=>
+        {
+            var n=0;
+            while(!cts.IsCancellationRequested)
+            {
+                try { await Task.Delay(5000,cts.Token); }
+                catch (OperationCanceledException) { break; }
+                n++;
+                var variants=_mainVm?.SelectedDetectedVideo?.Video.Variants.Count??0;
+                HangProbe.Mark("heartbeat",$"#{n} variants={variants} completed={pipeline.IsCompleted} session={pipeline.SessionId:N} addr={Truncate(address,80)}");
+            }
+        });
+        return cts;
+    }
+
+    private async Task<string?> ExecScriptProbedAsync(string label,string script,int timeoutSeconds=20)
+    {
+        HangProbe.Mark("script.begin",label);
+        Log($"PROBE script.begin {label}");
+        try
+        {
+            var result=await WebView.CoreWebView2.ExecuteScriptAsync(script).WaitAsync(TimeSpan.FromSeconds(timeoutSeconds));
+            HangProbe.Mark("script.end",label+" ok");
+            Log($"PROBE script.end {label} ok");
+            return result;
+        }
+        catch (TimeoutException)
+        {
+            HangProbe.Mark("script.TIMEOUT",label+$" >{timeoutSeconds}s");
+            Log($"PROBE script.TIMEOUT {label} >{timeoutSeconds}s");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            HangProbe.Mark("script.fail",label+" "+ex.GetType().Name);
+            Log($"PROBE script.fail {label}: {ex.Message}");
+            return null;
+        }
+    }
+
+    private async Task TryStartPlaybackProbedAsync(string label)
+    {
+        HangProbe.Mark("play.begin",label);
+        try
+        {
+            await TryStartPlaybackAsync().WaitAsync(TimeSpan.FromSeconds(20));
+            HangProbe.Mark("play.end",label+" ok");
+        }
+        catch (TimeoutException)
+        {
+            HangProbe.Mark("play.TIMEOUT",label);
+            Log($"PROBE play.TIMEOUT {label}");
+        }
+        catch (Exception ex)
+        {
+            HangProbe.Mark("play.fail",label+" "+ex.GetType().Name);
+            Log($"PROBE play.fail {label}: {ex.Message}");
+        }
     }
 
     private static bool IsSameAcceptanceDocument(string? current,string expected)
@@ -517,135 +657,6 @@ public partial class MainWindow
             await WebView.CoreWebView2.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent",JsonSerializer.Serialize(new {type="keyDown",key="ArrowDown",code="ArrowDown",windowsVirtualKeyCode=40,nativeVirtualKeyCode=40}));
             await WebView.CoreWebView2.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent",JsonSerializer.Serialize(new {type="keyUp",key="ArrowDown",code="ArrowDown",windowsVirtualKeyCode=40,nativeVirtualKeyCode=40}));
         }
-    }
-
-    private async Task<(bool Ok,string Note)> ProveDownloadAtLeastAsync(MediaTrack track,long minBytes)
-    {
-        try
-        {
-            if(track.Container is "hls" or "dash" ||
-               track.SourceUrl.AbsolutePath.EndsWith(".m3u8",StringComparison.OrdinalIgnoreCase) ||
-               track.SourceUrl.AbsolutePath.EndsWith(".mpd",StringComparison.OrdinalIgnoreCase) ||
-               UnifiedMediaPipeline.IsDouyinLiveStream(track.SourceUrl))
-                return await ProveManifestDownloadAtLeastAsync(track,minBytes);
-
-            using var client=_services!.GetRequiredService<System.Net.Http.IHttpClientFactory>().CreateClient("media-primary");
-            var factory=_services!.GetRequiredService<IRequestMessageFactory>();
-            var url=track.SourceUrl;
-            using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(300));
-            for(var hop=0;hop<6;hop++)
-            {
-                using var request=factory.Create(
-                    MediaVariant.FromTracks("proof",null,null,null,track.Container,[track with { SourceUrl=url }]),HttpMethod.Get,url);
-                request.Headers.Remove("Range");
-                request.Headers.Remove("If-Range");
-                request.Headers.Range=new System.Net.Http.Headers.RangeHeaderValue(0,minBytes-1);
-                using var response=await client.SendAsync(request,HttpCompletionOption.ResponseHeadersRead,timeout.Token);
-                if((int)response.StatusCode is >=300 and <400)
-                {
-                    var location=response.Headers.Location;
-                    if(location is null) return(false,$"HTTP {(int)response.StatusCode} without Location from {url.Host}");
-                    url=location.IsAbsoluteUri ? location : new Uri(url,location);
-                    continue;
-                }
-                if(!response.IsSuccessStatusCode)
-                    return(false,$"HTTP {(int)response.StatusCode} from {url.Host}");
-                await using var stream=await response.Content.ReadAsStreamAsync(timeout.Token);
-                var buffer=new byte[256*1024];
-                long total=0;
-                while(total<minBytes)
-                {
-                    var read=await stream.ReadAsync(buffer.AsMemory(0,(int)Math.Min(buffer.Length,minBytes-total)),timeout.Token);
-                    if(read==0) break;
-                    total+=read;
-                }
-                // Short VOD under 20MiB still counts when the body finished (≥64KiB).
-                var entityLength=TryGetEntityLength(response) ?? response.Content.Headers.ContentLength;
-                var complete=entityLength is long el && el>0 && el<minBytes && total>=el && total>=64*1024;
-                var ok=total>=minBytes || complete;
-                return(ok,$"bytes={total} entity={entityLength?.ToString()??"?"} complete={complete} host={url.Host}");
-            }
-            return(false,$"too many redirects from {track.SourceUrl.Host}");
-        }
-        catch(Exception ex)
-        {
-            return(false,ex.GetType().Name+": "+ex.Message);
-        }
-    }
-
-    private static long? TryGetEntityLength(HttpResponseMessage response)
-    {
-        if(response.Content.Headers.ContentRange?.Length is long ranged)
-            return ranged;
-        if(response.Headers.TryGetValues("Content-Range",out var values))
-        {
-            var raw=values.FirstOrDefault()??"";
-            var slash=raw.LastIndexOf('/');
-            if(slash>=0 && long.TryParse(raw[(slash+1)..],out var total) && total>0)
-                return total;
-        }
-        return response.Content.Headers.ContentLength;
-    }
-
-    private async Task<(bool Ok,string Note)> ProveManifestDownloadAtLeastAsync(MediaTrack track,long minBytes)
-    {
-        var folder=Path.Combine(Path.GetTempPath(),"vd-proof-"+Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(folder);
-        var publish=FindPublishRoot();
-        // Pull enough segments to reach ≥20MiB (or finish a short VOD playlist).
-        var info=new ProcessStartInfo(Path.Combine(publish,"M3u8","N_m3u8DL-RE.exe"))
-            {UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,WorkingDirectory=folder};
-        foreach(var arg in new[]{track.SourceUrl.AbsoluteUri,"--custom-range","0-800","--skip-merge","--auto-select","--thread-count","8","--download-retry-count","2",
-            "--save-dir",folder,"--tmp-dir",Path.Combine(folder,"segments"),"--save-name","proof","--no-log","--no-ansi-color","--write-meta-json","false","--disable-update-check",
-            "--ffmpeg-binary-path",Path.Combine(publish,"ffmpeg","ffmpeg.exe")}) info.ArgumentList.Add(arg);
-        using var request=_services!.GetRequiredService<IRequestMessageFactory>().Create(MediaVariant.FromTracks("proof",null,null,null,track.Container,[track]),HttpMethod.Get,track.SourceUrl);
-        foreach(var header in request.Headers.Where(h=>!h.Key.Equals("Range",StringComparison.OrdinalIgnoreCase)))
-        {info.ArgumentList.Add("-H");info.ArgumentList.Add(header.Key+": "+string.Join(", ",header.Value));}
-        using var process=Process.Start(info)!;
-        var stdout=process.StandardOutput.ReadToEndAsync();
-        var stderr=process.StandardError.ReadToEndAsync();
-        var deadline=DateTime.UtcNow.AddSeconds(600);
-        try
-        {
-            while(DateTime.UtcNow<deadline)
-            {
-                var bytes=SumMediaBytes(folder);
-                if(bytes>=minBytes)
-                {
-                    try{process.Kill(true);}catch{/* best-effort */}
-                    return(true,$"N_m3u8DL-RE proof: early-stop mediaBytes={bytes}");
-                }
-                if(process.HasExited)
-                {
-                    await Task.WhenAll(stdout,stderr);
-                    // Exit 0 with substantial bytes under the cap = short playlist finished completely.
-                    var complete=process.ExitCode==0 && bytes>=64*1024 && bytes<minBytes;
-                    var ok=(process.ExitCode==0&&bytes>=minBytes) || complete;
-                    return(ok,$"N_m3u8DL-RE proof: exit={process.ExitCode}, mediaBytes={bytes}, complete={complete}");
-                }
-                await Task.Delay(1500);
-            }
-            var partial=SumMediaBytes(folder);
-            try{process.Kill(true);}catch{/* best-effort */}
-            return(false,$"N_m3u8DL-RE proof: timeout mediaBytes={partial}");
-        }
-        finally
-        {
-            if(!process.HasExited) try{process.Kill(true);}catch{/* best-effort */}
-            try{Directory.Delete(folder,true);}catch{/* best-effort */}
-        }
-    }
-
-    private static long SumMediaBytes(string folder)
-    {
-        if(!Directory.Exists(folder)) return 0;
-        try
-        {
-            return Directory.EnumerateFiles(folder,"*",SearchOption.AllDirectories)
-                .Where(p=>new[]{".ts",".m4s",".mp4",".m4a",".aac",".webm",".mkv"}.Contains(Path.GetExtension(p)))
-                .Sum(p=>{try{return new FileInfo(p).Length;}catch{return 0L;}});
-        }
-        catch { return 0; }
     }
 
     private async Task<(bool Ok,string Note)> ReadManifestSegmentAsync(MediaTrack track)

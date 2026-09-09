@@ -50,4 +50,9 @@ public sealed record MediaDescriptor(
     string? Author = null)
 {
     public Guid SessionId { get; init; }
+
+    /// <summary>
+    /// Pre-built format ladder (e.g. yt-dlp heights). When set, mapper prefers these over Video/Audio.
+    /// </summary>
+    public IReadOnlyList<MediaVariant> Formats { get; init; } = [];
 }

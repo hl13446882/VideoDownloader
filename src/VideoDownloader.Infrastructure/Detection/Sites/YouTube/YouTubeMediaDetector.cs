@@ -18,6 +18,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
     private string? _caption;
     private RequestContext _context = RequestContext.CreateEmpty();
     private readonly List<MediaTrack> _tracks = [];
+    private readonly List<MediaVariant> _formats = [];
     private bool _failed;
     private string? _failureReason;
     private bool _externalAttempted;
@@ -72,9 +73,10 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
                 return Task.CompletedTask;
             if (e.StatusCode is not (200 or 206 or null)) return Task.CompletedTask;
 
+            // Only googlevideo / videoplayback — never admit youtube.com page documents as media.
             var isPlayback = e.Url.Host.Contains("googlevideo.com", StringComparison.OrdinalIgnoreCase) ||
                              e.Url.AbsolutePath.Contains("/videoplayback", StringComparison.OrdinalIgnoreCase);
-            if (!isPlayback && !IsBrowserPlay(e)) return Task.CompletedTask;
+            if (!isPlayback) return Task.CompletedTask;
 
             var hasMime = url.Contains("mime=video", StringComparison.OrdinalIgnoreCase) ||
                           url.Contains("mime=audio", StringComparison.OrdinalIgnoreCase);
@@ -115,17 +117,32 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
 
         // YouTube owns its external resolve; never via Unified.
         _externalAttempted = true;
+        Diagnostics.HangProbe.Mark("youtube.ytdlp.begin", _pageUrl.AbsoluteUri);
         try
         {
             var videos = await _external.ResolveAsync(_pageUrl, _context, ct);
+            Diagnostics.HangProbe.Mark("youtube.ytdlp.end", $"count={videos.Count}");
             lock (_gate)
             {
                 foreach (var v in videos.Where(v =>
                              string.IsNullOrWhiteSpace(_contentId) ||
-                             string.Equals(v.SiteContentId, _contentId, StringComparison.OrdinalIgnoreCase)))
+                             string.Equals(v.SiteContentId, _contentId, StringComparison.OrdinalIgnoreCase) ||
+                             string.IsNullOrWhiteSpace(v.SiteContentId)))
                 {
                     if (string.IsNullOrWhiteSpace(_caption) && !string.IsNullOrWhiteSpace(v.DisplayTitle))
                         _caption = v.DisplayTitle;
+                    foreach (var variant in v.Variants)
+                    {
+                        // Reject Combined+extra-audio remux packs; keep ladder and audio-only.
+                        if (variant.Tracks.Any(t => t.Kind == MediaTrackKind.Combined) &&
+                            variant.Tracks.Any(t => t.Kind == MediaTrackKind.Audio))
+                            continue;
+                        _formats.Add(variant with
+                        {
+                            ContentIdentity = _contentId is null ? variant.ContentIdentity : "id:" + _contentId,
+                            RecoveryPageUrl = _pageUrl
+                        });
+                    }
                     foreach (var track in v.Variants.SelectMany(x => x.Tracks))
                         Upsert(track with
                         {
@@ -136,6 +153,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         }
         catch (Exception ex)
         {
+            Diagnostics.HangProbe.Mark("youtube.ytdlp.fail", ex.GetType().Name + " " + ex.Message);
             _logger.LogInformation(ex, "YouTube exclusive yt-dlp resolve failed (no Generic fallback)");
         }
     }
@@ -161,6 +179,24 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
     private MediaDescriptor? Build()
     {
         if (_pageUrl is null) return null;
+
+        if (_formats.Count > 0)
+        {
+            var best = _formats
+                .Where(v => v.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined))
+                .OrderByDescending(v => v.Height ?? 0)
+                .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
+                .FirstOrDefault();
+            return new MediaDescriptor(SiteIds.YouTube, _pageUrl, _contentId, MediaContentType.Video,
+                best?.Tracks.FirstOrDefault(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined),
+                best?.Tracks.FirstOrDefault(t => t.Kind == MediaTrackKind.Audio),
+                [], _context, 0.95, _caption)
+            {
+                SessionId = _sessionId,
+                Formats = _formats.ToArray()
+            };
+        }
+
         var video = _tracks
             .Where(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
             .OrderByDescending(t => t.BrowserObserved)
@@ -235,6 +271,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         _caption = null;
         _context = RequestContext.CreateEmpty();
         _tracks.Clear();
+        _formats.Clear();
         _failed = false;
         _failureReason = null;
         _externalAttempted = false;

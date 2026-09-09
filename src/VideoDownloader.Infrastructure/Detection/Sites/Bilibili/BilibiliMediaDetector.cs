@@ -18,6 +18,7 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
     private string? _caption;
     private RequestContext _context = RequestContext.CreateEmpty();
     private readonly List<MediaTrack> _tracks = [];
+    private readonly List<MediaVariant> _formats = [];
     private bool _failed;
     private string? _failureReason;
     private bool _externalAttempted;
@@ -127,6 +128,17 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
                         continue;
                     if (string.IsNullOrWhiteSpace(_caption) && !string.IsNullOrWhiteSpace(v.DisplayTitle))
                         _caption = v.DisplayTitle;
+                    foreach (var variant in v.Variants)
+                    {
+                        if (variant.Tracks.Any(t => t.Kind == MediaTrackKind.Combined) &&
+                            variant.Tracks.Any(t => t.Kind == MediaTrackKind.Audio))
+                            continue;
+                        _formats.Add(variant with
+                        {
+                            ContentIdentity = _contentId is null ? variant.ContentIdentity : "id:" + _contentId,
+                            RecoveryPageUrl = _pageUrl
+                        });
+                    }
                     foreach (var track in v.Variants.SelectMany(x => x.Tracks))
                         Upsert(track with
                         {
@@ -162,6 +174,23 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
     private MediaDescriptor? Build()
     {
         if (_pageUrl is null) return null;
+        if (_formats.Count > 0)
+        {
+            var best = _formats
+                .Where(v => v.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined))
+                .OrderByDescending(v => v.Height ?? 0)
+                .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
+                .FirstOrDefault();
+            return new MediaDescriptor(SiteIds.Bilibili, _pageUrl, _contentId, MediaContentType.Video,
+                best?.Tracks.FirstOrDefault(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined),
+                best?.Tracks.FirstOrDefault(t => t.Kind == MediaTrackKind.Audio),
+                [], _context, 0.95, _caption)
+            {
+                SessionId = _sessionId,
+                Formats = _formats.ToArray()
+            };
+        }
+
         var video = _tracks
             .Where(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
             .OrderByDescending(t => t.BrowserObserved)
@@ -176,7 +205,8 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
             return new MediaDescriptor(SiteIds.Bilibili, _pageUrl, _contentId, MediaContentType.Audio,
                 null, audio, [], _context, 0.7, _caption) { SessionId = _sessionId };
         return new MediaDescriptor(SiteIds.Bilibili, _pageUrl, _contentId, MediaContentType.Video,
-            video, audio, [], _context, video.BrowserObserved ? 0.95 : 0.8, _caption) { SessionId = _sessionId };
+            video, video.Kind == MediaTrackKind.Combined ? null : audio, [], _context,
+            video.BrowserObserved ? 0.95 : 0.8, _caption) { SessionId = _sessionId };
     }
 
     private void ApplyJson(string? json)
@@ -233,6 +263,7 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
         _caption = null;
         _context = RequestContext.CreateEmpty();
         _tracks.Clear();
+        _formats.Clear();
         _failed = false;
         _failureReason = null;
         _externalAttempted = false;

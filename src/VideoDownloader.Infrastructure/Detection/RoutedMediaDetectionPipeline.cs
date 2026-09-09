@@ -3,6 +3,7 @@ using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Core.Sites;
+using VideoDownloader.Infrastructure.Diagnostics;
 
 namespace VideoDownloader.Infrastructure.Detection;
 
@@ -64,7 +65,7 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
         {
             lock (_gate)
                 return _active is not null
-                    ? _session.Phase == DetectionPhase.Completed
+                    ? _exclusiveCompleted || _session.Phase == DetectionPhase.Completed
                     : _unified.IsCompleted;
         }
     }
@@ -157,78 +158,97 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
     public async Task CompleteDiscoveryAsync(CancellationToken ct)
     {
         IExclusiveSiteMediaDetector? exclusive;
+        DetectionSession session;
         lock (_gate)
         {
             exclusive = _active;
-            if (exclusive is null)
-            {
-                // fall through outside lock
-            }
-            else
-            {
-                // seal exclusive session then complete detector
-            }
+            session = _session;
         }
 
+        HangProbe.Mark("route.complete.begin", exclusive?.Name ?? "unified");
         if (exclusive is null)
         {
             await _unified.CompleteDiscoveryAsync(ct).ConfigureAwait(false);
+            HangProbe.Mark("route.complete.unified.end");
             return;
         }
 
-        Task idle;
-        lock (_gate)
-            idle = _session.CompleteAsync(ct);
-
+        // Finish detector first so UI gets results even if CDP leases linger.
+        HangProbe.Mark("route.complete.detector.begin", exclusive.Name);
         await exclusive.CompleteAsync(ct).ConfigureAwait(false);
-        await idle.ConfigureAwait(false);
+        HangProbe.Mark("route.complete.detector.end", exclusive.Name);
 
         lock (_gate)
         {
-            if (_exclusiveCompleted) return;
-            _exclusiveCompleted = true;
-
-            if (exclusive.Failed)
+            if (!ReferenceEquals(session, _session) || !ReferenceEquals(exclusive, _active))
             {
-                _logger.LogWarning(
-                    "Exclusive detection failed site={Site} detector={Detector} reason={Reason} (GenericPipeline=NotUsed)",
-                    exclusive.Site, exclusive.Name, exclusive.FailureReason);
-                _lastBuilt = [];
-                PageProbed?.Invoke(this, []);
+                HangProbe.Mark("route.complete.staleSession");
                 return;
             }
-
-            // Descriptors may already have been emitted via event; rebuild if empty.
-            if (_lastBuilt.Count == 0)
+            if (!_exclusiveCompleted)
             {
-                _logger.LogInformation(
-                    "Exclusive detection completed with no descriptors site={Site} detector={Detector}",
-                    exclusive.Site, exclusive.Name);
-                PageProbed?.Invoke(this, []);
-            }
-            else
-            {
-                PageProbed?.Invoke(this, _lastBuilt);
+                _exclusiveCompleted = true;
+                if (exclusive.Failed)
+                {
+                    _logger.LogWarning(
+                        "Exclusive detection failed site={Site} detector={Detector} reason={Reason} (GenericPipeline=NotUsed)",
+                        exclusive.Site, exclusive.Name, exclusive.FailureReason);
+                    _lastBuilt = [];
+                    PageProbed?.Invoke(this, []);
+                }
+                else if (_lastBuilt.Count == 0)
+                {
+                    _logger.LogInformation(
+                        "Exclusive detection completed with no descriptors site={Site} detector={Detector}",
+                        exclusive.Site, exclusive.Name);
+                    PageProbed?.Invoke(this, []);
+                }
+                else
+                {
+                    PageProbed?.Invoke(this, _lastBuilt);
+                }
             }
         }
+
+        // Best-effort seal; never block forever on open discovery leases.
+        try
+        {
+            Task idle;
+            lock (_gate)
+                idle = session.CompleteAsync(ct);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(8));
+            HangProbe.Mark("route.complete.idle.begin");
+            await idle.WaitAsync(timeout.Token).ConfigureAwait(false);
+            HangProbe.Mark("route.complete.idle.end");
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            HangProbe.Mark("route.complete.idle.timeout");
+            _logger.LogInformation("Exclusive session idle wait ended; results already emitted or session replaced");
+            lock (_gate)
+                session.Cancel();
+        }
+        HangProbe.Mark("route.complete.end");
     }
 
     private void EnsureRouteUnlocked(Uri pageUrl)
     {
         var kind = _router.Resolve(pageUrl);
         var detector = kind == SiteKind.Other ? null : _detectors.Resolve(pageUrl);
+        var sameHost = _page is not null &&
+                       string.Equals(_page.Host, pageUrl.Host, StringComparison.OrdinalIgnoreCase);
+        var sameRoute = sameHost && _kind == kind && ReferenceEquals(_active, detector);
+        var sameWork = sameRoute && SameExclusiveWork(_page!, pageUrl, kind);
 
-        if (_page is not null &&
-            string.Equals(_page.Host, pageUrl.Host, StringComparison.OrdinalIgnoreCase) &&
-            _kind == kind &&
-            ReferenceEquals(_active, detector))
+        if (sameWork)
         {
             _page = pageUrl;
             return;
         }
 
-        // Host / site kind changed — reset exclusive state; keep unified cleared for exclusive.
-        if (_active is not null || detector is not null)
+        // Host / site / work identity changed — reset exclusive state.
+        if (_active is not null || detector is not null || !sameHost)
         {
             ClearExclusiveUnlocked();
             _session.Cancel();
@@ -257,6 +277,54 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
                 "[DetectionRouter] Site=Other Detector=UnifiedMediaPipeline Exclusive=false GenericPipeline=Active page={Path}",
                 pageUrl.AbsolutePath);
         }
+    }
+
+    private static bool SameExclusiveWork(Uri previous, Uri next, SiteKind kind)
+    {
+        if (kind == SiteKind.Other)
+            return string.Equals(previous.AbsoluteUri, next.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+
+        return kind switch
+        {
+            SiteKind.YouTube => string.Equals(ExtractYouTubeId(previous), ExtractYouTubeId(next), StringComparison.Ordinal),
+            SiteKind.Bilibili => string.Equals(ExtractBilibiliId(previous), ExtractBilibiliId(next), StringComparison.OrdinalIgnoreCase),
+            SiteKind.Douyin => string.Equals(ExtractDigitId(previous), ExtractDigitId(next), StringComparison.Ordinal),
+            SiteKind.TikTok => string.Equals(ExtractDigitId(previous), ExtractDigitId(next), StringComparison.Ordinal),
+            _ => string.Equals(previous.AbsoluteUri, next.AbsoluteUri, StringComparison.OrdinalIgnoreCase)
+        };
+    }
+
+    private static string? ExtractYouTubeId(Uri page)
+    {
+        if (page.Host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase))
+            return page.AbsolutePath.Trim('/').Split('/').FirstOrDefault();
+        var v = System.Text.RegularExpressions.Regex.Match(page.Query, @"[?&]v=([^&]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (v.Success) return v.Groups[1].Value;
+        var shorts = System.Text.RegularExpressions.Regex.Match(page.AbsolutePath, @"/shorts/([^/?#]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return shorts.Success ? shorts.Groups[1].Value : null;
+    }
+
+    private static string? ExtractBilibiliId(Uri page)
+    {
+        var bv = System.Text.RegularExpressions.Regex.Match(page.AbsolutePath, @"/video/(BV[\w]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return bv.Success ? bv.Groups[1].Value : null;
+    }
+
+    private static string? ExtractDigitId(Uri page)
+    {
+        var path = System.Text.RegularExpressions.Regex.Match(page.AbsolutePath, @"/(?:video|note)/(?<id>\d{10,})", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (path.Success) return path.Groups["id"].Value;
+        foreach (var key in new[] { "modal_id=", "item_id=", "aweme_id=" })
+        {
+            var idx = page.Query.IndexOf(key, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) continue;
+            var start = idx + key.Length;
+            var end = page.Query.IndexOf('&', start);
+            var raw = end < 0 ? page.Query[start..] : page.Query[start..end];
+            if (System.Text.RegularExpressions.Regex.IsMatch(raw, @"^\d{10,}$"))
+                return raw;
+        }
+        return null;
     }
 
     private void ClearExclusiveUnlocked()
