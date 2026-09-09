@@ -188,11 +188,14 @@
                 </GroupBox>
 
                 <GroupBox Grid.Row="1" Header="{Binding L.SideQueue}" Margin="0,4,0,4">
-                    <ListBox ItemsSource="{Binding DownloadJobs}"
+                    <ListBox x:Name="DownloadQueueList"
+                             ItemsSource="{Binding DownloadJobs}"
                              SelectedItem="{Binding SelectedDownloadJob, Mode=TwoWay}"
+                             SelectionMode="Multiple"
                              BorderThickness="0"
                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                              ToolTip="{Binding L.QueueTooltip}"
+                             SelectionChanged="OnDownloadQueueSelectionChanged"
                              MouseDoubleClick="OnDownloadQueueDoubleClick"
                              PreviewMouseRightButtonDown="OnDownloadQueuePreviewMouseRightButtonDown">
                         <ListBox.ContextMenu>
@@ -203,6 +206,9 @@
                                 <MenuItem Header="{Binding PlacementTarget.DataContext.L.MenuRename, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                           Click="OnDownloadQueueRenameClick"
                                           IsEnabled="{Binding PlacementTarget.DataContext.CanRenameSelected, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                <MenuItem Header="{Binding PlacementTarget.DataContext.L.MenuOpenFolder, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                          Command="{Binding PlacementTarget.DataContext.OpenSelectedFolderCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                          IsEnabled="{Binding PlacementTarget.DataContext.CanOpenSelectedFolder, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
                                 <MenuItem Header="{Binding PlacementTarget.DataContext.L.MenuOpenUrl, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                           Command="{Binding PlacementTarget.DataContext.OpenSelectedPageCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                           IsEnabled="{Binding PlacementTarget.DataContext.CanOpenSelectedPage, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>

@@ -15,12 +15,14 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _timer;
     private readonly Dictionary<Guid, WebView2> _webViews = new();
     private bool _isClosing;
+    private bool _suppressQueueSelectionSync;
 
     public MainWindow(MainViewModel viewModel)
     {
         InitializeComponent();
         _viewModel = viewModel;
         DataContext = _viewModel;
+        _viewModel.RestoreQueueSelection = RestoreDownloadQueueSelection;
 
         _timer = new DispatcherTimer(DispatcherPriority.Background)
         {
@@ -32,6 +34,48 @@ public partial class MainWindow : Window
         Loaded += OnLoadedAsync;
         Closing += OnClosing;
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
+    }
+
+    private void OnDownloadQueueSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressQueueSelectionSync || sender is not ListBox list)
+            return;
+
+        var selected = list.SelectedItems.Cast<DownloadJobViewModel>().ToList();
+        var primary = list.SelectedItem as DownloadJobViewModel ?? selected.LastOrDefault();
+        _viewModel.SetSelectedDownloadJobs(selected, primary);
+    }
+
+    private void RestoreDownloadQueueSelection(IReadOnlyList<Guid> ids)
+    {
+        if (ids.Count == 0)
+            return;
+
+        _suppressQueueSelectionSync = true;
+        try
+        {
+            DownloadQueueList.SelectedItems.Clear();
+            DownloadJobViewModel? primary = null;
+            foreach (var vm in _viewModel.DownloadJobs)
+            {
+                if (!ids.Contains(vm.Job.Id))
+                    continue;
+                DownloadQueueList.SelectedItems.Add(vm);
+                primary = vm;
+            }
+
+            if (primary is not null)
+                DownloadQueueList.SelectedItem = primary;
+        }
+        finally
+        {
+            _suppressQueueSelectionSync = false;
+        }
+
+        OnDownloadQueueSelectionChanged(DownloadQueueList, new SelectionChangedEventArgs(
+            System.Windows.Controls.Primitives.Selector.SelectionChangedEvent,
+            Array.Empty<object>(),
+            Array.Empty<object>()));
     }
 
     private void OnDownloadQueueDoubleClick(object sender, MouseButtonEventArgs e)
@@ -117,7 +161,13 @@ public partial class MainWindow : Window
             ItemsControl.ContainerFromElement(list, source) is not ListBoxItem item)
             return;
 
-        item.IsSelected = true;
+        // Explorer-like: right-click unselected row → select only it; already selected → keep multi-select.
+        if (!item.IsSelected)
+        {
+            list.SelectedItems.Clear();
+            item.IsSelected = true;
+        }
+
         item.Focus();
         _viewModel.NotifyQueueCommandsPublic();
     }

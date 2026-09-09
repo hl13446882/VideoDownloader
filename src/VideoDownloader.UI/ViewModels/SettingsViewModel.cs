@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.IO;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -117,5 +119,25 @@ public sealed partial class SettingsViewModel : ObservableObject
         StatusMessage = failed == 0
             ? _loc.Format("settings.clearLogsDone", deleted)
             : _loc.Format("settings.clearLogsPartial", deleted, failed);
+    }
+
+    [RelayCommand]
+    private void OpenLogsFolder()
+    {
+        try
+        {
+            var dir = _appLog.LogDirectory;
+            Directory.CreateDirectory(dir);
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = dir,
+                UseShellExecute = true
+            });
+            StatusMessage = _loc.Format("settings.openLogsFolderDone", dir);
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = _loc.Format("settings.openLogsFolderFailed", ex.Message);
+        }
     }
 }

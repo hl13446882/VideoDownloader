@@ -83,10 +83,12 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             _backendRouter.Resolve(variant) != DownloadBackendKind.DirectHttp)
             throw new DownloadException(ErrorCodes.LicenseLimit, "DEMO cannot start an external download with an unverified size.");
 
-        var saveDir = PathExpander.Expand(_options.Download.DefaultSavePath);
-        if (!PathValidator.IsValidSaveDirectory(saveDir))
+        var rootSaveDir = PathExpander.Expand(_options.Download.DefaultSavePath);
+        if (!PathValidator.IsValidSaveDirectory(rootSaveDir))
             throw new DownloadException(ErrorCodes.InvalidSavePath, "Invalid or inaccessible save directory.");
 
+        // Site-domain subfolder from page URL (not CDN). Rename stays in this directory.
+        var saveDir = DownloadSiteFolder.CombineSaveDirectory(rootSaveDir, pageUrl);
         Directory.CreateDirectory(saveDir);
 
         // Clamp again to the shared filename limit before reserving the target path.

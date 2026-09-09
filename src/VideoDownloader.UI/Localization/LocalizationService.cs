@@ -85,6 +85,7 @@ public sealed partial class LocalizationService : ObservableObject
         OnPropertyChanged(nameof(BtnRemove));
         OnPropertyChanged(nameof(MenuPlay));
         OnPropertyChanged(nameof(MenuRename));
+        OnPropertyChanged(nameof(MenuOpenFolder));
         OnPropertyChanged(nameof(MenuOpenUrl));
         OnPropertyChanged(nameof(MenuPause));
         OnPropertyChanged(nameof(MenuResume));
@@ -101,6 +102,8 @@ public sealed partial class LocalizationService : ObservableObject
         OnPropertyChanged(nameof(SettingsEnableLoggingTip));
         OnPropertyChanged(nameof(SettingsClearLogs));
         OnPropertyChanged(nameof(SettingsClearLogsTip));
+        OnPropertyChanged(nameof(SettingsOpenLogsFolder));
+        OnPropertyChanged(nameof(SettingsOpenLogsFolderTip));
         OnPropertyChanged(nameof(SettingsAutoRecover));
         OnPropertyChanged(nameof(SettingsSave));
         OnPropertyChanged(nameof(SettingsClose));
@@ -131,6 +134,7 @@ public sealed partial class LocalizationService : ObservableObject
     public string BtnRemove => T("btn.remove");
     public string MenuPlay => T("menu.play");
     public string MenuRename => T("menu.rename");
+    public string MenuOpenFolder => T("menu.openFolder");
     public string MenuOpenUrl => T("menu.openUrl");
     public string MenuPause => T("menu.pause");
     public string MenuResume => T("menu.resume");
@@ -147,6 +151,8 @@ public sealed partial class LocalizationService : ObservableObject
     public string SettingsEnableLoggingTip => T("settings.enableLoggingTip");
     public string SettingsClearLogs => T("settings.clearLogs");
     public string SettingsClearLogsTip => T("settings.clearLogsTip");
+    public string SettingsOpenLogsFolder => T("settings.openLogsFolder");
+    public string SettingsOpenLogsFolderTip => T("settings.openLogsFolderTip");
     public string SettingsAutoRecover => T("settings.autoRecover");
     public string SettingsSave => T("settings.save");
     public string SettingsClose => T("settings.close");
@@ -179,6 +185,7 @@ public sealed partial class LocalizationService : ObservableObject
         ["btn.remove"] = ("移除", "Remove"),
         ["menu.play"] = ("播放", "Play"),
         ["menu.rename"] = ("重命名", "Rename"),
+        ["menu.openFolder"] = ("打开所在目录", "Open containing folder"),
         ["menu.openUrl"] = ("打开网址", "Open page"),
         ["menu.pause"] = ("暂停", "Pause"),
         ["menu.resume"] = ("恢复", "Resume"),
@@ -202,6 +209,10 @@ public sealed partial class LocalizationService : ObservableObject
         ["settings.clearLogsDone"] = ("已清理 {0} 个日志文件。", "Cleared {0} log file(s)."),
         ["settings.clearLogsPartial"] = ("已清理 {0} 个，{1} 个未能删除（可能仍被占用）。",
             "Cleared {0}; {1} could not be deleted (may still be in use)."),
+        ["settings.openLogsFolder"] = ("打开日志所在文件夹", "Open logs folder"),
+        ["settings.openLogsFolderTip"] = ("在资源管理器中打开应用日志目录。", "Open the app logs directory in Explorer."),
+        ["settings.openLogsFolderDone"] = ("已打开日志目录：{0}", "Opened logs folder: {0}"),
+        ["settings.openLogsFolderFailed"] = ("无法打开日志目录：{0}", "Cannot open logs folder: {0}"),
         ["settings.autoRecover"] = ("启动时自动恢复已暂停的下载", "Auto-resume paused downloads on startup"),
         ["settings.save"] = ("保存", "Save"),
         ["settings.close"] = ("关闭", "Close"),
@@ -251,6 +262,9 @@ public sealed partial class LocalizationService : ObservableObject
         ["status.playFailed"] = ("无法播放：{0}", "Cannot play: {0}"),
         ["status.noPageUrl"] = ("该任务没有保存原始页面地址。", "This job has no saved page URL."),
         ["status.openedPage"] = ("已打开原始页面：{0}", "Opened original page: {0}"),
+        ["status.folderMissing"] = ("找不到该任务的保存目录。", "Containing folder is missing."),
+        ["status.openedFolder"] = ("已打开所在目录：{0}", "Opened containing folder: {0}"),
+        ["status.openFolderFailed"] = ("无法打开所在目录：{0}", "Cannot open containing folder: {0}"),
         ["status.webviewInitFailed"] = ("浏览器初始化失败：{0}。地址栏仍可输入网址，请检查 WebView2 Runtime。",
             "Browser init failed: {0}. Address bar still works; check WebView2 Runtime."),
         ["status.demoBody"] = ("本机 ID 是 {0}，请联系管理员获取正式版本。\nDEMO 版本仅可下载不超过 10 MiB 的视频或音频文件。",
@@ -267,8 +281,8 @@ public sealed partial class LocalizationService : ObservableObject
         ["job.cancelled"] = ("已取消", "Cancelled"),
         ["job.failed"] = ("失败", "Failed"),
         ["job.fileDeleted"] = ("文件已删除", "File deleted"),
-        ["queue.tooltip"] = ("右键打开任务菜单；双击或右键「播放」均用系统默认播放器打开已完成项",
-            "Right-click for menu; double-click or Play opens completed files with the system player"),
+        ["queue.tooltip"] = ("依次点击可选多行；右键打开任务菜单；双击或右键「播放」用系统默认播放器打开已完成项",
+            "Click rows to multi-select; right-click for menu; double-click or Play opens completed files with the system player"),
         ["dialog.playIncomplete"] = ("下载尚未完成，无法播放。", "Download not finished; cannot play."),
         ["dialog.fileMissing"] = ("文件不存在或已被删除。", "File missing or deleted."),
         ["tab.new"] = ("新标签页", "New tab"),

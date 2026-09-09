@@ -423,32 +423,57 @@ public sealed partial class MainViewModel : ObservableObject
     public ObservableCollection<DetectedVideoViewModel> DetectedVideos { get; } = new();
     public ObservableCollection<DownloadJobViewModel> DownloadJobs { get; } = new();
 
+    /// <summary>Queue multi-selection (click toggles). Batch ops require every selected row to support them.</summary>
+    public IReadOnlyList<DownloadJobViewModel> SelectedDownloadJobs => _selectedDownloadJobs;
+
+    /// <summary>Invoked after queue rebuild so the ListBox can restore multi-selection.</summary>
+    public Action<IReadOnlyList<Guid>>? RestoreQueueSelection { get; set; }
+
+    private readonly List<DownloadJobViewModel> _selectedDownloadJobs = new();
+    private readonly List<Guid> _selectedDownloadJobIds = new();
+
+    private IReadOnlyList<DownloadJobViewModel> EffectiveSelectedJobs =>
+        _selectedDownloadJobs.Count > 0
+            ? _selectedDownloadJobs
+            : SelectedDownloadJob is null
+                ? Array.Empty<DownloadJobViewModel>()
+                : new[] { SelectedDownloadJob };
+
     public bool CanPauseSelected =>
-        SelectedDownloadJob?.Job.Status is DownloadStatus.Downloading;
+        EffectiveSelectedJobs.Count > 0 &&
+        EffectiveSelectedJobs.All(j => j.Job.Status is DownloadStatus.Downloading);
 
     public bool CanResumeSelected =>
-        SelectedDownloadJob?.Job.Status is DownloadStatus.Paused or DownloadStatus.Failed;
+        EffectiveSelectedJobs.Count > 0 &&
+        EffectiveSelectedJobs.All(j => j.Job.Status is DownloadStatus.Paused or DownloadStatus.Failed);
 
     public bool CanCancelSelected =>
-        SelectedDownloadJob is not null &&
-        SelectedDownloadJob.Job.Status is not (
-            DownloadStatus.Completed or DownloadStatus.Failed or DownloadStatus.Removed or DownloadStatus.Cancelled);
+        EffectiveSelectedJobs.Count > 0 &&
+        EffectiveSelectedJobs.All(j => j.Job.Status is not (
+            DownloadStatus.Completed or DownloadStatus.Failed or DownloadStatus.Removed or DownloadStatus.Cancelled));
 
     public bool CanRemoveSelected =>
-        SelectedDownloadJob?.Job.Status is DownloadStatus.Completed or DownloadStatus.Failed;
+        EffectiveSelectedJobs.Count > 0 &&
+        EffectiveSelectedJobs.All(j => j.Job.Status is DownloadStatus.Completed or DownloadStatus.Failed);
 
     public bool CanRenameSelected =>
-        SelectedDownloadJob is not null &&
-        SelectedDownloadJob.Job.Status is not (
+        EffectiveSelectedJobs.Count == 1 &&
+        EffectiveSelectedJobs[0].Job.Status is not (
             DownloadStatus.Cancelled or DownloadStatus.Removed);
 
     public bool CanPlaySelected =>
-        SelectedDownloadJob?.Job.Status == DownloadStatus.Completed &&
-        !string.IsNullOrWhiteSpace(SelectedDownloadJob.Job.TargetPath) &&
-        File.Exists(SelectedDownloadJob.Job.TargetPath);
+        EffectiveSelectedJobs.Count == 1 &&
+        EffectiveSelectedJobs[0].Job.Status == DownloadStatus.Completed &&
+        !string.IsNullOrWhiteSpace(EffectiveSelectedJobs[0].Job.TargetPath) &&
+        File.Exists(EffectiveSelectedJobs[0].Job.TargetPath);
 
     public bool CanOpenSelectedPage =>
-        SelectedDownloadJob?.Job.PageUrl is not null;
+        EffectiveSelectedJobs.Count == 1 &&
+        EffectiveSelectedJobs[0].Job.PageUrl is not null;
+
+    public bool CanOpenSelectedFolder =>
+        EffectiveSelectedJobs.Count == 1 &&
+        TryResolveOpenFolderPath(EffectiveSelectedJobs[0].Job, out _);
 
     public MainViewModel(
         IServiceProvider services,
@@ -634,6 +659,19 @@ public sealed partial class MainViewModel : ObservableObject
     private void ToggleLanguage() => _loc.ToggleLanguage();
 
     partial void OnSelectedDownloadJobChanged(DownloadJobViewModel? value) => NotifyQueueCommands();
+
+    public void SetSelectedDownloadJobs(IEnumerable<DownloadJobViewModel> jobs, DownloadJobViewModel? primary)
+    {
+        _selectedDownloadJobs.Clear();
+        _selectedDownloadJobs.AddRange(jobs);
+        _selectedDownloadJobIds.Clear();
+        _selectedDownloadJobIds.AddRange(_selectedDownloadJobs.Select(j => j.Job.Id));
+
+        if (!ReferenceEquals(SelectedDownloadJob, primary))
+            SelectedDownloadJob = primary;
+        else
+            NotifyQueueCommands();
+    }
 
     [RelayCommand]
     private async Task AddTabAsync()
@@ -1210,16 +1248,36 @@ public sealed partial class MainViewModel : ObservableObject
 
     public void RefreshDownloadJobs()
     {
-        var selectedId = SelectedDownloadJob?.Job.Id;
+        var selectedIds = _selectedDownloadJobIds.Count > 0
+            ? _selectedDownloadJobIds.ToList()
+            : SelectedDownloadJob is null
+                ? new List<Guid>()
+                : new List<Guid> { SelectedDownloadJob.Job.Id };
+        var primaryId = SelectedDownloadJob?.Job.Id;
+
         var jobs = _downloadEngine.GetActiveJobs();
         DownloadJobs.Clear();
         foreach (var job in jobs)
             DownloadJobs.Add(new DownloadJobViewModel(job, _loc));
 
-        SelectedDownloadJob = selectedId is Guid id
-            ? DownloadJobs.FirstOrDefault(j => j.Job.Id == id)
-            : DownloadJobs.FirstOrDefault();
+        _selectedDownloadJobs.Clear();
+        foreach (var id in selectedIds)
+        {
+            var match = DownloadJobs.FirstOrDefault(j => j.Job.Id == id);
+            if (match is not null)
+                _selectedDownloadJobs.Add(match);
+        }
+
+        _selectedDownloadJobIds.Clear();
+        _selectedDownloadJobIds.AddRange(_selectedDownloadJobs.Select(j => j.Job.Id));
+
+        SelectedDownloadJob = primaryId is Guid pid
+            ? DownloadJobs.FirstOrDefault(j => j.Job.Id == pid) ?? _selectedDownloadJobs.LastOrDefault()
+            : _selectedDownloadJobs.LastOrDefault();
+
         NotifyQueueCommands();
+        if (_selectedDownloadJobIds.Count > 0)
+            RestoreQueueSelection?.Invoke(_selectedDownloadJobIds);
     }
 
     public void TickDownloads()
@@ -1241,24 +1299,30 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanPauseSelected))]
     private async Task PauseSelectedAsync()
     {
-        if (SelectedDownloadJob is null) return;
-        await _downloadEngine.PauseAsync(SelectedDownloadJob.Job.Id);
+        var targets = EffectiveSelectedJobs.ToArray();
+        if (targets.Length == 0) return;
+        foreach (var vm in targets)
+            await _downloadEngine.PauseAsync(vm.Job.Id);
         RefreshDownloadJobs();
     }
 
     [RelayCommand(CanExecute = nameof(CanResumeSelected))]
     private async Task ResumeSelectedAsync()
     {
-        if (SelectedDownloadJob is null) return;
-        await _downloadEngine.ResumeAsync(SelectedDownloadJob.Job.Id);
+        var targets = EffectiveSelectedJobs.ToArray();
+        if (targets.Length == 0) return;
+        foreach (var vm in targets)
+            await _downloadEngine.ResumeAsync(vm.Job.Id);
         RefreshDownloadJobs();
     }
 
     [RelayCommand(CanExecute = nameof(CanCancelSelected))]
     private async Task CancelSelectedAsync()
     {
-        if (SelectedDownloadJob is null) return;
-        await _downloadEngine.CancelAsync(SelectedDownloadJob.Job.Id);
+        var targets = EffectiveSelectedJobs.ToArray();
+        if (targets.Length == 0) return;
+        foreach (var vm in targets)
+            await _downloadEngine.CancelAsync(vm.Job.Id);
         SetStatusKey("status.cancelled");
         RefreshDownloadJobs();
     }
@@ -1266,10 +1330,13 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanRemoveSelected))]
     private async Task RemoveSelectedAsync()
     {
-        if (SelectedDownloadJob is null) return;
-        var job = SelectedDownloadJob.Job;
+        var targets = EffectiveSelectedJobs.ToArray();
+        if (targets.Length == 0) return;
+
         var deleteFile = false;
-        if (job.Status == DownloadStatus.Completed && File.Exists(job.TargetPath))
+        var hasCompletedFile = targets.Any(vm =>
+            vm.Job.Status == DownloadStatus.Completed && File.Exists(vm.Job.TargetPath));
+        if (hasCompletedFile)
         {
             var choice = MessageBox.Show(
                 _loc.T("dialog.removeBody"),
@@ -1281,7 +1348,14 @@ public sealed partial class MainViewModel : ObservableObject
             deleteFile = choice == MessageBoxResult.Yes;
         }
 
-        await _downloadEngine.RemoveAsync(job.Id, deleteFile);
+        foreach (var vm in targets)
+        {
+            var removeFile = deleteFile &&
+                             vm.Job.Status == DownloadStatus.Completed &&
+                             File.Exists(vm.Job.TargetPath);
+            await _downloadEngine.RemoveAsync(vm.Job.Id, removeFile);
+        }
+
         SetStatusKey(deleteFile ? "status.removedBoth" : "status.removedRecord");
         RefreshDownloadJobs();
     }
@@ -1289,16 +1363,18 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanRenameSelected))]
     private void BeginRenameSelected()
     {
-        if (SelectedDownloadJob is null || !CanRenameSelected)
+        if (!CanRenameSelected || EffectiveSelectedJobs.Count != 1)
             return;
 
+        var target = EffectiveSelectedJobs[0];
         foreach (var job in DownloadJobs)
         {
-            if (!ReferenceEquals(job, SelectedDownloadJob) && job.IsEditing)
+            if (!ReferenceEquals(job, target) && job.IsEditing)
                 job.CancelEdit();
         }
 
-        SelectedDownloadJob.BeginEdit();
+        SelectedDownloadJob = target;
+        target.BeginEdit();
     }
 
     public async Task CommitRenameAsync(DownloadJobViewModel? vm)
@@ -1341,7 +1417,9 @@ public sealed partial class MainViewModel : ObservableObject
 
     private void OpenSelectedDownloadWithSystemPlayer()
     {
-        var job = SelectedDownloadJob?.Job;
+        var job = EffectiveSelectedJobs.Count == 1
+            ? EffectiveSelectedJobs[0].Job
+            : SelectedDownloadJob?.Job;
         if (job is null)
             return;
 
@@ -1391,7 +1469,9 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanOpenSelectedPage))]
     private async Task OpenSelectedPageAsync()
     {
-        var pageUrl = SelectedDownloadJob?.Job.PageUrl;
+        var pageUrl = EffectiveSelectedJobs.Count == 1
+            ? EffectiveSelectedJobs[0].Job.PageUrl
+            : SelectedDownloadJob?.Job.PageUrl;
         if (pageUrl is null)
         {
             MessageBox.Show(_loc.T("status.noPageUrl"), _loc.DialogTitle, MessageBoxButton.OK, MessageBoxImage.Information);
@@ -1406,6 +1486,86 @@ public sealed partial class MainViewModel : ObservableObject
         SetStatusKey("status.openedPage", pageUrl.AbsoluteUri);
     }
 
+    [RelayCommand(CanExecute = nameof(CanOpenSelectedFolder))]
+    private void OpenSelectedFolder()
+    {
+        if (EffectiveSelectedJobs.Count != 1)
+            return;
+
+        var job = EffectiveSelectedJobs[0].Job;
+        if (!TryResolveOpenFolderPath(job, out var path))
+        {
+            SetStatusKey("status.folderMissing");
+            MessageBox.Show(
+                _loc.T("status.folderMissing"),
+                _loc.DialogTitle,
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        try
+        {
+            if (File.Exists(path))
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "explorer.exe",
+                    Arguments = "/select,\"" + path + "\"",
+                    UseShellExecute = true
+                });
+            }
+            else
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = path,
+                    UseShellExecute = true
+                });
+            }
+
+            SetStatusKey("status.openedFolder", path);
+        }
+        catch (Exception ex)
+        {
+            SetStatusKey("status.openFolderFailed", ex.Message);
+            MessageBox.Show(
+                _loc.Format("status.openFolderFailed", ex.Message),
+                _loc.DialogTitle,
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+    }
+
+    private static bool TryResolveOpenFolderPath(DownloadJob job, out string path)
+    {
+        path = string.Empty;
+        if (string.IsNullOrWhiteSpace(job.TargetPath))
+            return false;
+
+        if (File.Exists(job.TargetPath))
+        {
+            path = job.TargetPath;
+            return true;
+        }
+
+        var partPath = job.TargetPath + ".part";
+        if (File.Exists(partPath))
+        {
+            path = partPath;
+            return true;
+        }
+
+        var dir = Path.GetDirectoryName(job.TargetPath);
+        if (!string.IsNullOrWhiteSpace(dir) && Directory.Exists(dir))
+        {
+            path = dir;
+            return true;
+        }
+
+        return false;
+    }
+
     private void NotifyQueueCommands()
     {
         OnPropertyChanged(nameof(CanPauseSelected));
@@ -1415,6 +1575,7 @@ public sealed partial class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(CanRenameSelected));
         OnPropertyChanged(nameof(CanPlaySelected));
         OnPropertyChanged(nameof(CanOpenSelectedPage));
+        OnPropertyChanged(nameof(CanOpenSelectedFolder));
         PauseSelectedCommand.NotifyCanExecuteChanged();
         ResumeSelectedCommand.NotifyCanExecuteChanged();
         CancelSelectedCommand.NotifyCanExecuteChanged();
@@ -1422,6 +1583,7 @@ public sealed partial class MainViewModel : ObservableObject
         BeginRenameSelectedCommand.NotifyCanExecuteChanged();
         PlaySelectedDownloadCommand.NotifyCanExecuteChanged();
         OpenSelectedPageCommand.NotifyCanExecuteChanged();
+        OpenSelectedFolderCommand.NotifyCanExecuteChanged();
     }
 
     /// <summary>Refresh queue command enablement after right-click selection changes.</summary>
