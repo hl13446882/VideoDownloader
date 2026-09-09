@@ -27,8 +27,10 @@ internal static class MediaAddressRenewal
             catch (DownloadException ex) { errors.Add("alternate:" + ex.ErrorCode); }
             catch (HttpRequestException) { errors.Add("alternate:network"); }
         }
-        page = previous.RecoveryPageUrl ?? RecoveryAddress(page, previous.ContentIdentity) ?? page;
-        // A mutable feed page cannot identify a historical download safely.
+        page = previous.RecoveryPageUrl ?? page;
+        // Feed roots (?recommend=1) are not stable; rebuild a detail URL from content identity.
+        if (!HasStableContentAddress(page))
+            page = RecoveryAddress(page, previous.ContentIdentity) ?? page;
         if (!HasStableContentAddress(page))
             throw new DownloadException(ErrorCodes.ContextExpired, "The feed has no stable video address; rediscover the intended video.");
         foreach (var resolver in resolvers.Where(r => r.IsAvailable).Take(3))

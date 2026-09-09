@@ -8,8 +8,8 @@ if(-not $SkipBuild){
 # Douyin + TikTok + two generic sites. Each item must download ≥20MiB or finish completely.
 $urls=@(
     'https://www.douyin.com/?recommend=1',
-    'https://www.douyin.com/jingxuan?modal_id=7660503158577286451',
-    'https://v.douyin.com/9cY9PQIM6HY/',
+    'https://www.douyin.com/jingxuan',
+    'https://www.douyin.com/video/7683086033290639078',
     'https://www.tiktok.com/',
     'https://www.xmfyy.com/index.php/vod/play/id/290850/sid/1/nid/1.html',
     'https://ally.trytcrae.cc/archives/274269/'

@@ -2,12 +2,23 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Infrastructure.Download;
 
 namespace VideoDownloader.Infrastructure.Detection;
 
 /// <summary>Maps exclusive-detector MediaDescriptor to UI/download DetectedVideo.</summary>
 public static class MediaDescriptorMapper
 {
+    private static Uri ResolveRecoveryPage(MediaDescriptor descriptor)
+    {
+        var page = descriptor.PageUrl;
+        if (MediaAddressRenewal.HasStableContentAddress(page))
+            return page;
+        if (descriptor.MediaId is { Length: > 0 } id)
+            return MediaAddressRenewal.RecoveryAddress(page, "id:" + id) ?? page;
+        return page;
+    }
+
     public static DetectedVideo ToDetectedVideo(MediaDescriptor descriptor, Guid sessionId)
     {
         var variants = BuildVariants(descriptor);
@@ -78,6 +89,7 @@ public static class MediaDescriptorMapper
     {
         if (descriptor.Formats.Count > 0)
         {
+            var recovery = ResolveRecoveryPage(descriptor);
             // Drop illegal "Combined + separate audio remux" duplicates; keep ladder + audio-only modes.
             // Never surface ByteDance MSE adaptive tracks as ordinary download variants.
             return descriptor.Formats
@@ -86,7 +98,20 @@ public static class MediaDescriptorMapper
                 .Where(v => !(v.Tracks.Any(t => t.Kind == MediaTrackKind.Combined) &&
                               v.Tracks.Any(t => t.Kind == MediaTrackKind.Audio && t.TrackId != "audio-extract")))
                 .GroupBy(v => string.Join("|", v.Tracks.Select(t => t.SourceUrl.AbsoluteUri)), StringComparer.OrdinalIgnoreCase)
-                .Select(g => g.OrderByDescending(x => x.TotalContentLength ?? x.Bandwidth ?? 0).First())
+                .Select(g =>
+                {
+                    var best = g.OrderByDescending(x => x.TotalContentLength ?? x.Bandwidth ?? 0).First();
+                    var identity = best.ContentIdentity
+                        ?? (descriptor.MediaId is null ? null : "id:" + descriptor.MediaId);
+                    return best with
+                    {
+                        ContentIdentity = identity,
+                        RecoveryPageUrl = best.RecoveryPageUrl is not null &&
+                                          MediaAddressRenewal.HasStableContentAddress(best.RecoveryPageUrl)
+                            ? best.RecoveryPageUrl
+                            : recovery
+                    };
+                })
                 .OrderByDescending(v => v.Height ?? 0)
                 .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
                 .ToArray();
@@ -131,7 +156,7 @@ public static class MediaDescriptorMapper
                     images) with
                 {
                     ContentIdentity = descriptor.MediaId is null ? null : "id:" + descriptor.MediaId,
-                    RecoveryPageUrl = descriptor.PageUrl
+                    RecoveryPageUrl = ResolveRecoveryPage(descriptor)
                 }
             ];
         }
@@ -157,7 +182,7 @@ public static class MediaDescriptorMapper
                 [descriptor.Video, descriptor.Audio]) with
             {
                 ContentIdentity = descriptor.MediaId is null ? null : "id:" + descriptor.MediaId,
-                RecoveryPageUrl = descriptor.PageUrl
+                RecoveryPageUrl = ResolveRecoveryPage(descriptor)
             });
         }
         else if (descriptor.Video is not null)
@@ -175,7 +200,7 @@ public static class MediaDescriptorMapper
             {
                 Tracks = [track with { Kind = MediaTrackKind.Combined }],
                 ContentIdentity = descriptor.MediaId is null ? null : "id:" + descriptor.MediaId,
-                RecoveryPageUrl = descriptor.PageUrl
+                RecoveryPageUrl = ResolveRecoveryPage(descriptor)
             });
 
             // Audio-only mode may extract from the same Combined URL; not a simultaneous A+V download.
@@ -190,7 +215,7 @@ public static class MediaDescriptorMapper
                     [track with { Kind = MediaTrackKind.Audio, TrackId = "audio-extract", Codec = null }]) with
                 {
                     ContentIdentity = descriptor.MediaId is null ? null : "id:" + descriptor.MediaId,
-                    RecoveryPageUrl = descriptor.PageUrl
+                    RecoveryPageUrl = ResolveRecoveryPage(descriptor)
                 });
             }
         }
@@ -205,7 +230,7 @@ public static class MediaDescriptorMapper
                 [descriptor.Audio]) with
             {
                 ContentIdentity = descriptor.MediaId is null ? null : "id:" + descriptor.MediaId,
-                RecoveryPageUrl = descriptor.PageUrl
+                RecoveryPageUrl = ResolveRecoveryPage(descriptor)
             });
         }
 

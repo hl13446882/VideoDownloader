@@ -8,6 +8,8 @@ using VideoDownloader.Core.Models;
 using VideoDownloader.Core.Naming;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Detection;
+using VideoDownloader.Infrastructure.Detection.Sites.Douyin;
+using VideoDownloader.Infrastructure.Diagnostics;
 using VideoDownloader.Infrastructure.Http;
 using VideoDownloader.Infrastructure.Licensing;
 using VideoDownloader.Infrastructure.Security;
@@ -423,7 +425,9 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             await _repository.SaveAsync(job, cts.Token);
 
             Func<Task> checkpoint = () => _repository.SaveAsync(job, CancellationToken.None);
-            var contextRefreshed = false;
+            var cookieRetried = false;
+            var gatewayRenewed = false;
+            var addressRenewed = false;
 
             while (true)
             {
@@ -434,24 +438,30 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                 }
                 catch (DownloadException ex) when (
                     ex.ErrorCode == ErrorCodes.Http403 &&
-                    !contextRefreshed &&
+                    !(cookieRetried && gatewayRenewed && addressRenewed) &&
                     !cts.IsCancellationRequested)
                 {
-                    contextRefreshed = true;
                     _logger.LogWarning("Job {JobId} media HTTP_403; starting same-content recovery", job.Id);
-                    var pageUrl = job.Variant.RecoveryPageUrl ?? ResolvePageUrl(job) ?? throw new DownloadException(ErrorCodes.ContextExpired,"Original page address is unavailable.");
+                    HangProbe.Mark(
+                        "download.http403",
+                        $"job={job.Id:N} cookies={job.Variant.RequestContext.Cookies.Count} host={job.Variant.SourceUrl.Host} id={job.Variant.ContentIdentity} recovery={job.Variant.RecoveryPageUrl}");
+                    var pageUrl = job.Variant.RecoveryPageUrl ?? ResolvePageUrl(job)
+                        ?? throw new DownloadException(ErrorCodes.ContextExpired, "Original page address is unavailable.");
+                    if (!MediaAddressRenewal.HasStableContentAddress(pageUrl))
+                        pageUrl = MediaAddressRenewal.RecoveryAddress(pageUrl, job.Variant.ContentIdentity) ?? pageUrl;
+
                     var browserObserved = job.Variant.Tracks.Any(t => t.BrowserObserved);
                     var refreshed = await _contextProvider.RefreshContextAsync(
                         pageUrl,
                         job.Variant.SourceUrl,
                         job.Variant.RequestContext,
                         cts.Token,
-                        forceCookies: browserObserved);
+                        forceCookies: browserObserved || !cookieRetried);
 
-                    if (browserObserved)
+                    // Prefer cookie retry once for WebView-sourced URLs; then renew the signed object.
+                    if (browserObserved && !cookieRetried)
                     {
-                        // Same CDN URL already played in WebView2 — refresh cookies and retry
-                        // without yt-dlp renewal (which often returns a different, 403-prone object).
+                        cookieRetried = true;
                         job.Variant = job.Variant.WithRequestContext(refreshed);
                         _logger.LogInformation(
                             "Retrying browser-observed URL for job {JobId} with refreshed cookies version={Version}",
@@ -460,6 +470,49 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                         continue;
                     }
 
+                    cookieRetried = true;
+
+                    // Douyin signed CDN: follow /aweme/v1/play gateway to a fresh progressive object.
+                    if (!gatewayRenewed &&
+                        _availability is not null &&
+                        TryBuildDouyinPlayGateway(job.Variant, pageUrl, out var gateway))
+                    {
+                        gatewayRenewed = true;
+                        try
+                        {
+                            var seed = job.Variant.Tracks.First(t =>
+                                t.Kind is MediaTrackKind.Combined or MediaTrackKind.Video);
+                            var probe = seed with
+                            {
+                                RequestContext = refreshed,
+                                BrowserObserved = false,
+                                IsValidated = false
+                            };
+                            var finalUrl = await _availability.ResolveFinalUrlAsync(probe, gateway, cts.Token);
+                            if (!string.Equals(finalUrl.AbsoluteUri, job.Variant.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
+                            {
+                                job.Variant = ReplaceVariantSource(job.Variant, finalUrl, refreshed);
+                                ResetTransferState(job);
+                                await checkpoint();
+                                _logger.LogInformation(
+                                    "Renewed Douyin play gateway for job {JobId} host={Host}",
+                                    job.Id, finalUrl.Host);
+                                continue;
+                            }
+                        }
+                        catch (Exception gatewayError)
+                        {
+                            _logger.LogWarning(
+                                "Job {JobId} Douyin gateway renew failed: {Reason}",
+                                job.Id,
+                                VideoDownloader.Infrastructure.Logging.SanitizedLogger.SanitizeMessage(gatewayError.Message));
+                        }
+                    }
+
+                    if (addressRenewed)
+                        throw;
+
+                    addressRenewed = true;
                     try
                     {
                         job.Variant = await MediaAddressRenewal.ResolveAsync(pageUrl, job.Variant, refreshed, _resolvers, cts.Token,
@@ -471,15 +524,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                             VideoDownloader.Infrastructure.Logging.SanitizedLogger.SanitizeMessage(recoveryError.Message));
                         throw;
                     }
-                    // Signed-address renewal starts a fresh transfer; old partial bytes are not assumed compatible.
-                    var scratch = Path.Combine(Path.GetDirectoryName(job.TargetPath)!, ".parts", job.Id.ToString("N"));
-                    if (Directory.Exists(scratch)) Directory.Delete(scratch, recursive: true);
-                    if (File.Exists(job.TargetPath + ".part")) File.Delete(job.TargetPath + ".part");
-                    job.DownloadedBytes = 0;
-                    job.TotalBytes = job.Variant.TotalContentLength;
-                    job.ETag = null;
-                    job.LastModified = null;
-                    job.LastErrorCode = null;
+                    ResetTransferState(job);
                     await checkpoint();
                     _logger.LogInformation(
                         "Renewed media address for job {JobId}, context version={Version}",
@@ -835,6 +880,60 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             return uri;
 
         return null;
+    }
+
+    private static bool TryBuildDouyinPlayGateway(MediaVariant variant, Uri pageUrl, out Uri gateway)
+    {
+        gateway = null!;
+        var host = pageUrl.Host;
+        if (!(host.Equals("douyin.com", StringComparison.OrdinalIgnoreCase) ||
+              host.EndsWith(".douyin.com", StringComparison.OrdinalIgnoreCase) ||
+              host.Equals("iesdouyin.com", StringComparison.OrdinalIgnoreCase) ||
+              host.EndsWith(".iesdouyin.com", StringComparison.OrdinalIgnoreCase)))
+            return false;
+
+        string? id = null;
+        if (variant.ContentIdentity is { Length: > 3 } identity &&
+            identity.StartsWith("id:", StringComparison.Ordinal))
+            id = identity[3..];
+        id ??= DouyinIdentity.ExtractIdFromQuery(variant.SourceUrl) ??
+               DouyinIdentity.ExtractAwemeId(pageUrl);
+        if (string.IsNullOrWhiteSpace(id) || !id.All(char.IsDigit))
+            return false;
+
+        gateway = new Uri(
+            $"https://www.douyin.com/aweme/v1/play/?video_id={Uri.EscapeDataString(id)}&ratio=1080p&line=0");
+        return true;
+    }
+
+    private static MediaVariant ReplaceVariantSource(MediaVariant variant, Uri source, RequestContext context) =>
+        variant with
+        {
+            Tracks = variant.Tracks
+                .Select(t => t.Kind is MediaTrackKind.Combined or MediaTrackKind.Video
+                    ? t with
+                    {
+                        SourceUrl = source,
+                        RequestContext = context,
+                        ContentLength = null,
+                        BrowserObserved = false,
+                        IsValidated = false,
+                        Evidence = MediaEvidence.Heuristic
+                    }
+                    : t with { RequestContext = context })
+                .ToArray()
+        };
+
+    private void ResetTransferState(DownloadJob job)
+    {
+        var scratch = Path.Combine(Path.GetDirectoryName(job.TargetPath)!, ".parts", job.Id.ToString("N"));
+        if (Directory.Exists(scratch)) Directory.Delete(scratch, recursive: true);
+        if (File.Exists(job.TargetPath + ".part")) File.Delete(job.TargetPath + ".part");
+        job.DownloadedBytes = 0;
+        job.TotalBytes = job.Variant.TotalContentLength;
+        job.ETag = null;
+        job.LastModified = null;
+        job.LastErrorCode = null;
     }
 
     /// <summary>

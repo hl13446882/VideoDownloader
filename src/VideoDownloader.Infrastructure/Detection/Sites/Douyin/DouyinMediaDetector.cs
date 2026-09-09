@@ -446,6 +446,13 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 
     private IReadOnlyList<MediaVariant> BuildFormatLadder(IReadOnlyList<MediaTrack> videos, Uri page)
     {
+        var recovery = page;
+        if (_session.CurrentContentId is { Length: > 0 } contentId &&
+            !page.AbsolutePath.Contains("/video/", StringComparison.OrdinalIgnoreCase) &&
+            !page.AbsolutePath.Contains("/note/", StringComparison.OrdinalIgnoreCase) &&
+            DouyinIdentity.ExtractIdFromQuery(page) is null)
+            recovery = new Uri($"https://www.douyin.com/video/{Uri.EscapeDataString(contentId)}");
+
         var list = new List<MediaVariant>();
         foreach (var track in videos
                      .Where(t => !DouyinPlayEvidence.IsNonDownloadableHost(t.SourceUrl) &&
@@ -465,7 +472,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 track.Container,
                 [track])
             {
-                RecoveryPageUrl = page,
+                RecoveryPageUrl = recovery,
                 ContentIdentity = track.ContentIdentity
             });
 
@@ -510,6 +517,9 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         var score = 0;
         if (DouyinPlayEvidence.IsPlayGateway(t.SourceUrl)) score -= 2000;
         if (DouyinPlayEvidence.IsStrongVodHost(t.SourceUrl)) score += 1000;
+        // zjcdn progressive downloads reliably; web-prime douyinvod often 403s outside WebView.
+        if (t.SourceUrl.Host.Contains("zjcdn", StringComparison.OrdinalIgnoreCase)) score += 350;
+        if (t.SourceUrl.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase)) score -= 450;
         if (t.BrowserObserved) score += 500;
         if (t.Kind == MediaTrackKind.Combined) score += 800;
         if (t.Kind == MediaTrackKind.Video)
@@ -519,6 +529,9 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         if (t.ContentLength is > 0 and < MediaResourceSizeFilter.MinDisplayBytes) score -= 500;
         // Demote ultra-low Douyin quality crumbs (br/qs) that often yield ~200KB shells.
         score += DouyinPlayEvidence.ScorePlayQualityHint(t.SourceUrl);
+        // Prefer network-sized objects over unsigned observation crumbs.
+        if (t.Evidence == MediaEvidence.DomObserved && t.ContentLength is null) score -= 80;
+        if (t.Evidence == MediaEvidence.BrowserObserved) score += 100;
         score += (int)Math.Min(t.ContentLength ?? 0, int.MaxValue) / (1024 * 1024);
         return score;
     }
@@ -606,7 +619,10 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                         null,
                         _session.Context)
                     {
-                        IsValidated = true,
+                        // Page-sourced CDN needs WebView cookies on download; keep IsValidated
+                        // false so availability sampling is not silently skipped.
+                        BrowserObserved = !isMse && DouyinPlayEvidence.IsStrongVodHost(url),
+                        IsValidated = false,
                         Evidence = MediaEvidence.DomObserved,
                         ContentIdentity = _session.CurrentContentId is null ? null : "id:" + _session.CurrentContentId,
                         IsMseTrack = isMse
@@ -835,8 +851,11 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         var duration = _session.ObservedDurationSec;
         if (duration is null or < 1.0)
             return true;
-        // Unknown size cannot prove ownership when duration is known — wait for Content-Length.
-        if (contentLength is null or < 50_000)
+        // Unknown length (typical observation playAddr) is allowed; network anonymous bind
+        // already requires a real Content-Length before claiming ownership.
+        if (contentLength is null or <= 0)
+            return true;
+        if (contentLength < 50_000)
             return false;
 
         var bitsPerSec = contentLength.Value * 8.0 / duration.Value;
@@ -963,7 +982,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
     {
         var full = url.AbsoluteUri;
         return Regex.IsMatch(full,
-            @"avatar|emoji|emoticon|badge|logo|sprite|icon|favicon|cover_thumb|thumbnail|aweme-image-basic",
+            @"avatar|emoji|emoticon|badge|logo|sprite|icon|favicon|cover_thumb|(?:^|[?&_/])thumbnail(?:[?&_/]|$)|aweme-image-basic",
             RegexOptions.IgnoreCase);
     }
 

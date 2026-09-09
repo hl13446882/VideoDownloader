@@ -21,13 +21,32 @@ public sealed class MediaAvailabilityValidator(IHttpClientFactory clients, IRequ
             // CDP already delivered these bytes to the playing document — do not re-GET flaky CDN URLs.
             if (track.BrowserObserved || track.IsValidated)
                 continue;
-            try { await ReadMediaAsync(track, track.SourceUrl, 0, timeout.Token); }
+            try { _ = await ReadMediaAsync(track, track.SourceUrl, 0, timeout.Token); }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             { throw new DownloadException(ErrorCodes.NetTimeout, "Media sample validation timed out."); }
         }
     }
 
-    private async Task ReadMediaAsync(MediaTrack track, Uri source, int depth, CancellationToken ct)
+    /// <summary>Follow redirects and return the final media URL after a successful sample sniff.</summary>
+    public async Task<Uri> ResolveFinalUrlAsync(MediaTrack track, Uri source, CancellationToken ct)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(35));
+        try
+        {
+            return await ReadMediaAsync(
+                track with { BrowserObserved = false, IsValidated = false },
+                source,
+                0,
+                timeout.Token);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new DownloadException(ErrorCodes.NetTimeout, "Media redirect resolve timed out.");
+        }
+    }
+
+    private async Task<Uri> ReadMediaAsync(MediaTrack track, Uri source, int depth, CancellationToken ct)
     {
         if (depth > 3) throw new DownloadException(ErrorCodes.InvalidFormat, "Playlist nesting limit exceeded.");
         var url = source;
@@ -49,6 +68,8 @@ public sealed class MediaAvailabilityValidator(IHttpClientFactory clients, IRequ
             }
             if (response.StatusCode == HttpStatusCode.Forbidden) throw new DownloadException(ErrorCodes.Http403, "Media sample denied (403).");
             if (!response.IsSuccessStatusCode) throw new DownloadException(response.StatusCode == HttpStatusCode.NotFound ? ErrorCodes.Http404 : ErrorCodes.InvalidFormat, $"Media sample HTTP {(int)response.StatusCode}.");
+            // HttpClient may auto-follow redirects; prefer the final request URI.
+            url = response.RequestMessage?.RequestUri ?? url;
             await using var stream = await response.Content.ReadAsStreamAsync(ct);
             var data = new byte[65536];
             var count = 0;
@@ -65,14 +86,13 @@ public sealed class MediaAvailabilityValidator(IHttpClientFactory clients, IRequ
             {
                 var child = text.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0 && !l.StartsWith('#'));
                 if (child is null) throw new DownloadException(ErrorCodes.InvalidFormat, "Playlist contains no sample resource.");
-                await ReadMediaAsync(track, new Uri(url, child), depth + 1, ct);
-                return;
+                return await ReadMediaAsync(track, new Uri(url, child), depth + 1, ct);
             }
             if (text.StartsWith('<') || text.StartsWith('{') || text.StartsWith('[') || mime.Contains("html") || mime.Contains("json"))
                 throw new DownloadException(ErrorCodes.InvalidFormat, "Response is a document, not media bytes.");
             if (!(track.Kind == MediaTrackKind.Image ? LooksLikeImage(data.AsSpan(0, count)) : LooksLikeMedia(data.AsSpan(0, count))))
                 throw new DownloadException(ErrorCodes.InvalidFormat, "Media sample has no recognized container header.");
-            return;
+            return url;
         }
         throw new DownloadException(ErrorCodes.NetTimeout, "Media redirect limit exceeded.");
     }

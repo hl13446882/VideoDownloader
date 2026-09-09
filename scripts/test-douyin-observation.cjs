@@ -6,7 +6,8 @@ const source = fs.readFileSync(path.join(__dirname, '../src/VideoDownloader.Infr
 const body = source.split('"""')[1];
 const currentId = '7674888187625458982', adId = '7670164200798342410';
 const record = (id, url) => ({ aweme_id: id, desc: id, video: { play_addr: { url_list: [url] } } });
-function observe({ hydration=true, domId=null, page=true }={}) {
+
+function observe({ hydration=true, domId=null, page='jingxuan', pathId=null }={}) {
   class Node {}
   class Media extends Node {}
   const active = new Media();
@@ -15,7 +16,11 @@ function observe({ hydration=true, domId=null, page=true }={}) {
     getAttribute: key => key==='data-aweme-id' ? domId : null,
     querySelector:()=>null, querySelectorAll:()=>[], parentElement:null,
     '__reactProps$test': { item:record(adId,'https://v3.douyinvod.com/ad.mp4') } });
-  const location = new URL('https://www.douyin.com/jingxuan' + (page ? '?modal_id='+currentId : ''));
+  let href = 'https://www.douyin.com/';
+  if (pathId) href = `https://www.douyin.com/video/${pathId}`;
+  else if (page === 'jingxuan') href = `https://www.douyin.com/jingxuan?modal_id=${currentId}`;
+  else if (page === 'feed') href = 'https://www.douyin.com/?recommend=1';
+  const location = new URL(href);
   const context = { Node, HTMLMediaElement:Media, URL, location, innerHeight:1000,innerWidth:1000,
     document:{querySelectorAll:()=>[active],getElementById:()=>null,addEventListener:()=>{}},
     getComputedStyle:()=>({visibility:'visible',display:'block',opacity:'1'}),
@@ -24,15 +29,24 @@ function observe({ hydration=true, domId=null, page=true }={}) {
   vm.createContext(context); vm.runInContext(body,context);
   return JSON.parse(JSON.stringify(context.window.__vdProbe()));
 }
-let result=observe();
-assert.equal(result.identity,'content:'+currentId);
-assert.deepEqual(result.media,['https://v3.douyinvod.com/current.mp4']);
-result=observe({hydration:false});
-assert.equal(result.identity,'content:'+currentId);
-assert.deepEqual(result.media,[]);
-assert.equal(result.caption,'');
-// Feed without a fixed permalink follows the active player's own work.
-result=observe({hydration:false,page:false});
-assert.equal(result.identity,'content:'+adId);
-assert.deepEqual(result.media,['https://v3.douyinvod.com/ad.mp4']);
-console.log('Douyin observation: fixed-page/ad mismatch, missing data, active-feed identity passed.');
+
+// Feed/jingxuan: active player wins over lagging modal_id.
+let result = observe();
+assert.equal(result.identity, 'content:' + adId);
+assert.deepEqual(result.media, ['https://v3.douyinvod.com/ad.mp4']);
+
+result = observe({ hydration:false });
+assert.equal(result.identity, 'content:' + adId);
+assert.deepEqual(result.media, ['https://v3.douyinvod.com/ad.mp4']);
+
+// Bare recommend feed without query also follows the active player.
+result = observe({ hydration:false, page:'feed' });
+assert.equal(result.identity, 'content:' + adId);
+assert.deepEqual(result.media, ['https://v3.douyinvod.com/ad.mp4']);
+
+// Dedicated /video/{id}: pathId is highest authority even if the DOM player looks like an ad.
+result = observe({ hydration:false, page:null, pathId:currentId });
+assert.equal(result.identity, 'content:' + currentId);
+assert.deepEqual(result.media, []);
+
+console.log('Douyin observation: player>query on feed, path>player on detail — passed.');

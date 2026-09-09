@@ -25,6 +25,31 @@ public class DownloadPolicyAcceptanceTests
     }
 
     [Fact]
+    public async Task MutableFeed_RenewsViaContentIdentityPermalink()
+    {
+        var page = new Uri("https://www.douyin.com/?recommend=1");
+        var detail = new Uri("https://www.douyin.com/video/100");
+        var context = RequestContext.CreateEmpty();
+        var old = MediaVariant.FromCombinedTrack("720", new Uri("https://cdn.test/movie.mp4?token=old"), context, height: 720) with
+        {
+            ContentIdentity = "id:100",
+            RecoveryPageUrl = page
+        };
+        var fresh = old with
+        {
+            Tracks = [old.Tracks[0] with { SourceUrl = new Uri("https://cdn.test/movie.mp4?token=new") }],
+            RecoveryPageUrl = detail
+        };
+        var resolver = Substitute.For<IExternalSiteResolver>();
+        resolver.IsAvailable.Returns(true);
+        resolver.ResolveAsync(detail, context, Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<DetectedVideo>>(
+            [new(Guid.NewGuid(), "douyin", "100", "caption", detail, MediaFamily.DirectMp4, [fresh], false)]));
+        var renewed = await MediaAddressRenewal.ResolveAsync(page, old, context, [resolver], default);
+        Assert.Equal(fresh.SourceUrl, renewed.SourceUrl);
+        await resolver.Received(1).ResolveAsync(detail, context, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task MutableFeed_CannotRenewToAnotherVideo()
     {
         var variant = MediaVariant.FromCombinedTrack("v",new Uri("https://cdn.test/a.mp4"),RequestContext.CreateEmpty());

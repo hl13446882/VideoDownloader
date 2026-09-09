@@ -825,6 +825,24 @@ public class ExclusiveSiteDetectionTests
     }
 
     [Fact]
+    public async Task Douyin_Album_Accepts_HostPrefixed_Identity_And_AwemeImages()
+    {
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var page = new Uri("https://www.douyin.com/note/7276638706021240125");
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "图文",
+            """{"type":"vd-video-identity","identity":"www.douyin.com:content:7276638706021240125","caption":"图文","href":"https://www.douyin.com/note/7276638706021240125","album":true,"media":["https://sf6-cdn-tos.douyinstatic.com/obj/ies-music/7200404307408079672.mp3"],"images":["https://p3-pc-sign.douyinpic.com/tos-cn-i-0813/o8AtefgZAFF7UzPVIS0BqQAvDVhBeJpGAAE7E9~tplv-dy-aweme-images:q75.jpeg?biz_tag=aweme_images&from=327834062"]}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.NotNull(last);
+        Assert.Equal(MediaContentType.Album, last!.ContentType);
+        Assert.NotEmpty(last.Images);
+        Assert.NotNull(last.Audio);
+    }
+
+    [Fact]
     public async Task Douyin_Album_Ignores_Stray_MediaVideo_Network()
     {
         var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);

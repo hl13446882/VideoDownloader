@@ -24,30 +24,91 @@ internal static class DouyinObservationScript
             return u.origin + u.pathname + JSON.stringify(query);
           };
           const playerRecord = active => {
-            const seen=new WeakSet();let budget=160;
+            const seen=new WeakSet();let budget=280;
             const find=(value,depth)=>{
-              if(!value||typeof value!=='object'||value instanceof Node||seen.has(value)||depth>4||--budget<0)return null;
+              if(!value||typeof value!=='object'||value instanceof Node||seen.has(value)||depth>6||--budget<0)return null;
               seen.add(value);
-              if((value.id||value.aweme_id||value.itemId||value.videoId) &&
-                 (value.video||value.playAddr||value.play_addr||value.images||value.image_list) &&
-                 (value.desc||value.description||value.title||value.images||value.image_list)) return value;
-              for(const key of ['item','itemInfo','aweme','awemeInfo','data','videoData','props','children']){
+              const hasId=!!(value.aweme_id||value.awemeId||value.itemId||value.item_id||value.videoId||value.video_id||value.group_id||value.modal_id||value.id);
+              const hasVideo=!!(value.video||value.playAddr||value.play_addr||value.bit_rate||value.bitRate||value.images||value.image_list);
+              const hasCaption=!!(value.desc||value.description||value.title||value.images||value.image_list);
+              // Prefer captioned aweme; still accept playAddr-only nodes (feed MSE often drops desc).
+              if(hasId && hasVideo && (hasCaption || value.video || value.play_addr || value.playAddr || value.bit_rate))
+                return value;
+              for(const key of ['item','itemInfo','aweme','awemeInfo','awemeDetail','data','videoData','props','children','memoizedProps','pendingProps']){
                 const child=value[key];
-                if(Array.isArray(child)){for(const c of child.slice(0,8)){const r=find(c,depth+1);if(r)return r;}}
+                if(Array.isArray(child)){for(const c of child.slice(0,12)){const r=find(c,depth+1);if(r)return r;}}
                 else {const r=find(child,depth+1);if(r)return r;}
               }
               return null;
             };
-            for(let el=active,i=0;el&&i<12;el=el.parentElement,i++){
+            for(let el=active,i=0;el&&i<16;el=el.parentElement,i++){
               for(const key of Object.keys(el)){
                 let props=null;
                 if(key.startsWith('__reactProps$'))props=el[key];
-                else if(key.startsWith('__reactFiber$'))props=el[key]?.memoizedProps;
+                else if(key.startsWith('__reactFiber$'))props=el[key]?.memoizedProps||el[key]?.pendingProps;
                 else if(key==='__vueParentComponent')props=el[key]?.props;
                 const record=find(props,0);if(record)return record;
               }
             }
             return null;
+          };
+          const isStrongVodUrl = value =>
+            /^https?:/i.test(value||'') &&
+            !/\.(jpg|jpeg|png|webp|gif|svg)([?#]|$)/i.test(value) &&
+            !/(?:byteimg|douyinpic)\./i.test(value) &&
+            !/^blob:/i.test(value) &&
+            (/\/video\/tos\//i.test(value) ||
+             /\/aweme\/v1\/play/i.test(value) ||
+             /(?:douyinvod|zjcdn|bytecdn|byteicdn|douyincdn)\./i.test(value));
+          const scavengePlayUrlsFromTree = (root, expectedId) => {
+            const urls=[];
+            if(!root||typeof root!=='object') return urls;
+            const seen=new WeakSet(); let budget=2200;
+            const visit=(value,depth,matched)=>{
+              if(--budget<0||depth>16||value==null) return;
+              if(typeof value==='string'){
+                if(matched && isStrongVodUrl(value)) urls.push(value);
+                return;
+              }
+              if(typeof value!=='object'||value instanceof Node||seen.has(value)) return;
+              seen.add(value);
+              const id=value.aweme_id||value.awemeId||value.itemId||value.item_id||value.videoId||value.video_id||value.group_id||value.modal_id||value.id;
+              const nextMatched=matched || (!!expectedId && id!=null && String(id)===String(expectedId));
+              for(const [key,child] of Object.entries(value)){
+                if(/cover|avatar|thumbnail|subtitle|music_cover|dynamic_cover|icon|logo/i.test(key)) continue;
+                visit(child,depth+1,nextMatched);
+              }
+            };
+            visit(root,0,!expectedId);
+            return [...new Set(urls)];
+          };
+          const scavengePlayUrlsFromPlayer = (active, expectedId) => {
+            const urls=[];
+            if(!active) return urls;
+            for(let el=active,i=0;el&&i<16;el=el.parentElement,i++){
+              for(const key of Object.keys(el)){
+                let props=null;
+                if(key.startsWith('__reactProps$')) props=el[key];
+                else if(key.startsWith('__reactFiber$')) props=el[key]?.memoizedProps||el[key]?.pendingProps||el[key];
+                else if(key==='__vueParentComponent') props=el[key]?.props;
+                for(const u of scavengePlayUrlsFromTree(props, expectedId)) urls.push(u);
+              }
+            }
+            return [...new Set(urls)];
+          };
+          const scavengePlayUrlsFromPerf = expectedId => {
+            try{
+              return performance.getEntriesByType('resource').map(e=>e.name).filter(value=>{
+                if(!isStrongVodUrl(value)) return false;
+                if(/\/media-video-|\/media-audio-/i.test(value)) return false;
+                if(!expectedId) return false;
+                try{
+                  const id=new URL(value).searchParams.get('__vid');
+                  // Only claim ownership when the CDN object is stamped for this aweme.
+                  return !!id && id===String(expectedId);
+                }catch{ return false; }
+              });
+            }catch{ return []; }
           };
           const isLiveMedia = el => {
             if(!(el instanceof HTMLMediaElement)) return false;
@@ -93,10 +154,11 @@ internal static class DouyinObservationScript
             const push=v=>{
               if(typeof v==='string' && /^https?:/i.test(v) &&
                  !/\.(jpg|jpeg|png|webp|gif|svg)([?#]|$)/i.test(v) &&
-                 !/(?:byteimg|douyinpic)\./i.test(v))
+                 !/(?:byteimg|douyinpic)\./i.test(v) &&
+                 !/^blob:/i.test(v))
                 urls.push(v);
               else if(v&&typeof v==='object'){
-                for(const k of ['urlList','url_list','playAddr','play_addr','downloadAddr','download_addr','uri','url']){
+                for(const k of ['urlList','url_list','playAddr','play_addr','downloadAddr','download_addr','uri','url','play_url','playUrl']){
                   const child=v[k];
                   if(Array.isArray(child)) child.forEach(push);
                   else push(child);
@@ -107,6 +169,8 @@ internal static class DouyinObservationScript
             push(record.video||{});
             push(record.video?.play_addr||record.video?.playAddr);
             push(record.video?.download_addr||record.video?.downloadAddr);
+            const rates=record.video?.bit_rate||record.video?.bitRate||record.bit_rate||record.bitRate;
+            if(Array.isArray(rates)) rates.forEach(r=>{ push(r); push(r?.play_addr||r?.playAddr); push(r?.download_addr||r?.downloadAddr); });
             push(record.music||{});
             return [...new Set(urls)];
           };
@@ -119,14 +183,19 @@ internal static class DouyinObservationScript
               if(el?.textContent) push(JSON.parse(el.textContent));
             }catch{}
             try{push(window.__UNIVERSAL_DATA_FOR_REHYDRATION__);}catch{}
-            const seen=new WeakSet(); let budget=1200;
+            try{
+              const el=document.getElementById('RENDER_DATA')||document.getElementById('__NEXT_DATA__');
+              if(el?.textContent) push(JSON.parse(decodeURIComponent(el.textContent)));
+            }catch{}
+            try{push(window._ROUTER_DATA);push(window.__INITIAL_STATE__);push(window.RENDER_DATA);}catch{}
+            const seen=new WeakSet(); let budget=1800;
             const find=(value,depth)=>{
-              if(!value||typeof value!=='object'||value instanceof Node||seen.has(value)||depth>12||--budget<0) return null;
+              if(!value||typeof value!=='object'||value instanceof Node||seen.has(value)||depth>14||--budget<0) return null;
               seen.add(value);
-              const id = value.aweme_id||value.itemId||value.videoId||value.id||value.modal_id||value.note_id;
-              const hasVideo = !!(value.video||value.playAddr||value.play_addr);
+              const id = value.aweme_id||value.awemeId||value.itemId||value.item_id||value.videoId||value.video_id||value.id||value.modal_id||value.note_id||value.group_id||value.groupId;
+              const hasVideo = !!(value.video||value.playAddr||value.play_addr||value.bit_rate||value.bitRate);
               if(hasVideo && String(id)===String(expectedId)) return value;
-              if(Array.isArray(value)){ for(const c of value.slice(0,40)){const r=find(c,depth+1); if(r) return r;} }
+              if(Array.isArray(value)){ for(const c of value.slice(0,48)){const r=find(c,depth+1); if(r) return r;} }
               else { for(const c of Object.values(value)){const r=find(c,depth+1); if(r) return r;} }
               return null;
             };
@@ -137,7 +206,7 @@ internal static class DouyinObservationScript
           const queryAwemeId = () => (location.search.match(/(?:modal_id|aweme_id|item_id)=(\d{10,})/)||[])[1] || null;
           const playerAwemeId = (active, record) => {
             let explicit = '';
-            const recordId = record ? String(record.aweme_id||record.itemId||record.videoId||record.id||'') : '';
+            const recordId = record ? String(record.aweme_id||record.awemeId||record.itemId||record.item_id||record.videoId||record.video_id||record.id||'') : '';
             if (active) {
               for (let scope=active,i=0; scope && i<8; i++, scope=scope.parentElement) {
                 for (const attr of ['data-e2e-vid','data-video-id','data-aweme-id','data-item-id']) {
@@ -243,42 +312,53 @@ internal static class DouyinObservationScript
             const samePlayer = !playerId || playerId === awemeId;
             const dataRecord=findAwemeRecordById(awemeId) || (recordId===awemeId ? record : null);
             const fromData=collectDouyinPlayUrls(dataRecord);
+            const fromFiber=scavengePlayUrlsFromPlayer(active, awemeId);
+            const fromPerf=scavengePlayUrlsFromPerf(awemeId);
             const resourceKey=value=>{try{const u=new URL(value);const i=u.pathname.indexOf('/video/tos/');return i>=0 ? u.pathname.slice(i) : u.origin+u.pathname;}catch{return '';}};
             const fromPlayer=samePlayer ? [active.currentSrc,active.src,...[...active.querySelectorAll('source')].map(e=>e.src)].filter(value=>{
               if(!/^https?:/i.test(value||'')) return false;
-              const id=new URL(value).searchParams.get('__vid');
-              if(id) return id===awemeId;
-              return fromData.some(u=>resourceKey(u)===resourceKey(value));
+              if(/\/media-video-|\/media-audio-/i.test(value)) return false;
+              try{
+                const id=new URL(value).searchParams.get('__vid');
+                if(id) return id===awemeId;
+              }catch{}
+              if(fromData.some(u=>resourceKey(u)===resourceKey(value))) return true;
+              // Active player already points at a strong CDN — keep it even without hydration.
+              return isStrongVodUrl(value);
             }) : [];
             caption=dataRecord ? String(dataRecord.desc||dataRecord.description||dataRecord.title||'').trim() : (samePlayer ? caption : '');
             const durationSec=(Number.isFinite(active.duration)&&active.duration>0)?active.duration:null;
             return { type:'vd-video-identity', identity:'content:'+awemeId, caption, href:location.href,
-              media:[...new Set([...fromPlayer, ...fromData])], durationSec };
+              media:[...new Set([...fromPlayer, ...fromData, ...fromFiber, ...fromPerf])], durationSec };
           };
           window.__vdProbe=()=>{
             const observation=window.__vdObserve(); if(!observation) return null;
-            const record=playerRecord(activePlayer());
+            const active=activePlayer();
+            const record=playerRecord(active);
             const visit=(value,depth,seen,budget)=>{
-              if(--budget.n<0||depth>10||value==null)return;
+              if(--budget.n<0||depth>12||value==null)return;
               if(typeof value==='string'){
-                if(/^https?:\/\//i.test(value) && !/\.(jpg|jpeg|png|webp|gif|svg)([?#]|$)/i.test(value) &&
-                   !/(?:byteimg|douyinpic)\./i.test(value)) observation.media.push(value);
+                if(isStrongVodUrl(value) && !/\/media-video-|\/media-audio-/i.test(value))
+                  observation.media.push(value);
                 return;
               }
               if(typeof value!=='object'||value instanceof Node||seen.has(value))return;
               seen.add(value);
               for(const [key,child] of Object.entries(value)){
-                if(/cover|avatar|thumbnail|subtitle|music_cover|dynamic_cover/i.test(key))continue;
+                if(/cover|avatar|thumbnail|subtitle|music_cover|dynamic_cover|icon|logo/i.test(key))continue;
                 visit(child,depth+1,seen,budget);
               }
             };
             const observedId=(observation.identity.match(/(\d{10,})/)||[])[1];
-            const recordId=record ? String(record.aweme_id||record.itemId||record.videoId||record.id||'') : '';
-            if(record && observedId && recordId===observedId){
-              if(!observation.caption) observation.caption=String(record.desc||record.description||record.title||'').trim();
-              visit(record.video||record,0,new WeakSet(),{n:800});
-              visit(record.music||{},0,new WeakSet(),{n:200});
+            const recordId=record ? String(record.aweme_id||record.awemeId||record.itemId||record.videoId||record.id||'') : '';
+            const dataRecord=findAwemeRecordById(observedId) || (record && observedId && recordId===observedId ? record : null);
+            if(dataRecord){
+              if(!observation.caption) observation.caption=String(dataRecord.desc||dataRecord.description||dataRecord.title||'').trim();
+              visit(dataRecord.video||dataRecord,0,new WeakSet(),{n:1200});
+              visit(dataRecord.music||{},0,new WeakSet(),{n:200});
             }
+            for(const u of scavengePlayUrlsFromPlayer(active, observedId)) observation.media.push(u);
+            for(const u of scavengePlayUrlsFromPerf(observedId)) observation.media.push(u);
             if(!observation.images?.length){
               const album=observeDouyinAlbum();
               if(album?.images?.length && album.identity===observation.identity){

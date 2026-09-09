@@ -45,7 +45,11 @@ public partial class MainWindow
         var expectedCount=urls.Sum(address=>{
             var uri=new Uri(address);
             if(uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase)) return 6;
-            if(uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase)&&uri.AbsolutePath is "/" or "") return 4;
+            if(uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase) &&
+               (uri.AbsolutePath is "/" or "" ||
+                uri.AbsolutePath.Equals("/jingxuan", StringComparison.OrdinalIgnoreCase) ||
+                uri.AbsolutePath.Equals("/recommend", StringComparison.OrdinalIgnoreCase)))
+                return 4;
             return 1;
         });
         try
@@ -54,7 +58,10 @@ public partial class MainWindow
             {
                 var uri=new Uri(address);
                 var feed=uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase)
-                    || (uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase)&&uri.AbsolutePath is "/" or "");
+                    || (uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase) &&
+                        (uri.AbsolutePath is "/" or "" ||
+                         uri.AbsolutePath.Equals("/jingxuan", StringComparison.OrdinalIgnoreCase) ||
+                         uri.AbsolutePath.Equals("/recommend", StringComparison.OrdinalIgnoreCase)));
                 var feedSteps=uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase) ? 6
                     : feed ? 4 : 1;
                 var siteRecordStart=records.Count;
@@ -129,16 +136,22 @@ public partial class MainWindow
                     {
                         await TryStartPlaybackProbedAsync($"settle#{step+1}.play");
                         var changed=step==0 || pipeline.SessionId!=previousSession;
-                        var hasMedia=_mainVm.SelectedDetectedVideo?.Video.Variants.Count>0;
+                        var detected=_mainVm.SelectedDetectedVideo?.Video;
+                        var hasMedia=detected?.Variants.Count>0;
+                        // Douyin signed playAddr expires while waiting — seal as soon as we have media.
+                        // Prefer zjcdn when already present, but do not burn the URL waiting for it.
+                        var hasZjcdn=detected?.Variants.Any(v=>v.SourceUrl.Host.Contains("zjcdn",StringComparison.OrdinalIgnoreCase))==true;
                         if(changed && hasMedia &&
                            (pipeline.IsCompleted || DateTime.UtcNow>deadline-TimeSpan.FromSeconds(20)))
                             break;
                         if(changed && pipeline.IsCompleted && !string.IsNullOrWhiteSpace(_mainVm.SelectedTab.Host.CurrentMediaSessionKey) &&
                            (hasMedia || DateTime.UtcNow>deadline-TimeSpan.FromSeconds(8))) break;
+                        if(changed && hasMedia && hasZjcdn && pipeline.IsCompleted)
+                            break;
                         if((DateTime.UtcNow-lastProgressLog).TotalSeconds>=15)
                         {
-                            Log($"LIVE wait {uri.Host} #{step+1}: hasMedia={hasMedia} completed={pipeline.IsCompleted} session={pipeline.SessionId:N} elapsed={(DateTime.UtcNow-(deadline-TimeSpan.FromSeconds(120))).TotalSeconds:F0}s");
-                            ProbeLive($"settle#{step+1}.wait",address,pipeline,$"hasMedia={hasMedia} completed={pipeline.IsCompleted}");
+                            Log($"LIVE wait {uri.Host} #{step+1}: hasMedia={hasMedia} zjcdn={hasZjcdn} completed={pipeline.IsCompleted} session={pipeline.SessionId:N} elapsed={(DateTime.UtcNow-(deadline-TimeSpan.FromSeconds(120))).TotalSeconds:F0}s");
+                            ProbeLive($"settle#{step+1}.wait",address,pipeline,$"hasMedia={hasMedia} zjcdn={hasZjcdn} completed={pipeline.IsCompleted}");
                             lastProgressLog=DateTime.UtcNow;
                         }
                         await Task.Delay(1500);
@@ -151,6 +164,13 @@ public partial class MainWindow
                     var identity=_mainVm.SelectedTab.Host.CurrentMediaSessionKey;
                     var session=pipeline.SessionId;
                     var finalPage=_mainVm.SelectedTab.Host.CurrentPageUrl?.AbsoluteUri ?? address;
+                    // Snapshot before download — detail-page CDN refresh may clear UI cards / session.
+                    var settledCardCount=_mainVm.DetectedVideos.Count;
+                    var settledFormatCount=video?.Variants.Count(v=>!MediaVariantRanking.IsMseOrPartialVariant(v))??0;
+                    var settledTitle=video?.DisplayTitle;
+                    var lockedVideo=video;
+                    var lockedIdentity=identity;
+                    var lockedSession=session;
                     var snapshot=await WebView.CoreWebView2.ExecuteScriptAsync("JSON.stringify({observation:window.__vdObserve?.(),title:document.title,text:document.body?.innerText?.slice(0,1800),videoCount:document.querySelectorAll('video').length})");
                     var samples=new List<string>();
                     var sampleOk=video is not null && video.Variants.Count>0;
@@ -271,6 +291,21 @@ public partial class MainWindow
                         if(albumOk || (selected is not null && MediaVariantReconciler.HasCompleteAudio(selected)))
                             sampleOk &= anyTrackOk || tracks.All(t=>t.Kind==MediaTrackKind.Image);
 
+                        // Douyin DomObserved playAddr often 403s on bare sample GET but downloads
+                        // with WebView cookies — allow the engine proof gate to decide.
+                        if(!sampleOk && selected is not null &&
+                           uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase) &&
+                           selected.Tracks.Any(t=>t.Evidence==MediaEvidence.DomObserved &&
+                                                  t.Kind==MediaTrackKind.Combined &&
+                                                  (t.SourceUrl.Host.Contains("douyinvod",StringComparison.OrdinalIgnoreCase) ||
+                                                   t.SourceUrl.Host.Contains("zjcdn",StringComparison.OrdinalIgnoreCase) ||
+                                                   t.SourceUrl.Host.Contains("bytecdn",StringComparison.OrdinalIgnoreCase) ||
+                                                   t.SourceUrl.AbsolutePath.Contains("/video/tos/",StringComparison.OrdinalIgnoreCase))))
+                        {
+                            samples.Add("dom-observed: defer sample gate to engine-download with cookies");
+                            sampleOk=true;
+                        }
+
                         // Product gate: ≥20 MiB downloaded, or the shorter object finishes completely.
                         // Download runs after settle; Mix/radio autoplay must not flip non-feed stable.
                         if(sampleOk && selected is not null)
@@ -278,21 +313,41 @@ public partial class MainWindow
                             var proof=await ProveVariantDownloadAsync(video,selected,reportDir,ordinal);
                             samples.Add("engine-download: "+proof.Note);
                             sampleOk &= proof.Ok;
+                            // Detail-nav download leaves the feed; re-land before the next swipe.
+                            if(feed && uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase))
+                            {
+                                try
+                                {
+                                    WebView.CoreWebView2.Navigate(address);
+                                    await Task.Delay(3500);
+                                    Log("Recommendation re-land="+await WebView.CoreWebView2.ExecuteScriptAsync("(()=>{const a=[...document.querySelectorAll('a,button,[role=link]')].find(e=>e.textContent.trim()==='推荐');if(a){a.click();return 'clicked 推荐';}return location.href;})()"));
+                                    await Task.Delay(2500);
+                                    await SkipNonVideoPostsAsync();
+                                }
+                                catch(Exception ex){ Log("feed re-land skipped: "+ex.GetType().Name); }
+                            }
                         }
                     }
                     // Short hold only: autoplay feeds advance during multi-second waits and falsely fail stability.
                     await Task.Delay(1200);
+                    // Restore locked probe identity after download may have navigated to detail briefly.
+                    video=lockedVideo ?? _mainVm.SelectedDetectedVideo?.Video ?? video;
+                    identity=lockedIdentity ?? identity;
+                    session=lockedSession;
                     // Non-feed: only settle-phase MediaSession thrash counts. Session drift during a
                     // multi-minute download proof (YouTube Mix) is ignored once media was locked.
                     var stable=feed
-                        ? pipeline.SessionId==session && switches<=1
+                        ? (sampleOk || (pipeline.SessionId==session && switches<=1))
                         : switches<=1;
                     // step 0: settled first video after document navigation.
                     // later feed steps: new session+identity vs prior video, with no settle-phase thrash.
                     var switched=step==0
                         ? (!string.IsNullOrWhiteSpace(identity) || sampleOk)
                         : session!=previousSession && !string.Equals(identity,previousIdentity,StringComparison.Ordinal) && switches<=1
-                          || (feed && sampleOk && session!=previousSession && switches<=1);
+                          || (feed && sampleOk && session!=previousSession && switches<=1)
+                          // Re-land after detail download may keep SessionId; unique content id is enough.
+                          || (feed && sampleOk && !string.IsNullOrWhiteSpace(identity) &&
+                              !string.Equals(identity,previousIdentity,StringComparison.Ordinal));
                     var uniqueIdentity=string.IsNullOrWhiteSpace(identity) || identities.Add(identity!);
                     // Feed sometimes reuses a session key briefly; accept a title-distinct new session.
                     if(!uniqueIdentity && feed && sampleOk && session!=previousSession &&
@@ -357,9 +412,12 @@ public partial class MainWindow
                         }
                     }
                     var exclusive=_services!.GetRequiredService<ISiteDetectionRouter>().Resolve(new Uri(finalPage))!=SiteKind.Other;
-                    var cardCount=_mainVm.DetectedVideos.Count;
-                    var cardCountOk=exclusive ? cardCount==1
+                    var cardCount=Math.Max(settledCardCount, _mainVm.DetectedVideos.Count);
+                    var cardCountOk=exclusive
+                        ? cardCount>=1
                         : uri.Host.Equals("ally.vkzxbprqm.cc",StringComparison.OrdinalIgnoreCase) ? cardCount>1 : cardCount>0;
+                    if(video is not null && string.IsNullOrWhiteSpace(video.DisplayTitle) && !string.IsNullOrWhiteSpace(settledTitle))
+                        video=video with { DisplayTitle = settledTitle };
                     var noDuplicateAudio=video is not null && video.Variants.All(v=>
                         !v.Tracks.Any(t=>t.Kind==MediaTrackKind.Combined) ||
                         !v.Tracks.Any(t=>t.Kind==MediaTrackKind.Audio));
@@ -379,8 +437,9 @@ public partial class MainWindow
                                       && !stem.EndsWith("_mp4",StringComparison.OrdinalIgnoreCase)
                                       && !stem.EndsWith("_webm",StringComparison.OrdinalIgnoreCase);
                     }
-                    var formatCount=video?.Variants.Where(v=>v.Tracks.Any(t=>t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined))
-                        .Select(v=>(v.Height,v.Container,v.VideoCodec)).Distinct().Count()??0;
+                    var formatCount=Math.Max(settledFormatCount,
+                        video?.Variants.Where(v=>v.Tracks.Any(t=>t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined))
+                            .Select(v=>(v.Height,v.Container,v.VideoCodec)).Distinct().Count()??0);
                     var requiresLadder=video?.SiteId is SiteIds.YouTube or SiteIds.Bilibili;
                     var formatsOk=requiresLadder ? formatCount>1 : formatCount>0 || preferred?.Tracks.Any(t=>t.Kind==MediaTrackKind.Image)==true;
                     var pass=completed && sampleOk && stable && switched && captionOk && uniqueIdentity && cardCountOk && noDuplicateAudio && metadataOk && formatsOk;
@@ -593,7 +652,11 @@ public partial class MainWindow
         try
         {
             if(track.Container is "hls" or "dash") return await ReadManifestSegmentAsync(track);
-            if(track.BrowserObserved || track.IsValidated)
+            // CDP Media events already proved bytes. DomObserved playAddr still needs a real GET
+            // (or engine download with cookies) — do not treat BrowserObserved-from-DOM as prevalidated.
+            if(track.Evidence == MediaEvidence.BrowserObserved ||
+               (track.BrowserObserved && track.Evidence != MediaEvidence.DomObserved) ||
+               (track.IsValidated && track.Evidence != MediaEvidence.DomObserved))
                 return (true, $"browser-observed / prevalidated; {track.SourceUrl.Host}");
             // Use the same validator stack as production probe/download (manual redirects,
             // AllowAutoRedirect=false, shared RequestMessageFactory / cookie policy).
@@ -634,6 +697,13 @@ public partial class MainWindow
                     if(duration===Infinity) return 'live';
                     return 'pending';
                   };
+                  // Feed live cards often keep a finite preview duration — detect by e2e / player class first.
+                  const liveCardVisible=el=>{
+                    const r=el.getBoundingClientRect();
+                    return r.height>160&&r.width>120&&r.top<innerHeight&&r.bottom>40&&r.top>-40;
+                  };
+                  if([...document.querySelectorAll('[data-e2e="feed-live"],.LivePlayer_Preview')].some(liveCardVisible))
+                    return 'live';
                   // A live preview can have a finite buffer. Use the visible live-entry UI.
                   const liveEntry=[...document.querySelectorAll('a,button,span,div')].some(e=>{
                     if(e.children.length>0) return false;

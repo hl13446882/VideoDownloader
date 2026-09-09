@@ -311,6 +311,9 @@ internal static class DouyinContentModeResolver
                 images.ValueKind == JsonValueKind.Array &&
                 images.GetArrayLength() > 0)
                 return DouyinContentMode.Album;
+            // Audio-only media[] on note/album pages must not flip mode to Video.
+            if (pageUrl.AbsolutePath.Contains("/note/", StringComparison.OrdinalIgnoreCase))
+                return DouyinContentMode.Album;
             if (root.TryGetProperty("media", out var media) &&
                 media.ValueKind == JsonValueKind.Array &&
                 media.GetArrayLength() > 0)
