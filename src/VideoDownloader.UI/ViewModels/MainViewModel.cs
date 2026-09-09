@@ -548,7 +548,8 @@ public sealed partial class MainViewModel : ObservableObject
                     RestartDetectionForPageChange(
                         e.PageUrl,
                         e.PageTitle,
-                        mediaSessionKey: e.MediaSessionKey);
+                        mediaSessionKey: e.MediaSessionKey,
+                        destroySameContent: e.ForceRestart);
                 }, System.Windows.Threading.DispatcherPriority.Background);
             };
             tab.Host.OpenInNewTabRequested += (_, url) =>
@@ -773,18 +774,26 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
-        // Manual probe: full re-entry through the site detector (HardClear + BeginSession).
+        // Manual probe always destroys the active singleton run, even for the same aweme.
         ClearStatus();
         SetStatusKey("status.probeManual");
-        RestartDetectionForPageChange(pageUrl, tab?.Title, mediaSessionKey: tab?.Host.CurrentMediaSessionKey);
+        RestartDetectionForPageChange(
+            pageUrl,
+            tab?.Title,
+            mediaSessionKey: tab?.Host.CurrentMediaSessionKey,
+            destroySameContent: true);
     }
 
     /// <summary>
-    /// Page/content change or manual probe: cancel in-flight work, wipe UI + detector + network
-    /// dedupe, then start one fresh detection session via the routed site entry.
-    /// Must not HardClear before the session commit — that left a wiped pipeline when anti-dup returned.
+    /// Page/content change or manual probe: cancel in-flight work, wipe UI + detector session,
+    /// then BeginSession once on the routed singleton entry.
+    /// Same-aweme MediaSession/PageIdentity duplicates must not Reenter twice and wipe media.
     /// </summary>
-    private void RestartDetectionForPageChange(Uri pageUrl, string? pageTitle, string? mediaSessionKey)
+    private void RestartDetectionForPageChange(
+        Uri pageUrl,
+        string? pageTitle,
+        string? mediaSessionKey,
+        bool destroySameContent = false)
     {
         var enriched = EnrichPageUrlWithContentId(pageUrl, mediaSessionKey);
         StartPageDetectionSession(
@@ -794,7 +803,8 @@ public sealed partial class MainViewModel : ObservableObject
             forceReplace: true,
             mediaSessionKey: mediaSessionKey,
             resetMediaSession: true,
-            forceFullRestart: true);
+            forceFullRestart: true,
+            destroySameContent: destroySameContent);
     }
 
     /// <summary>
@@ -871,7 +881,8 @@ public sealed partial class MainViewModel : ObservableObject
         bool forceReplace = false,
         string? mediaSessionKey = null,
         bool resetMediaSession = true,
-        bool forceFullRestart = false)
+        bool forceFullRestart = false,
+        bool destroySameContent = false)
     {
         long generation;
         CancellationToken token;
@@ -880,13 +891,9 @@ public sealed partial class MainViewModel : ObservableObject
             var pageKey = BuildPageIdentity(pageUrl, mediaSessionKey);
             var stableIncoming = ExtractStableContentKey(mediaSessionKey, pageUrl);
             var stableCurrent = ExtractStableContentKeyFromIdentity(_currentPageIdentity);
-            // forceFullRestart (page change / manual probe) always re-enters the site detector.
-            // Other forceReplace calls still suppress same-aweme MediaSession flicker.
-            if (!forceFullRestart &&
-                forceReplace &&
-                mediaSessionKey is not null &&
+            // Same aweme already running: keep the only singleton session unless Probe / ForceRestart.
+            if (!destroySameContent &&
                 _detectionRunning &&
-                DetectedVideos.Count > 0 &&
                 stableIncoming is not null &&
                 string.Equals(stableIncoming, stableCurrent, StringComparison.Ordinal))
             {

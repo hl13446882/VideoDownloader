@@ -29,6 +29,13 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
     private readonly Dictionary<string, List<MediaTrack>> _parkedByContentId =
         new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Progressive CDN path → aweme id. Survives BeginSession/Reenter so a prior work's
+    /// muxed object is never rebound to the next feed item after network dedupe reset.
+    /// </summary>
+    private readonly Dictionary<string, string> _progressiveOwnerByResourceKey =
+        new(StringComparer.Ordinal);
+
     public DouyinMediaDetector(ILogger<DouyinMediaDetector> logger)
     {
         _logger = logger;
@@ -144,7 +151,21 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             var kind = DouyinPlayEvidence.InferKind(networkEvent.Url, networkEvent.MimeType);
             var isMse = DouyinPlayEvidence.IsMseAdaptivePath(networkEvent.Url);
             var length = DouyinPlayEvidence.GetEntityLength(networkEvent);
-            var ownerTag = ResolveNetworkContentIdentity(urlId, isMse, length);
+
+            // Prior work's progressive must not be claimed by the new session after Reenter.
+            if (!isMse &&
+                kind is MediaTrackKind.Combined or MediaTrackKind.Unknown &&
+                TryGetForeignProgressiveOwner(networkEvent.Url, out var foreignOwner))
+            {
+                ParkOtherWorkProgressive(networkEvent, foreignOwner);
+                _logger.LogInformation(
+                    "[DouyinOwnership] reject foreign progressive current={Current} owner={Owner} host={Host} path={Path}",
+                    _session.CurrentContentId, foreignOwner, networkEvent.Url.Host,
+                    TruncatePath(networkEvent.Url.AbsolutePath));
+                return Task.CompletedTask;
+            }
+
+            var ownerTag = ResolveNetworkContentIdentity(urlId, isMse, length, networkEvent.Url);
             // Observation already listed / network already bound an owned progressive —
             // ignore further anonymous CDN preloads (still allow ResourceKey upserts).
             if (ownerTag is null &&
@@ -223,7 +244,16 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             if (track.Kind == MediaTrackKind.Audio)
                 Upsert(_session.AudioCandidates, track);
             else
+            {
                 Upsert(_session.VideoCandidates, track);
+                if (!isMse &&
+                    track.Kind == MediaTrackKind.Combined &&
+                    track.ContentIdentity is { Length: > 0 } identity &&
+                    identity.StartsWith("id:", StringComparison.Ordinal))
+                {
+                    RememberProgressiveOwner(networkEvent.Url, identity["id:".Length..]);
+                }
+            }
 
             // MSE-only observations must not force Video mode away from Album.
             if (_session.CurrentMode == DouyinContentMode.Unknown &&
@@ -342,6 +372,8 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 
             _failed = false;
             _failureReason = null;
+            if (descriptor.MediaId is { Length: > 0 } mediaId && descriptor.Video is not null)
+                RememberProgressiveOwner(descriptor.Video.SourceUrl, mediaId);
             _logger.LogInformation(
                 "[DouyinSelect] session={Session} selected={Host}{Path} kind={Kind} formats={Formats} reason=progressive_muxed owner={Owner}",
                 _session.SessionId,
@@ -737,10 +769,13 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         return track.ContentIdentity == "id:" + _session.CurrentContentId;
     }
 
-    private string? ResolveNetworkContentIdentity(string? urlId, bool isMse, long? contentLength)
+    private string? ResolveNetworkContentIdentity(string? urlId, bool isMse, long? contentLength, Uri url)
     {
         if (urlId is not null)
+        {
+            RememberProgressiveOwner(url, urlId);
             return "id:" + urlId;
+        }
 
         // Page URL alone is not enough — wait for a matching observation so /video/{id}
         // does not inherit anonymous ad preloads. Empty observation media then allows
@@ -748,16 +783,50 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         if (!_observationSealed || _session.CurrentContentId is null || isMse)
             return null;
 
+        if (TryGetForeignProgressiveOwner(url, out _))
+            return null;
+
         // Never bind a second anonymous progressive — next-feed preloads often omit __vid
         // and would otherwise inherit the active work (wrong-id downloads).
         if (HasOwnedProgressive())
+            return null;
+
+        // Require a real size before claiming ownership — null-length accepts were rebinding
+        // the previous work's CDN object immediately after Reenter/dedupe reset.
+        if (contentLength is null or < MediaResourceSizeFilter.MinProgressiveVideoBytes)
             return null;
 
         // Player duration is a strong cross-check for id-less CDN objects.
         if (!FitsObservedDuration(contentLength))
             return null;
 
+        RememberProgressiveOwner(url, _session.CurrentContentId);
         return "id:" + _session.CurrentContentId;
+    }
+
+    private void RememberProgressiveOwner(Uri url, string contentId)
+    {
+        if (string.IsNullOrWhiteSpace(contentId))
+            return;
+        var key = ResourceKey(url);
+        _progressiveOwnerByResourceKey[key] = contentId;
+        if (_progressiveOwnerByResourceKey.Count <= 64)
+            return;
+        foreach (var stale in _progressiveOwnerByResourceKey.Keys.Take(_progressiveOwnerByResourceKey.Count - 48).ToList())
+            _progressiveOwnerByResourceKey.Remove(stale);
+    }
+
+    private bool TryGetForeignProgressiveOwner(Uri url, out string foreignOwner)
+    {
+        foreignOwner = "";
+        if (_session.CurrentContentId is null)
+            return false;
+        if (!_progressiveOwnerByResourceKey.TryGetValue(ResourceKey(url), out var owner))
+            return false;
+        if (string.Equals(owner, _session.CurrentContentId, StringComparison.Ordinal))
+            return false;
+        foreignOwner = owner;
+        return true;
     }
 
     /// <summary>
@@ -769,8 +838,9 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         var duration = _session.ObservedDurationSec;
         if (duration is null or < 1.0)
             return true;
+        // Unknown size cannot prove ownership when duration is known — wait for Content-Length.
         if (contentLength is null or < 50_000)
-            return true;
+            return false;
 
         var bitsPerSec = contentLength.Value * 8.0 / duration.Value;
         // Douyin web progressive is usually ~0.3–16 Mbps. Far outside ⇒ different work.

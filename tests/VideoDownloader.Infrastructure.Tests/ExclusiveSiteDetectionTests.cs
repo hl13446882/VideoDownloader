@@ -210,6 +210,56 @@ public class ExclusiveSiteDetectionTests
     }
 
     [Fact]
+    public async Task Douyin_Reenter_Does_Not_Rebind_Prior_Work_Progressive()
+    {
+        const string first = "7662996544086681509";
+        const string second = "7660608368599469355";
+        var page1 = new Uri("https://www.douyin.com/jingxuan?modal_id=" + first);
+        var page2 = new Uri("https://www.douyin.com/jingxuan?modal_id=" + second);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, rows) => last = rows.FirstOrDefault();
+
+        detector.BeginSession(page1, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page1, "一",
+            "{\"identity\":\"content:" + first + "\",\"album\":false,\"media\":[],\"durationSec\":15}",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        var priorUrl =
+            "https://v3-dy-o.zjcdn.com/203cd69df9dedd219988bb4abe8fa751/6aa14ad5/video/tos/cn/tos-cn-ve-15c000-ce/owaI0RaPbaEaA5ABq1iI?mime_type=video_mp4";
+        await detector.ProcessNetworkAsync(Evt(page1, priorUrl) with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 13_913_860
+        }, CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.NotNull(last);
+        Assert.Equal(first, last!.MediaId);
+
+        // Reenter like feed swipe + dedupe reset — prior CDN object must not bind to second.
+        detector.HardClear();
+        last = null;
+        detector.BeginSession(page2, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page2, "二",
+            "{\"identity\":\"content:" + second + "\",\"album\":false,\"media\":[],\"durationSec\":55}",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.ProcessNetworkAsync(Evt(page2, priorUrl) with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 13_913_860
+        }, CancellationToken.None);
+        var nextUrl =
+            "https://v3-dy-o.zjcdn.com/d677c5b8e7ba88e7bddd417095524fb4/6aa14b4b/video/tos/cn/tos-cn-ve-15/ogDUP4fKQeKfUFhByHnCAiazEnE?mime_type=video_mp4";
+        await detector.ProcessNetworkAsync(Evt(page2, nextUrl) with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 35_554_036
+        }, CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+
+        Assert.NotNull(last);
+        Assert.Equal(second, last!.MediaId);
+        Assert.Contains("ogDUP4fK", last.Video!.SourceUrl.AbsolutePath, StringComparison.Ordinal);
+        Assert.DoesNotContain("owaI0RaPbaEa", last.Video.SourceUrl.AbsolutePath, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Douyin_RejectsMismatchedPlayerObservation_AndUnboundNetwork()
     {
         var page = new Uri("https://www.douyin.com/video/7674888187625458982");
