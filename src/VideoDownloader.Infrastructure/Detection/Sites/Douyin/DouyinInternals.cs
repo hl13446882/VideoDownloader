@@ -66,6 +66,61 @@ internal static class DouyinIdentity
 
 internal static class DouyinPlayEvidence
 {
+    public static bool IsMusicPath(Uri url) =>
+        url.AbsolutePath.Contains("/ies-music/", StringComparison.OrdinalIgnoreCase) ||
+        url.AbsolutePath.Contains("/media-audio-", StringComparison.OrdinalIgnoreCase) ||
+        Regex.IsMatch(url.AbsolutePath, @"\.(?:m4a|mp3|aac)$", RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// /aweme/v1/play gateways (www/amemv) only 302 to CDN — keep as recovery, never prefer.
+    /// </summary>
+    public static bool IsPlayGateway(Uri url)
+    {
+        if (!url.AbsolutePath.Contains("/aweme/v1/play", StringComparison.OrdinalIgnoreCase) &&
+            !url.AbsolutePath.Contains("/aweme/v1/playwm", StringComparison.OrdinalIgnoreCase))
+            return false;
+        var host = url.Host;
+        return host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("amemv.com", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsPlayableUrl(Uri url)
+    {
+        if (IsLivePullHost(url))
+            return false;
+        if (IsMusicPath(url))
+            return true;
+        if (IsNonDownloadableHost(url))
+            return false;
+        return IsStrongVodHost(url) ||
+               IsPlayGateway(url) ||
+               Regex.IsMatch(url.AbsolutePath, @"\.(?:mp4|webm|m4a|mp3|aac|m3u8|mpd)$", RegexOptions.IgnoreCase) ||
+               url.AbsolutePath.Contains("/media-video-", StringComparison.OrdinalIgnoreCase) ||
+               url.AbsolutePath.Contains("/video/tos/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsNonMediaMime(string? mime) =>
+        mime is not null && (mime.StartsWith("text/", StringComparison.OrdinalIgnoreCase) ||
+            mime.StartsWith("image/", StringComparison.OrdinalIgnoreCase) ||
+            mime.Contains("json", StringComparison.OrdinalIgnoreCase) ||
+            mime.Contains("javascript", StringComparison.OrdinalIgnoreCase) ||
+            mime.Contains("protobuf", StringComparison.OrdinalIgnoreCase));
+
+    public static long? GetEntityLength(NormalizedNetworkEvent e)
+    {
+        var range = e.ResponseHeaders.FirstOrDefault(h => h.Key.Equals("Content-Range", StringComparison.OrdinalIgnoreCase)).Value;
+        if (e.StatusCode == 206 || !string.IsNullOrWhiteSpace(range))
+        {
+            if (System.Net.Http.Headers.ContentRangeHeaderValue.TryParse(range, out var parsed) &&
+                parsed.Unit.Equals("bytes", StringComparison.OrdinalIgnoreCase) && parsed.HasRange &&
+                parsed.Length is > 0 && parsed.To < parsed.Length)
+                return parsed.Length;
+            return null;
+        }
+        return e.ContentLength is > 0 ? e.ContentLength : null;
+    }
+
     public static bool IsBrowserPlay(NormalizedNetworkEvent e) =>
         e.StatusCode is 200 or 206 &&
         (string.Equals(e.ResourceType, "Media", StringComparison.OrdinalIgnoreCase) ||
@@ -87,12 +142,50 @@ internal static class DouyinPlayEvidence
                full.Contains("/play/", StringComparison.OrdinalIgnoreCase);
     }
 
+    public static bool IsStrongVodHost(Uri url) =>
+        url.Host.Contains("douyinvod", StringComparison.OrdinalIgnoreCase) ||
+        url.Host.Contains("zjcdn", StringComparison.OrdinalIgnoreCase) ||
+        url.Host.Contains("bytecdn", StringComparison.OrdinalIgnoreCase) ||
+        url.Host.Contains("byteicdn", StringComparison.OrdinalIgnoreCase) ||
+        (url.Host.Contains("douyincdn", StringComparison.OrdinalIgnoreCase) &&
+         !IsLivePullHost(url));
+
+    /// <summary>Effect/overlay/live-pull/static hosts are not downloadable progressive VOD.</summary>
+    public static bool IsNonDownloadableHost(Uri url)
+    {
+        if (IsMusicPath(url))
+            return false;
+        return url.Host.Contains("effect", StringComparison.OrdinalIgnoreCase) ||
+               url.Host.Contains("byteeffect", StringComparison.OrdinalIgnoreCase) ||
+               url.Host.Contains("lf3-effectcdn", StringComparison.OrdinalIgnoreCase) ||
+               url.Host.Contains("lf3-social", StringComparison.OrdinalIgnoreCase) ||
+               url.Host.Contains("douyinstatic", StringComparison.OrdinalIgnoreCase) ||
+               url.Host.Contains("live.douyin", StringComparison.OrdinalIgnoreCase) ||
+               url.Host.Contains("www-hj.douyin", StringComparison.OrdinalIgnoreCase) ||
+               IsLivePullHost(url);
+    }
+
+    public static bool IsLivePullHost(Uri url)
+    {
+        if (url.Host.StartsWith("pull-", StringComparison.OrdinalIgnoreCase) ||
+            url.Host.Contains("pull-", StringComparison.OrdinalIgnoreCase) ||
+            url.AbsolutePath.Contains("/third/stream-", StringComparison.OrdinalIgnoreCase) ||
+            url.AbsolutePath.Contains("/media/stream-", StringComparison.OrdinalIgnoreCase))
+            return true;
+        var full = url.AbsoluteUri;
+        return full.Contains(".flv", StringComparison.OrdinalIgnoreCase) ||
+               full.Contains("/flv/", StringComparison.OrdinalIgnoreCase) ||
+               full.Contains("mime_type=video_flv", StringComparison.OrdinalIgnoreCase) ||
+               full.Contains("media_type=video_flv", StringComparison.OrdinalIgnoreCase) ||
+               full.Contains("pull-flv", StringComparison.OrdinalIgnoreCase) ||
+               full.Contains("pull-hls", StringComparison.OrdinalIgnoreCase);
+    }
+
     public static bool IsTinyMseCrumb(Uri url, long? contentLength)
     {
         if (contentLength is null or <= 0 || !DouyinIdentity.IsMediaHost(url))
             return false;
-        var audio = url.AbsolutePath.Contains("/media-audio-", StringComparison.OrdinalIgnoreCase) ||
-                    url.AbsolutePath.Contains("/ies-music/", StringComparison.OrdinalIgnoreCase) ||
+        var audio = IsMusicPath(url) ||
                     url.AbsoluteUri.Contains("mime_type=audio", StringComparison.OrdinalIgnoreCase);
         var min = audio ? MediaResourceSizeFilter.MinStrongMimeBytes : MediaResourceSizeFilter.MinDisplayBytes;
         return contentLength < min;
@@ -100,18 +193,33 @@ internal static class DouyinPlayEvidence
 
     public static MediaTrackKind InferKind(Uri url, string? mime)
     {
-        if (mime?.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) == true)
+        var path = url.AbsolutePath;
+        var full = url.AbsoluteUri;
+
+        // Adaptive fMP4: separate A/V tracks — never label media-video as Combined.
+        if (path.Contains("/media-audio-", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("/ies-music/", StringComparison.OrdinalIgnoreCase) ||
+            full.Contains("mime_type=audio", StringComparison.OrdinalIgnoreCase) ||
+            full.Contains("/audio/tos/", StringComparison.OrdinalIgnoreCase) ||
+            mime?.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) == true)
             return MediaTrackKind.Audio;
+
+        if (path.Contains("/media-video-", StringComparison.OrdinalIgnoreCase))
+            return MediaTrackKind.Video;
+
+        // Muxed progressive objects (video/tos without media-video).
+        if (full.Contains("mime_type=video", StringComparison.OrdinalIgnoreCase) ||
+            full.Contains("/video/tos/", StringComparison.OrdinalIgnoreCase) ||
+            path.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase) ||
+            path.EndsWith(".webm", StringComparison.OrdinalIgnoreCase))
+            return MediaTrackKind.Combined;
+
         if (mime?.StartsWith("video/", StringComparison.OrdinalIgnoreCase) == true)
             return MediaTrackKind.Video;
-        var full = url.AbsoluteUri;
-        if (full.Contains("mime_type=audio", StringComparison.OrdinalIgnoreCase) ||
-            full.Contains("/audio/tos/", StringComparison.OrdinalIgnoreCase) ||
-            url.AbsolutePath.Contains("/ies-music/", StringComparison.OrdinalIgnoreCase) ||
-            url.AbsolutePath.Contains("/media-audio-", StringComparison.OrdinalIgnoreCase))
-            return MediaTrackKind.Audio;
-        if (LooksLikePlay(url) || DouyinIdentity.IsMediaHost(url))
+
+        if (IsPlayGateway(url) || LooksLikePlay(url) || DouyinIdentity.IsMediaHost(url))
             return MediaTrackKind.Combined;
+
         return MediaTrackKind.Unknown;
     }
 }
@@ -173,8 +281,29 @@ internal sealed class DouyinDetectionSession
             mode != DouyinContentMode.Unknown)
             return;
 
-        CurrentContentId = contentId;
-        CurrentMode = mode;
+        // Soft identity bind: null → real aweme id for the same work must NOT wipe
+        // already-captured browser/CDN candidates (recommend feed resolves id late).
+        var hardIdChange = contentId is not null &&
+                           CurrentContentId is not null &&
+                           !string.Equals(CurrentContentId, contentId, StringComparison.Ordinal);
+        var hardModeChange = mode != DouyinContentMode.Unknown &&
+                             CurrentMode != DouyinContentMode.Unknown &&
+                             mode != CurrentMode;
+
+        if (!hardIdChange && !hardModeChange)
+        {
+            if (contentId is not null)
+                CurrentContentId = contentId;
+            if (mode != DouyinContentMode.Unknown)
+                CurrentMode = mode;
+            return;
+        }
+
+        if (hardIdChange)
+            Caption = null;
+        CurrentContentId = contentId ?? CurrentContentId;
+        if (mode != DouyinContentMode.Unknown)
+            CurrentMode = mode;
         VideoCandidates.Clear();
         AudioCandidates.Clear();
         AlbumImages.Clear();

@@ -15,6 +15,76 @@ namespace VideoDownloader.Infrastructure.Tests;
 
 public class ExclusiveSiteDetectionTests
 {
+    [Theory]
+    [InlineData("bytes 0-4613733/52428800", 52428800L)]
+    [InlineData("bytes 0-4613733/*", null)]
+    [InlineData(null, null)]
+    public async Task Douyin_Partial_Response_Does_Not_Label_Chunk_As_Full_Size(string? range, long? expected)
+    {
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var page = new Uri("https://www.douyin.com/video/7682715203741568283");
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "当前作品", """{"media":[],"album":false}""", RequestContext.CreateEmpty(), CancellationToken.None);
+        MediaDescriptor? result = null;
+        detector.DescriptorsReady += (_, rows) => result = rows.Single();
+        await detector.ProcessNetworkAsync(Evt(page, "https://v3.douyinvod.com/current.mp4") with
+        {
+            StatusCode = 206, ContentLength = 4613734,
+            ResponseHeaders = range is null ? new Dictionary<string,string>() : new Dictionary<string,string> { ["content-range"] = range }
+        }, CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.NotNull(result);
+        Assert.Equal(expected, result.Video!.ContentLength);
+        Assert.DoesNotContain("4.4MB", MediaDescriptorMapper.ToDetectedVideo(result, Guid.NewGuid()).DisplayTitle);
+    }
+
+    [Theory]
+    [InlineData("https://imapi.douyin.com/v1/stranger/get_conversation_list", "application/x-protobuf")]
+    [InlineData("https://www.douyin.com/aweme/v1/web/feed/", "application/json")]
+    [InlineData("https://v3.douyinvod.com/invalid.mp4", "text/html")]
+    public async Task Douyin_Rejects_NonMedia_Response_Even_With_Large_Length(string url, string mime)
+    {
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var page = new Uri("https://www.douyin.com/video/7682715203741568283");
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "当前作品", """{"media":[],"album":false}""", RequestContext.CreateEmpty(), CancellationToken.None);
+        var emitted = false;
+        detector.DescriptorsReady += (_, _) => emitted = true;
+        await detector.ProcessNetworkAsync(Evt(page,url) with { MimeType=mime, ContentLength=4613734 }, CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.False(emitted);
+        Assert.True(detector.Failed);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Completing_Old_Work_Does_Not_Seal_New_Session(bool switchWhileWaitingForLease)
+    {
+        var detector = Substitute.For<IExclusiveSiteMediaDetector>();
+        detector.Matches(Arg.Any<Uri>()).Returns(true);
+        detector.Site.Returns(SiteKind.YouTube);
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        detector.CompleteAsync(Arg.Any<CancellationToken>()).Returns(completion.Task);
+        var unified = new UnifiedMediaPipeline(Substitute.For<IRequestMessageFactory>(), [], Options.Create(new AppOptions()));
+        var routed = new RoutedMediaDetectionPipeline(unified, new SiteDetectionRouter(),
+            new ExclusiveSiteMediaDetectorResolver([detector]), NullLogger<RoutedMediaDetectionPipeline>.Instance);
+        await routed.ProbePageAsync(new Uri("https://www.youtube.com/watch?v=first"), null, null,
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        using var oldLease = routed.BeginDiscovery(routed.SessionId);
+        if (switchWhileWaitingForLease) completion.SetResult();
+        var finishing = routed.CompleteDiscoveryAsync(CancellationToken.None);
+        var oldSession = routed.SessionId;
+        await routed.ProbePageAsync(new Uri("https://www.youtube.com/watch?v=second"), null, null,
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        if (!switchWhileWaitingForLease) completion.SetResult();
+        await finishing.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.NotEqual(oldSession, routed.SessionId);
+        Assert.False(routed.IsCompleted);
+        using var newLease = routed.BeginDiscovery(routed.SessionId);
+        Assert.NotNull(newLease);
+    }
+
     private static RoutedMediaDetectionPipeline CreateRouted(out UnifiedMediaPipeline unified)
     {
         unified = new UnifiedMediaPipeline(
@@ -231,6 +301,84 @@ public class ExclusiveSiteDetectionTests
         Assert.Null(detected);
         Assert.True(probed);
         Assert.Empty(unified.LastProbeDecisions);
+    }
+
+    [Fact]
+    public async Task Douyin_Prefers_Muxed_Progressive_Over_Silent_MediaVideo_And_Gateway()
+    {
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var page = new Uri("https://www.douyin.com/?recommend=1");
+        detector.BeginSession(page, Guid.NewGuid());
+
+        // Late identity bind must not wipe the progressive candidate already captured.
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://v3-web-prime.douyinvod.com/video/tos/cn/obj/progressive?mime_type=video_mp4") with
+        {
+            ResourceType = "Media", StatusCode = 206, ContentLength = 8_000_000,
+            ResponseHeaders = new Dictionary<string, string> { ["content-range"] = "bytes 0-65535/8000000" }
+        }, CancellationToken.None);
+
+        await detector.ProcessPageObservationAsync(page, "作品",
+            """{"identity":"content:7680538459441859882","album":false,"media":[]}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://v3-web-prime.douyinvod.com/video/tos/cn/tos-cn-vd-0026/x/media-video-avc1/?mime_type=video_mp4") with
+        {
+            ResourceType = "Media", StatusCode = 206, ContentLength = 20_000_000,
+            ResponseHeaders = new Dictionary<string, string> { ["content-range"] = "bytes 0-65535/20000000" }
+        }, CancellationToken.None);
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://www.douyin.com/aweme/v1/play/?video_id=v0200&is_play_url=1") with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 50_000_000
+        }, CancellationToken.None);
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://pull-flv-l13.douyincdn.com/stage/stream-1.flv") with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 300_000_000
+        }, CancellationToken.None);
+
+        await detector.CompleteAsync(CancellationToken.None);
+
+        Assert.NotNull(last);
+        Assert.Equal(MediaTrackKind.Combined, last!.Video!.Kind);
+        Assert.Contains("progressive", last.Video.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("/aweme/v1/play", last.Video.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(".flv", last.Video.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("media-video-", last.Video.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Douyin_MediaVideo_Pairs_With_MediaAudio()
+    {
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var page = new Uri("https://www.douyin.com/video/7682715203741568283");
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "v",
+            """{"identity":"content:7682715203741568283","album":false,"media":[]}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://v3.douyinvod.com/video/tos/cn/x/media-video-avc1/?mime_type=video_mp4") with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 12_000_000
+        }, CancellationToken.None);
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://v3.douyinvod.com/video/tos/cn/x/media-audio-mp4a/?mime_type=audio_mp4") with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 1_200_000
+        }, CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+
+        Assert.NotNull(last);
+        Assert.Equal(MediaTrackKind.Video, last!.Video!.Kind);
+        Assert.NotNull(last.Audio);
+        Assert.Equal(MediaTrackKind.Audio, last.Audio!.Kind);
+        Assert.Contains("media-audio-", last.Audio.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

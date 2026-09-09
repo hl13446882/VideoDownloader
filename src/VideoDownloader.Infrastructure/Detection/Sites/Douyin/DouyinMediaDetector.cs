@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using VideoDownloader.Core.Contracts;
+using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
 
 namespace VideoDownloader.Infrastructure.Detection.Sites.Douyin;
@@ -67,6 +68,11 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             if (networkEvent.StatusCode is not (200 or 206 or null))
                 return Task.CompletedTask;
 
+            if (_session.CurrentMode != DouyinContentMode.Album &&
+                (DouyinPlayEvidence.IsNonMediaMime(networkEvent.MimeType) ||
+                 !DouyinPlayEvidence.IsPlayableUrl(networkEvent.Url)))
+                return Task.CompletedTask;
+
             if (_session.CurrentMode == DouyinContentMode.Album)
             {
                 TryAcceptAlbumNetworkImage(networkEvent);
@@ -77,6 +83,9 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             // Video / Unknown: collect playable media for current work only.
             if (DouyinPlayEvidence.IsTinyMseCrumb(networkEvent.Url, networkEvent.ContentLength) &&
                 !DouyinPlayEvidence.IsBrowserPlay(networkEvent))
+                return Task.CompletedTask;
+
+            if (DouyinPlayEvidence.IsNonDownloadableHost(networkEvent.Url))
                 return Task.CompletedTask;
 
             if (!DouyinIdentity.IsMediaHost(networkEvent.Url) &&
@@ -99,9 +108,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 
             var kind = DouyinPlayEvidence.InferKind(networkEvent.Url, networkEvent.MimeType);
             var ctx = EnrichContext(networkEvent.RequestContext);
-            var length = DouyinPlayEvidence.IsTinyMseCrumb(networkEvent.Url, networkEvent.ContentLength)
-                ? null
-                : networkEvent.ContentLength;
+            var length = DouyinPlayEvidence.GetEntityLength(networkEvent);
             var track = new MediaTrack(
                 kind == MediaTrackKind.Audio ? "audio" : "video",
                 kind is MediaTrackKind.Audio or MediaTrackKind.Video ? kind : MediaTrackKind.Combined,
@@ -226,14 +233,22 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             };
         }
 
-        var video = SelectBest(_session.VideoCandidates);
+        var video = SelectBestVideo(_session.VideoCandidates, _session.AudioCandidates);
         if (video is null)
             return null;
         var pairedAudio = SelectBest(_session.AudioCandidates);
-        // Prefer combined when audio not separate.
+        // Muxed progressive already carries audio — do not remux a second track.
         if (video.Kind == MediaTrackKind.Combined)
             pairedAudio = null;
 
+        _logger.LogInformation(
+            "Douyin selected video host={Host} kind={Kind} gateway={Gateway} browser={Browser} len={Len} audio={Audio}",
+            video.SourceUrl.Host, video.Kind,
+            DouyinPlayEvidence.IsPlayGateway(video.SourceUrl),
+            video.BrowserObserved, video.ContentLength,
+            pairedAudio?.SourceUrl.Host);
+
+        var formats = BuildFormatLadder(_session.VideoCandidates, pairedAudio, page);
         return new MediaDescriptor(
             SiteIds.Douyin,
             page,
@@ -246,8 +261,78 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             Confidence: video.BrowserObserved ? 0.95 : 0.75,
             DisplayTitle: _session.Caption)
         {
-            SessionId = _session.SessionId
+            SessionId = _session.SessionId,
+            Formats = formats
         };
+    }
+
+    private static IReadOnlyList<MediaVariant> BuildFormatLadder(
+        IReadOnlyList<MediaTrack> videos, MediaTrack? audio, Uri page)
+    {
+        var list = new List<MediaVariant>();
+        foreach (var track in videos
+                     .Where(t => !DouyinPlayEvidence.IsNonDownloadableHost(t.SourceUrl) &&
+                                 !DouyinPlayEvidence.IsLivePullHost(t.SourceUrl))
+                     .OrderByDescending(t => ScoreTrack(t, audio is not null)))
+        {
+            var tracks = new List<MediaTrack> { track };
+            if (track.Kind == MediaTrackKind.Video && audio is not null)
+                tracks.Add(audio);
+            list.Add(new MediaVariant(
+                track.TrackId,
+                null,
+                null,
+                null,
+                track.Container,
+                tracks)
+            {
+                RecoveryPageUrl = page,
+                ContentIdentity = track.ContentIdentity
+            });
+        }
+        return list;
+    }
+
+    private static MediaTrack? SelectBestVideo(IReadOnlyList<MediaTrack> videos, IReadOnlyList<MediaTrack> audios)
+    {
+        var hasAudio = audios.Any(t => !DouyinPlayEvidence.IsNonDownloadableHost(t.SourceUrl) ||
+                                       DouyinPlayEvidence.IsMusicPath(t.SourceUrl));
+        var ranked = videos
+            .Where(t => !DouyinPlayEvidence.IsNonDownloadableHost(t.SourceUrl) &&
+                        !DouyinPlayEvidence.IsLivePullHost(t.SourceUrl))
+            .OrderByDescending(t => ScoreTrack(t, hasAudio))
+            .ToList();
+        if (ranked.Count == 0)
+            return null;
+
+        var best = ranked[0];
+        // Silent media-video without a paired audio → fall back to muxed progressive.
+        if (best.Kind == MediaTrackKind.Video && !hasAudio)
+        {
+            var combined = ranked.FirstOrDefault(t => t.Kind == MediaTrackKind.Combined);
+            if (combined is not null)
+                return combined;
+        }
+
+        return best;
+    }
+
+    private static int ScoreTrack(MediaTrack t, bool hasAudioPair = true)
+    {
+        if (DouyinPlayEvidence.IsLivePullHost(t.SourceUrl))
+            return int.MinValue / 4;
+
+        var score = 0;
+        if (DouyinPlayEvidence.IsPlayGateway(t.SourceUrl)) score -= 2000;
+        if (DouyinPlayEvidence.IsStrongVodHost(t.SourceUrl)) score += 1000;
+        if (t.BrowserObserved) score += 500;
+        if (t.Kind == MediaTrackKind.Combined) score += 400;
+        if (t.Kind == MediaTrackKind.Video)
+            score += hasAudioPair ? 200 : -300;
+        if (t.ContentLength is >= 1L * 1024 * 1024) score += 50;
+        if (t.ContentLength is > 0 and < MediaResourceSizeFilter.MinDisplayBytes) score -= 500;
+        score += (int)Math.Min(t.ContentLength ?? 0, int.MaxValue) / (1024 * 1024);
+        return score;
     }
 
     private void ApplyObservationJson(string? json)
@@ -299,6 +384,8 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                     if (item.ValueKind != JsonValueKind.String) continue;
                     if (!Uri.TryCreate(item.GetString(), UriKind.Absolute, out var url)) continue;
                     if (IsExcludedAlbumImage(url)) continue;
+                    if (DouyinPlayEvidence.IsNonDownloadableHost(url)) continue;
+                    if (!DouyinPlayEvidence.IsPlayableUrl(url)) continue;
                     var kind = DouyinPlayEvidence.InferKind(url, null);
                     var track = new MediaTrack(
                         kind == MediaTrackKind.Audio ? "audio" : "media",
@@ -366,7 +453,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             null,
             InferContainer(e.Url, e.MimeType),
             null,
-            e.ContentLength,
+            DouyinPlayEvidence.GetEntityLength(e),
             EnrichContext(e.RequestContext))
         {
             BrowserObserved = DouyinPlayEvidence.IsBrowserPlay(e),
@@ -408,6 +495,13 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 
     private static MediaTrack? SelectBest(IReadOnlyList<MediaTrack> tracks) =>
         tracks
+            .Where(t => (!DouyinPlayEvidence.IsNonDownloadableHost(t.SourceUrl) ||
+                         DouyinPlayEvidence.IsMusicPath(t.SourceUrl)) &&
+                        !DouyinPlayEvidence.IsLivePullHost(t.SourceUrl))
+            .OrderByDescending(t => ScoreTrack(t))
+            .FirstOrDefault()
+        ?? tracks
+            .Where(t => !DouyinPlayEvidence.IsLivePullHost(t.SourceUrl))
             .OrderByDescending(t => t.BrowserObserved)
             .ThenByDescending(t => t.ContentLength ?? 0)
             .FirstOrDefault();
