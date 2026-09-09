@@ -77,16 +77,28 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
     public void Clear()
     {
         lock (_gate)
-        {
-            ClearExclusiveUnlocked();
-            _session.Cancel();
-            _session = new();
-            _page = null;
-            _kind = SiteKind.Other;
-            _lastBuilt = [];
-            _exclusiveCompleted = false;
-            _unified.Clear();
-        }
+            ClearCoreUnlocked(hard: false);
+    }
+
+    /// <summary>
+    /// Manual probe兜底: wipe exclusive detectors including Douyin parked progressive.
+    /// </summary>
+    public void HardClear()
+    {
+        lock (_gate)
+            ClearCoreUnlocked(hard: true);
+    }
+
+    private void ClearCoreUnlocked(bool hard)
+    {
+        ClearExclusiveUnlocked(hard);
+        _session.Cancel();
+        _session = new();
+        _page = null;
+        _kind = SiteKind.Other;
+        _lastBuilt = [];
+        _exclusiveCompleted = false;
+        _unified.Clear();
     }
 
     public void UpdateCaption(Guid sessionId, string caption)
@@ -331,17 +343,25 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
         return null;
     }
 
-    private void ClearExclusiveUnlocked()
+    private void ClearExclusiveUnlocked(bool hard = false)
     {
         if (_active is not null)
         {
             _active.DescriptorsReady -= OnDescriptorsReady;
-            _active.Clear();
+            if (hard)
+                _active.HardClear();
+            else
+                _active.Clear();
             _active = null;
         }
 
         foreach (var d in _detectors.All)
-            d.Clear();
+        {
+            if (hard)
+                d.HardClear();
+            else
+                d.Clear();
+        }
     }
 
     private void OnDescriptorsReady(object? sender, IReadOnlyList<MediaDescriptor> descriptors)

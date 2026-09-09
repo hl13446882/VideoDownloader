@@ -66,11 +66,26 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         {
             // Do NOT park current progressive here: wrongly-bound unbound CDN would resurrect
             // under the old aweme after soft-nav and cause wrong-id downloads.
-            _session.Reset();
-            _failed = false;
-            _failureReason = null;
-            _observationSealed = false;
+            // Soft Clear keeps _parkedByContentId so feed swipe can still AdoptParked.
+            ClearUnlocked(wipeParked: false);
         }
+    }
+
+    /// <inheritdoc />
+    public void HardClear()
+    {
+        lock (_gate)
+            ClearUnlocked(wipeParked: true);
+    }
+
+    private void ClearUnlocked(bool wipeParked)
+    {
+        _session.Reset();
+        _failed = false;
+        _failureReason = null;
+        _observationSealed = false;
+        if (wipeParked)
+            _parkedByContentId.Clear();
     }
 
     public Task ProcessNetworkAsync(NormalizedNetworkEvent networkEvent, CancellationToken ct)

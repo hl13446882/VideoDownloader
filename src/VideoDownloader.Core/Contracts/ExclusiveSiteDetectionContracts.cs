@@ -21,6 +21,12 @@ public interface IExclusiveSiteMediaDetector
     void BeginSession(Uri pageUrl, Guid sessionId);
     void Clear();
 
+    /// <summary>
+    /// Manual probe兜底: wipe all session state including soft-nav parks.
+    /// Soft <see cref="Clear"/> may preserve parked progressive for feed adopt.
+    /// </summary>
+    void HardClear() => Clear();
+
     Task ProcessNetworkAsync(NormalizedNetworkEvent networkEvent, CancellationToken ct);
 
     Task ProcessPageObservationAsync(

@@ -778,10 +778,12 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
-        // Manual probe: keep UI, re-run page methods + external once. Do not Clear network finds.
+        // Manual probe兜底: wipe all detection state (incl. Douyin parks), then full session.
         ClearStatus();
-        _ = RunManualProbeAsync(pageUrl, tab?.Title);
+        HardResetDetectionPipeline();
+        SelectedTab?.Host.ResetDetectionSession();
         SetStatusKey("status.probeManual");
+        StartPageDetectionSession(pageUrl, tab?.Title, clearUi: true, forceReplace: true);
     }
 
     private void ClearDetectedVideos()
@@ -796,6 +798,15 @@ public sealed partial class MainViewModel : ObservableObject
     {
         _aggregator.Clear();
         _pipeline.Clear();
+    }
+
+    private void HardResetDetectionPipeline()
+    {
+        _aggregator.Clear();
+        if (_pipeline is RoutedMediaDetectionPipeline routed)
+            routed.HardClear();
+        else
+            _pipeline.Clear();
     }
 
     /// <summary>
@@ -866,79 +877,6 @@ public sealed partial class MainViewModel : ObservableObject
         if (resetMediaSession)
             SelectedTab?.Host.ResetDetectionSession();
         _ = RunStableDetectionSessionAsync(pageUrl, pageTitle, token, generation);
-    }
-
-    private async Task RunManualProbeAsync(Uri pageUrl, string? pageTitle)
-    {
-        // Fresh pipeline so addresses can update; keep existing UI until stronger/newer publish.
-        ResetDetectionPipeline();
-        SelectedTab?.Host.ResetDetectionSession();
-        _forceReplaceResults = true;
-        var generation = _pageGeneration;
-        var token = _probeCts.Token;
-        try
-        {
-            SetStatusKey("status.probeManual");
-            // Match auto session: settle + DOM grace so CDN playAddr can arrive before seal.
-            await Task.Delay(TimeSpan.FromSeconds(2), token);
-            if (generation != _pageGeneration)
-                return;
-
-            var host = SelectedTab?.Host;
-            if (host is not null)
-            {
-                for (var grace = 0; grace < 5; grace++)
-                {
-                    if (generation != _pageGeneration || token.IsCancellationRequested)
-                        return;
-                    try
-                    {
-                        await host.ProbeCurrentPageAsync(token);
-                    }
-                    catch (OperationCanceledException) when (token.IsCancellationRequested)
-                    {
-                        return;
-                    }
-                    catch
-                    {
-                        // Probe warnings must not abort manual discovery.
-                    }
-
-                    var found = false;
-                    await Application.Current.Dispatcher.InvokeAsync(() =>
-                        found = DetectedVideos.Count > 0);
-                    if (found)
-                        break;
-                    await Task.Delay(TimeSpan.FromSeconds(1.2), token);
-                }
-            }
-
-            await RunPagePassAsync(pageUrl, pageTitle, token, generation, runExternal: true);
-            await Application.Current.Dispatcher.InvokeAsync(() =>
-            {
-                if (generation != _pageGeneration)
-                    return;
-                if (DetectedVideos.Count > 0)
-                {
-                    SetStatusKey("status.probeManualDone", DetectedVideos.Count);
-                    return;
-                }
-
-                var pipeline = _pipeline as VideoDownloader.Infrastructure.Detection.UnifiedMediaPipeline;
-                var hint = pipeline?.LastValidationError ?? pipeline?.LastExternalError;
-                if (string.IsNullOrWhiteSpace(hint))
-                    SetStatusKey("status.probeManualEmpty");
-                else
-                    SetStatusKey("status.probeManualEmptyExt", hint);
-            });
-        }
-        catch (OperationCanceledException) when (token.IsCancellationRequested)
-        {
-        }
-        catch (Exception ex)
-        {
-            await Application.Current.Dispatcher.InvokeAsync(() => SetStatusKey("status.probeManualFailed", ex.Message));
-        }
     }
 
     private async Task RunStableDetectionSessionAsync(
