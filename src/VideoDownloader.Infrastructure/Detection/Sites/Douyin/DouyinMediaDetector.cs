@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
@@ -140,7 +141,8 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 
             var kind = DouyinPlayEvidence.InferKind(networkEvent.Url, networkEvent.MimeType);
             var isMse = DouyinPlayEvidence.IsMseAdaptivePath(networkEvent.Url);
-            var ownerTag = ResolveNetworkContentIdentity(urlId, networkEvent.Url, isMse);
+            var length = DouyinPlayEvidence.GetEntityLength(networkEvent);
+            var ownerTag = ResolveNetworkContentIdentity(urlId, isMse, length);
             // Observation already listed / network already bound an owned progressive —
             // ignore further anonymous CDN preloads (still allow ResourceKey upserts).
             if (ownerTag is null &&
@@ -160,8 +162,22 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 }
             }
 
+            if (ownerTag is null &&
+                urlId is null &&
+                _observationSealed &&
+                !isMse &&
+                _session.ObservedDurationSec is > 0 &&
+                length is > 0 &&
+                !FitsObservedDuration(length))
+            {
+                _logger.LogInformation(
+                    "[DouyinOwnership] reject unbound progressive duration mismatch duration={Duration}s len={Len} host={Host} path={Path}",
+                    _session.ObservedDurationSec, length, networkEvent.Url.Host,
+                    TruncatePath(networkEvent.Url.AbsolutePath));
+                return Task.CompletedTask;
+            }
+
             var ctx = EnrichContext(networkEvent.RequestContext);
-            var length = DouyinPlayEvidence.GetEntityLength(networkEvent);
             // Never promote MSE tracks to Combined — even if mime says video.
             var trackKind = kind switch
             {
@@ -233,13 +249,27 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             _session.Context = EnrichContext(context);
 
             var observedId = TryReadIdentity(pageScriptJson);
-            var pageId = DouyinIdentity.ExtractAwemeId(pageUrl);
+            var pathId = DouyinIdentity.ExtractAwemeIdFromPath(pageUrl);
             var observationId = DouyinIdentity.ExtractIdFromIdentity(observedId);
-            if (pageId is not null && observationId is not null && pageId != observationId)
+            if (pathId is not null && observationId is not null && pathId != observationId)
             {
-                _logger.LogInformation("[DouyinOwnership] reject observation current={Current} observed={Observed}", pageId, observationId);
+                _logger.LogInformation(
+                    "[DouyinOwnership] reject observation on dedicated page path={Path} observed={Observed}",
+                    pathId, observationId);
                 return Task.CompletedTask;
             }
+
+            var queryId = DouyinIdentity.ExtractIdFromQuery(pageUrl);
+            if (pathId is null &&
+                queryId is not null &&
+                observationId is not null &&
+                queryId != observationId)
+            {
+                _logger.LogInformation(
+                    "[DouyinOwnership] prefer observation over stamped queryId query={Query} observed={Observed}",
+                    queryId, observationId);
+            }
+
             var contentId = DouyinIdentity.ResolveContentId(pageUrl, observedId);
             var mode = DouyinContentModeResolver.Resolve(pageScriptJson, pageUrl);
             if (mode == DouyinContentMode.Unknown && contentId is not null)
@@ -258,6 +288,10 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             }
             else if (contentId is not null)
                 _session.CurrentContentId ??= contentId;
+
+            var durationSec = TryReadDurationSec(pageScriptJson);
+            if (durationSec is > 0)
+                _session.ObservedDurationSec = durationSec;
 
             // Matching observation for the active aweme — unlocks binding of id-less CDN progressive.
             if (contentId is not null &&
@@ -411,7 +445,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         return list;
     }
 
-    private static MediaTrack? SelectBestVideo(IReadOnlyList<MediaTrack> videos, IReadOnlyList<MediaTrack> audios)
+    private MediaTrack? SelectBestVideo(IReadOnlyList<MediaTrack> videos, IReadOnlyList<MediaTrack> audios)
     {
         // Hard rule: media-video / MSE tracks are never ordinary download sources.
         var progressive = videos
@@ -421,7 +455,8 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                         !DouyinPlayEvidence.IsMseVideoPath(t.SourceUrl) &&
                         !DouyinPlayEvidence.IsPlayGateway(t.SourceUrl) &&
                         t.Kind == MediaTrackKind.Combined &&
-                        !DouyinPlayEvidence.IsSuspiciousTinyProgressive(t))
+                        !DouyinPlayEvidence.IsSuspiciousTinyProgressive(t) &&
+                        FitsObservedDuration(t.ContentLength))
             .OrderByDescending(t => ScoreTrack(t, audios.Count > 0))
             .ToList();
 
@@ -700,7 +735,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         return track.ContentIdentity == "id:" + _session.CurrentContentId;
     }
 
-    private string? ResolveNetworkContentIdentity(string? urlId, Uri url, bool isMse)
+    private string? ResolveNetworkContentIdentity(string? urlId, bool isMse, long? contentLength)
     {
         if (urlId is not null)
             return "id:" + urlId;
@@ -716,7 +751,28 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         if (HasOwnedProgressive())
             return null;
 
+        // Player duration is a strong cross-check for id-less CDN objects.
+        if (!FitsObservedDuration(contentLength))
+            return null;
+
         return "id:" + _session.CurrentContentId;
+    }
+
+    /// <summary>
+    /// When the active player duration is known, reject byte sizes that imply an absurd bitrate
+    /// for that length (typical wrong-work progressive preload).
+    /// </summary>
+    private bool FitsObservedDuration(long? contentLength)
+    {
+        var duration = _session.ObservedDurationSec;
+        if (duration is null or < 1.0)
+            return true;
+        if (contentLength is null or < 50_000)
+            return true;
+
+        var bitsPerSec = contentLength.Value * 8.0 / duration.Value;
+        // Douyin web progressive is usually ~0.3–16 Mbps. Far outside ⇒ different work.
+        return bitsPerSec is >= 250_000 and <= 18_000_000;
     }
 
     private bool HasOwnedProgressive()
@@ -781,6 +837,28 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             if (doc.RootElement.TryGetProperty("identity", out var id) &&
                 id.ValueKind == JsonValueKind.String)
                 return id.GetString();
+        }
+        catch (JsonException)
+        {
+        }
+        return null;
+    }
+
+    private static double? TryReadDurationSec(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("durationSec", out var d))
+                return null;
+            if (d.ValueKind == JsonValueKind.Number && d.TryGetDouble(out var sec) &&
+                double.IsFinite(sec) && sec > 0)
+                return sec;
+            if (d.ValueKind == JsonValueKind.String &&
+                double.TryParse(d.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out sec) &&
+                double.IsFinite(sec) && sec > 0)
+                return sec;
         }
         catch (JsonException)
         {

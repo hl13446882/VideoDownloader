@@ -27,11 +27,15 @@ internal static class DouyinIdentity
         url.Host.Contains("byteicdn", StringComparison.OrdinalIgnoreCase) ||
         url.Host.Contains("iesdouyin", StringComparison.OrdinalIgnoreCase);
 
-    public static string? ExtractAwemeId(Uri pageUrl)
+    public static string? ExtractAwemeIdFromPath(Uri pageUrl)
     {
         var m = VideoIdPath.Match(pageUrl.AbsolutePath);
-        if (m.Success) return m.Groups["id"].Value;
-        return ExtractIdFromQuery(pageUrl);
+        return m.Success ? m.Groups["id"].Value : null;
+    }
+
+    public static string? ExtractAwemeId(Uri pageUrl)
+    {
+        return ExtractAwemeIdFromPath(pageUrl) ?? ExtractIdFromQuery(pageUrl);
     }
 
     public static string? ExtractIdFromQuery(Uri pageUrl)
@@ -58,9 +62,13 @@ internal static class DouyinIdentity
 
     public static string? ResolveContentId(Uri pageUrl, string? observedIdentity)
     {
-        return ExtractAwemeId(pageUrl) ??
-               ExtractIdFromIdentity(observedIdentity) ??
-               ExtractIdFromQuery(pageUrl);
+        var pathId = ExtractAwemeIdFromPath(pageUrl);
+        var observed = ExtractIdFromIdentity(observedIdentity);
+        // Dedicated /video|/note pages: path id wins (block ad-player observation hijack).
+        if (pathId is not null)
+            return pathId;
+        // Feed / stamped modal_id: prefer live player observation over lagging query id.
+        return observed ?? ExtractIdFromQuery(pageUrl);
     }
 }
 
@@ -325,6 +333,8 @@ internal sealed class DouyinDetectionSession
     public string? CurrentContentId { get; set; }
     public DouyinContentMode CurrentMode { get; private set; } = DouyinContentMode.Unknown;
     public string? Caption { get; set; }
+    /// <summary>Active player duration in seconds from page observation (when known).</summary>
+    public double? ObservedDurationSec { get; set; }
     public RequestContext Context { get; set; } = RequestContext.CreateEmpty();
 
     public List<MediaTrack> VideoCandidates { get; } = [];
@@ -357,7 +367,10 @@ internal sealed class DouyinDetectionSession
         }
 
         if (hardIdChange)
+        {
             Caption = null;
+            ObservedDurationSec = null;
+        }
         CurrentContentId = contentId ?? CurrentContentId;
         if (mode != DouyinContentMode.Unknown)
             CurrentMode = mode;
@@ -373,6 +386,7 @@ internal sealed class DouyinDetectionSession
         CurrentContentId = null;
         CurrentMode = DouyinContentMode.Unknown;
         Caption = null;
+        ObservedDurationSec = null;
         Context = RequestContext.CreateEmpty();
         VideoCandidates.Clear();
         AudioCandidates.Clear();

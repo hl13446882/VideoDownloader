@@ -112,6 +112,72 @@ public class ExclusiveSiteDetectionTests
     }
 
     [Fact]
+    public async Task Douyin_Prefers_Observation_Id_Over_Stamped_ModalId()
+    {
+        const string stamped = "7674888187625458982";
+        const string playing = "7522534938898468147";
+        var page = new Uri("https://www.douyin.com/jingxuan?modal_id=" + stamped);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, rows) => last = rows.Single();
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "正在播",
+            "{\"identity\":\"content:" + playing + "\",\"album\":false,\"media\":[],\"durationSec\":40.5}",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://v3-dy-o.zjcdn.com/video/tos/cn/obj/play.mp4?mime_type=video_mp4") with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 8_000_000
+        }, CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.NotNull(last);
+        Assert.Equal(playing, last!.MediaId);
+        Assert.Contains("play.mp4", last.Video!.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Douyin_Rejects_Unbound_Progressive_That_Mismatches_Observed_Duration()
+    {
+        var page = new Uri("https://www.douyin.com/jingxuan?modal_id=7680898097882840454");
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, rows) => last = rows.FirstOrDefault();
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "短片",
+            """{"identity":"content:7680898097882840454","album":false,"media":[],"durationSec":40}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://v3-dy-o.zjcdn.com/hash/video/tos/cn/tos-cn-ve-15/huge.mp4?mime_type=video_mp4") with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 400_000_000
+        }, CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.Null(last);
+        Assert.True(detector.Failed);
+    }
+
+    [Fact]
+    public async Task Douyin_Accepts_Unbound_Progressive_Matching_Observed_Duration()
+    {
+        var page = new Uri("https://www.douyin.com/jingxuan?modal_id=7680898097882840454");
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, rows) => last = rows.Single();
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "作品",
+            """{"identity":"content:7680898097882840454","album":false,"media":[],"durationSec":40}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://v3-dy-o.zjcdn.com/hash/video/tos/cn/tos-cn-ve-15/ok.mp4?mime_type=video_mp4") with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 35_000_000
+        }, CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.NotNull(last);
+        Assert.Contains("ok.mp4", last!.Video!.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Douyin_HardClear_Wipes_Parked_Progressive()
     {
         const string current = "7674888187625458982";
