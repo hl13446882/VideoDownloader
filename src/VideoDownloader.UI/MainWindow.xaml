@@ -190,42 +190,36 @@
                 <GroupBox Grid.Row="1" Header="{Binding L.SideQueue}" Margin="0,4,0,4">
                     <ListBox x:Name="DownloadQueueList"
                              ItemsSource="{Binding DownloadJobs}"
-                             SelectedItem="{Binding SelectedDownloadJob, Mode=TwoWay}"
                              SelectionMode="Multiple"
                              BorderThickness="0"
                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                              ToolTip="{Binding L.QueueTooltip}"
                              SelectionChanged="OnDownloadQueueSelectionChanged"
                              MouseDoubleClick="OnDownloadQueueDoubleClick"
-                             PreviewMouseRightButtonDown="OnDownloadQueuePreviewMouseRightButtonDown">
+                             PreviewMouseRightButtonDown="OnDownloadQueuePreviewMouseRightButtonDown"
+                             ContextMenuOpening="OnDownloadQueueContextMenuOpening">
                         <ListBox.ContextMenu>
-                            <ContextMenu>
-                                <MenuItem Header="{Binding PlacementTarget.DataContext.L.MenuPlay, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                          Click="OnDownloadQueuePlayClick"
-                                          IsEnabled="{Binding PlacementTarget.DataContext.CanPlaySelected, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
-                                <MenuItem Header="{Binding PlacementTarget.DataContext.L.MenuRename, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                          Click="OnDownloadQueueRenameClick"
-                                          IsEnabled="{Binding PlacementTarget.DataContext.CanRenameSelected, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
-                                <MenuItem Header="{Binding PlacementTarget.DataContext.L.MenuOpenFolder, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                          Command="{Binding PlacementTarget.DataContext.OpenSelectedFolderCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                          IsEnabled="{Binding PlacementTarget.DataContext.CanOpenSelectedFolder, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
-                                <MenuItem Header="{Binding PlacementTarget.DataContext.L.MenuOpenUrl, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                          Command="{Binding PlacementTarget.DataContext.OpenSelectedPageCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                          IsEnabled="{Binding PlacementTarget.DataContext.CanOpenSelectedPage, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                            <!-- DataContext must be PlacementTarget's VM; otherwise Can*/Command bindings stay stale or null. -->
+                            <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}"
+                                         Opened="OnDownloadQueueContextMenuOpened">
+                                <MenuItem Header="{Binding L.MenuPlay}"
+                                          Command="{Binding PlaySelectedDownloadCommand}"/>
+                                <MenuItem Header="{Binding L.MenuRename}"
+                                          Command="{Binding BeginRenameSelectedCommand}"/>
+                                <MenuItem Header="{Binding L.MenuOpenFolder}"
+                                          Command="{Binding OpenSelectedFolderCommand}"/>
+                                <MenuItem Header="{Binding L.MenuOpenUrl}"
+                                          Command="{Binding OpenSelectedPageCommand}"/>
                                 <Separator/>
-                                <MenuItem Header="{Binding PlacementTarget.DataContext.L.MenuPause, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                          Command="{Binding PlacementTarget.DataContext.PauseSelectedCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                          IsEnabled="{Binding PlacementTarget.DataContext.CanPauseSelected, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
-                                <MenuItem Header="{Binding PlacementTarget.DataContext.L.MenuResume, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                          Command="{Binding PlacementTarget.DataContext.ResumeSelectedCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                          IsEnabled="{Binding PlacementTarget.DataContext.CanResumeSelected, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
-                                <MenuItem Header="{Binding PlacementTarget.DataContext.L.MenuCancel, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                          Command="{Binding PlacementTarget.DataContext.CancelSelectedCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                          IsEnabled="{Binding PlacementTarget.DataContext.CanCancelSelected, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                <MenuItem Header="{Binding L.MenuPause}"
+                                          Command="{Binding PauseSelectedCommand}"/>
+                                <MenuItem Header="{Binding L.MenuResume}"
+                                          Command="{Binding ResumeSelectedCommand}"/>
+                                <MenuItem Header="{Binding L.MenuCancel}"
+                                          Command="{Binding CancelSelectedCommand}"/>
                                 <Separator/>
-                                <MenuItem Header="{Binding PlacementTarget.DataContext.L.MenuRemove, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                          Command="{Binding PlacementTarget.DataContext.RemoveSelectedCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                          IsEnabled="{Binding PlacementTarget.DataContext.CanRemoveSelected, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                <MenuItem Header="{Binding L.MenuRemove}"
+                                          Command="{Binding RemoveSelectedCommand}"/>
                             </ContextMenu>
                         </ListBox.ContextMenu>
                         <ListBox.ItemTemplate>

@@ -41,6 +41,11 @@ public partial class MainWindow : Window
         if (_suppressQueueSelectionSync || sender is not ListBox list)
             return;
 
+        SyncQueueSelectionFromList(list);
+    }
+
+    private void SyncQueueSelectionFromList(ListBox list)
+    {
         var selected = list.SelectedItems.Cast<DownloadJobViewModel>().ToList();
         var primary = list.SelectedItem as DownloadJobViewModel ?? selected.LastOrDefault();
         _viewModel.SetSelectedDownloadJobs(selected, primary);
@@ -72,10 +77,21 @@ public partial class MainWindow : Window
             _suppressQueueSelectionSync = false;
         }
 
-        OnDownloadQueueSelectionChanged(DownloadQueueList, new SelectionChangedEventArgs(
-            System.Windows.Controls.Primitives.Selector.SelectionChangedEvent,
-            Array.Empty<object>(),
-            Array.Empty<object>()));
+        SyncQueueSelectionFromList(DownloadQueueList);
+    }
+
+    private void OnDownloadQueueContextMenuOpening(object sender, ContextMenuEventArgs e)
+    {
+        // Re-sync before CanExecute is queried for menu items.
+        SyncQueueSelectionFromList(DownloadQueueList);
+        _viewModel.NotifyQueueCommandsPublic();
+    }
+
+    private void OnDownloadQueueContextMenuOpened(object sender, RoutedEventArgs e)
+    {
+        if (sender is ContextMenu menu)
+            menu.DataContext = _viewModel;
+        _viewModel.NotifyQueueCommandsPublic();
     }
 
     private void OnDownloadQueueDoubleClick(object sender, MouseButtonEventArgs e)
@@ -86,15 +102,6 @@ public partial class MainWindow : Window
             return;
 
         PlaySelectedDownloadLikeDoubleClick();
-    }
-
-    private void OnDownloadQueuePlayClick(object sender, RoutedEventArgs e) =>
-        PlaySelectedDownloadLikeDoubleClick();
-
-    private void OnDownloadQueueRenameClick(object sender, RoutedEventArgs e)
-    {
-        if (_viewModel.BeginRenameSelectedCommand.CanExecute(null))
-            _viewModel.BeginRenameSelectedCommand.Execute(null);
     }
 
     private void OnRenameTextBoxLoaded(object sender, RoutedEventArgs e)
@@ -169,6 +176,7 @@ public partial class MainWindow : Window
         }
 
         item.Focus();
+        SyncQueueSelectionFromList(list);
         _viewModel.NotifyQueueCommandsPublic();
     }
 

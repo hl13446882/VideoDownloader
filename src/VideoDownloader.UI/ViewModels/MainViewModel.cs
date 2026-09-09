@@ -667,10 +667,10 @@ public sealed partial class MainViewModel : ObservableObject
         _selectedDownloadJobIds.Clear();
         _selectedDownloadJobIds.AddRange(_selectedDownloadJobs.Select(j => j.Job.Id));
 
+        // Always refresh Can* — multi-select can change while primary stays the same.
         if (!ReferenceEquals(SelectedDownloadJob, primary))
             SelectedDownloadJob = primary;
-        else
-            NotifyQueueCommands();
+        NotifyQueueCommands();
     }
 
     [RelayCommand]
