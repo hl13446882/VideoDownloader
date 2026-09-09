@@ -8,8 +8,10 @@ using VideoDownloader.Infrastructure.Diagnostics;
 namespace VideoDownloader.Infrastructure.Detection;
 
 /// <summary>
-/// Routes page detection to an exclusive site detector or Generic Unified pipeline.
+/// Routes page detection to one of the five singleton entries:
+/// Douyin / TikTok / YouTube / Bilibili / Generic(Unified).
 /// Exclusive sites never fall back to Unified/Generic.
+/// Re-entry destroys the previous session on that singleton — only one run at a time.
 /// </summary>
 public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
 {
@@ -81,12 +83,25 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
     }
 
     /// <summary>
-    /// Manual probe兜底: wipe exclusive detectors including Douyin parked progressive.
+    /// Manual probe / page-change兜底: wipe exclusive detectors including Douyin parked progressive.
     /// </summary>
     public void HardClear()
     {
         lock (_gate)
             ClearCoreUnlocked(hard: true);
+    }
+
+    /// <summary>
+    /// Destroy the previous singleton-detector session and enter exactly one fresh run for
+    /// <paramref name="pageUrl"/> (exclusive BeginSession, or Generic clear).
+    /// </summary>
+    public void Reenter(Uri pageUrl)
+    {
+        lock (_gate)
+        {
+            ClearCoreUnlocked(hard: true);
+            EnsureRouteUnlocked(pageUrl);
+        }
     }
 
     private void ClearCoreUnlocked(bool hard)
@@ -257,22 +272,20 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
         var sameRoute = sameHost && _kind == kind && ReferenceEquals(_active, detector);
         var sameWork = sameRoute && SameExclusiveWork(_page!, pageUrl, kind);
 
+        // Same singleton + same work: keep the only active run (network/obs enrichment).
         if (sameWork)
         {
             _page = pageUrl;
             return;
         }
 
-        // Host / site / work identity changed — reset exclusive state.
-        if (_active is not null || detector is not null || !sameHost)
-        {
-            ClearExclusiveUnlocked();
-            _session.Cancel();
-            _session = new();
-            _lastBuilt = [];
-            _exclusiveCompleted = false;
-            _unified.Clear();
-        }
+        // Different host/site/work: destroy the previous singleton session, then enter one.
+        ClearExclusiveUnlocked(hard: true);
+        _session.Cancel();
+        _session = new();
+        _lastBuilt = [];
+        _exclusiveCompleted = false;
+        _unified.Clear();
 
         _page = pageUrl;
         _kind = kind;
@@ -302,12 +315,36 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
 
         return kind switch
         {
-            SiteKind.YouTube => string.Equals(ExtractYouTubeId(previous), ExtractYouTubeId(next), StringComparison.Ordinal),
-            SiteKind.Bilibili => string.Equals(ExtractBilibiliId(previous), ExtractBilibiliId(next), StringComparison.OrdinalIgnoreCase),
-            SiteKind.Douyin => string.Equals(ExtractDigitId(previous), ExtractDigitId(next), StringComparison.Ordinal),
-            SiteKind.TikTok => string.Equals(ExtractDigitId(previous), ExtractDigitId(next), StringComparison.Ordinal),
+            SiteKind.YouTube => IdsEqual(ExtractYouTubeId(previous), ExtractYouTubeId(next), ordinalIgnoreCase: false),
+            SiteKind.Bilibili => IdsEqual(ExtractBilibiliId(previous), ExtractBilibiliId(next), ordinalIgnoreCase: true),
+            SiteKind.Douyin => SameDigitOrPage(previous, next),
+            SiteKind.TikTok => SameDigitOrPage(previous, next),
             _ => string.Equals(previous.AbsoluteUri, next.AbsoluteUri, StringComparison.OrdinalIgnoreCase)
         };
+    }
+
+    /// <summary>
+    /// When both sides have an aweme/item id, compare ids. When either side lacks an id,
+    /// compare AbsoluteUri so grace re-probes on the same feed URL keep the only run
+    /// (null==null must not mean "same work" across different pages).
+    /// </summary>
+    private static bool SameDigitOrPage(Uri previous, Uri next)
+    {
+        var left = ExtractDigitId(previous);
+        var right = ExtractDigitId(next);
+        if (left is not null && right is not null)
+            return string.Equals(left, right, StringComparison.Ordinal);
+        return string.Equals(previous.AbsoluteUri, next.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IdsEqual(string? left, string? right, bool ordinalIgnoreCase)
+    {
+        if (left is null || right is null)
+            return false;
+        return string.Equals(
+            left,
+            right,
+            ordinalIgnoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
     }
 
     private static string? ExtractYouTubeId(Uri page)

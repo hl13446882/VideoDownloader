@@ -773,21 +773,19 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
-        // Manual probe兜底: wipe all detection state, keep current media-session identity so
-        // exclusive sites (Douyin feed without modal_id) still Bind to the playing aweme.
+        // Manual probe: full re-entry through the site detector (HardClear + BeginSession).
         ClearStatus();
         SetStatusKey("status.probeManual");
         RestartDetectionForPageChange(pageUrl, tab?.Title, mediaSessionKey: tab?.Host.CurrentMediaSessionKey);
     }
 
     /// <summary>
-    /// Page/content change兜底 for exclusive + generic: HardClear (incl. Douyin parks),
-    /// clear UI, reset network dedupe, then full detection session.
+    /// Page/content change or manual probe: cancel in-flight work, wipe UI + detector + network
+    /// dedupe, then start one fresh detection session via the routed site entry.
+    /// Must not HardClear before the session commit — that left a wiped pipeline when anti-dup returned.
     /// </summary>
     private void RestartDetectionForPageChange(Uri pageUrl, string? pageTitle, string? mediaSessionKey)
     {
-        HardResetDetectionPipeline();
-        SelectedTab?.Host.ResetDetectionSession();
         var enriched = EnrichPageUrlWithContentId(pageUrl, mediaSessionKey);
         StartPageDetectionSession(
             enriched,
@@ -795,7 +793,8 @@ public sealed partial class MainViewModel : ObservableObject
             clearUi: true,
             forceReplace: true,
             mediaSessionKey: mediaSessionKey,
-            resetMediaSession: true);
+            resetMediaSession: true,
+            forceFullRestart: true);
     }
 
     /// <summary>
@@ -871,7 +870,8 @@ public sealed partial class MainViewModel : ObservableObject
         bool clearUi,
         bool forceReplace = false,
         string? mediaSessionKey = null,
-        bool resetMediaSession = true)
+        bool resetMediaSession = true,
+        bool forceFullRestart = false)
     {
         long generation;
         CancellationToken token;
@@ -880,11 +880,10 @@ public sealed partial class MainViewModel : ObservableObject
             var pageKey = BuildPageIdentity(pageUrl, mediaSessionKey);
             var stableIncoming = ExtractStableContentKey(mediaSessionKey, pageUrl);
             var stableCurrent = ExtractStableContentKeyFromIdentity(_currentPageIdentity);
-            // MediaSession flicker for the same aweme must not wipe a successful result.
-            // NavigationStarted passes mediaSessionKey=null and must always reset.
-            // Empty/failed sessions must also reset — otherwise Douyin stays stuck with
-            // douyin_no_media / stale exclusive state ("状态没清零").
-            if (forceReplace &&
+            // forceFullRestart (page change / manual probe) always re-enters the site detector.
+            // Other forceReplace calls still suppress same-aweme MediaSession flicker.
+            if (!forceFullRestart &&
+                forceReplace &&
                 mediaSessionKey is not null &&
                 _detectionRunning &&
                 DetectedVideos.Count > 0 &&
@@ -895,7 +894,8 @@ public sealed partial class MainViewModel : ObservableObject
             }
 
             // Same document already being probed — ignore duplicate NavigationStarted/PageIdentity.
-            if (clearUi &&
+            if (!forceFullRestart &&
+                clearUi &&
                 !forceReplace &&
                 _detectionRunning &&
                 string.Equals(_currentPageIdentity, pageKey, StringComparison.Ordinal))
@@ -905,7 +905,7 @@ public sealed partial class MainViewModel : ObservableObject
 
             _currentPageIdentity = pageKey;
             _lastNavigatedPageUrl = BuildPageIdentity(pageUrl);
-            _forceReplaceResults = forceReplace || clearUi;
+            _forceReplaceResults = forceReplace || clearUi || forceFullRestart;
             _detectionRunning = true;
             _pageGeneration++;
             generation = _pageGeneration;
@@ -915,13 +915,21 @@ public sealed partial class MainViewModel : ObservableObject
             token = _probeCts.Token;
         }
 
-        if (clearUi)
+        if (clearUi || forceFullRestart)
         {
-            ClearDetectedVideos();
-            // Feed soft-nav (forceReplace) must reset exclusive detectors; otherwise Douyin
-            // keeps a stale session on "/" and completes with douyin_no_media after swipe.
-            if (forceReplace)
-                ResetDetectionPipeline();
+            DetectedVideos.Clear();
+            _videoMap.Clear();
+            SelectedDetectedVideo = null;
+        }
+
+        // Fresh singleton entry: destroy previous detector session, BeginSession once.
+        if (forceFullRestart)
+        {
+            _aggregator.Clear();
+            if (_pipeline is RoutedMediaDetectionPipeline routed)
+                routed.Reenter(pageUrl);
+            else
+                HardResetDetectionPipeline();
         }
         else
             ResetDetectionPipeline();

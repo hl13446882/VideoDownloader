@@ -9,8 +9,10 @@ public interface ISiteDetectionRouter
 }
 
 /// <summary>
-/// Exclusive site media detector. Owns all discovery for its site; never shares
-/// detection logic with Generic/Unified or other site detectors.
+/// Exclusive site media detector. Exactly one process-wide instance per site
+/// (Douyin / TikTok / YouTube / Bilibili). Never construct a second instance.
+/// <see cref="BeginSession"/> destroys any previous session on this instance and
+/// starts the only active run; <see cref="Clear"/> / <see cref="HardClear"/> tear it down.
 /// </summary>
 public interface IExclusiveSiteMediaDetector
 {
@@ -18,12 +20,14 @@ public interface IExclusiveSiteMediaDetector
     SiteKind Site { get; }
     bool Matches(Uri pageUrl);
 
+    /// <summary>Destroy prior session on this singleton, then start the only active run.</summary>
     void BeginSession(Uri pageUrl, Guid sessionId);
+
+    /// <summary>Tear down the active session on this singleton.</summary>
     void Clear();
 
     /// <summary>
-    /// Manual probe兜底: wipe all session state including soft-nav parks.
-    /// Soft <see cref="Clear"/> may preserve parked progressive for feed adopt.
+    /// Tear down the active session including any soft-nav parks.
     /// </summary>
     void HardClear() => Clear();
 

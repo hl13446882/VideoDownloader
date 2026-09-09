@@ -314,6 +314,59 @@ public class ExclusiveSiteDetectionTests
         Assert.NotNull(newLease);
     }
 
+    [Fact]
+    public void Reenter_Destroys_Previous_Singleton_Session_Then_BeginSession_Once()
+    {
+        var detector = Substitute.For<IExclusiveSiteMediaDetector>();
+        detector.Matches(Arg.Any<Uri>()).Returns(true);
+        detector.Site.Returns(SiteKind.Douyin);
+        detector.Name.Returns("DouyinMediaDetector");
+        var unified = new UnifiedMediaPipeline(Substitute.For<IRequestMessageFactory>(), [], Options.Create(new AppOptions()));
+        var routed = new RoutedMediaDetectionPipeline(
+            unified,
+            new SiteDetectionRouter(),
+            new ExclusiveSiteMediaDetectorResolver([detector]),
+            NullLogger<RoutedMediaDetectionPipeline>.Instance);
+
+        var page1 = new Uri("https://www.douyin.com/jingxuan?modal_id=1111111111111111111");
+        var page2 = new Uri("https://www.douyin.com/jingxuan?modal_id=2222222222222222222");
+
+        routed.Reenter(page1);
+        var first = routed.SessionId;
+        detector.Received(1).BeginSession(page1, first);
+        detector.Received().HardClear();
+
+        routed.Reenter(page2);
+        var second = routed.SessionId;
+        Assert.NotEqual(first, second);
+        detector.Received(1).BeginSession(page2, second);
+        Assert.False(routed.IsCompleted);
+    }
+
+    [Fact]
+    public async Task Douyin_Stamped_Modal_Change_Reenters_BeginSession()
+    {
+        var detector = Substitute.For<IExclusiveSiteMediaDetector>();
+        detector.Matches(Arg.Any<Uri>()).Returns(true);
+        detector.Site.Returns(SiteKind.Douyin);
+        detector.Name.Returns("DouyinMediaDetector");
+        var unified = new UnifiedMediaPipeline(Substitute.For<IRequestMessageFactory>(), [], Options.Create(new AppOptions()));
+        var routed = new RoutedMediaDetectionPipeline(
+            unified,
+            new SiteDetectionRouter(),
+            new ExclusiveSiteMediaDetectorResolver([detector]),
+            NullLogger<RoutedMediaDetectionPipeline>.Instance);
+
+        var a = new Uri("https://www.douyin.com/?modal_id=1111111111111111111");
+        var b = new Uri("https://www.douyin.com/?modal_id=2222222222222222222");
+        await routed.ProbePageAsync(a, null, null, RequestContext.CreateEmpty(), CancellationToken.None);
+        var first = routed.SessionId;
+        await routed.ProbePageAsync(b, null, null, RequestContext.CreateEmpty(), CancellationToken.None);
+        Assert.NotEqual(first, routed.SessionId);
+        detector.Received(1).BeginSession(a, first);
+        detector.Received(1).BeginSession(b, routed.SessionId);
+    }
+
     private static RoutedMediaDetectionPipeline CreateRouted(out UnifiedMediaPipeline unified)
     {
         unified = new UnifiedMediaPipeline(

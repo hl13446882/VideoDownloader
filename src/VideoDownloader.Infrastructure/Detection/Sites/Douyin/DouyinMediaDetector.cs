@@ -9,7 +9,9 @@ using VideoDownloader.Core.Models;
 namespace VideoDownloader.Infrastructure.Detection.Sites.Douyin;
 
 /// <summary>
-/// Exclusive Douyin detector. Owns Video and Album modes; never falls back to Generic/Unified.
+/// Exclusive Douyin detector (process singleton). Owns Video and Album modes;
+/// <see cref="BeginSession"/> destroys the previous run on this instance.
+/// Never falls back to Generic/Unified.
 /// </summary>
 public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 {
