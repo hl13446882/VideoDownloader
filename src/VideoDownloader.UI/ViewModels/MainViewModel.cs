@@ -543,14 +543,17 @@ public sealed partial class MainViewModel : ObservableObject
                             string.Equals(_currentPageIdentity, BuildPageIdentity(e.PageUrl, e.MediaSessionKey), StringComparison.Ordinal))
                             return;
                     }
-                    // Same-document content switch (feed swipe): refresh addresses without full UI wipe.
+                    // Same-document content switch (feed swipe): new pipeline + clear network dedup.
+                    // resetMediaSession here means ResetDetectionSession (normalizer/pending), not the
+                    // media-session key — without it, swipe keeps stale CDP dedup and progressive
+                    // preloads never re-enter the detector.
                     StartPageDetectionSession(
                         e.PageUrl,
                         e.PageTitle,
                         clearUi: true,
                         forceReplace: true,
                         mediaSessionKey: e.MediaSessionKey,
-                        resetMediaSession: false);
+                        resetMediaSession: true);
                 }, System.Windows.Threading.DispatcherPriority.Background);
             };
             tab.Host.OpenInNewTabRequested += (_, url) =>
@@ -990,6 +993,32 @@ public sealed partial class MainViewModel : ObservableObject
             HangProbe.Mark("vm.pagePass.begin", pageUrl.AbsoluteUri);
             await RunPagePassAsync(pageUrl, pageTitle, token, generation, runExternal: true);
             HangProbe.Mark("vm.pagePass.end", $"videos={DetectedVideos.Count}");
+
+            // Feed soft-nav often seals on MSE-only before progressive CDN arrives; give a few
+            // short re-probe/complete cycles without starting a brand-new page generation.
+            for (var late = 0; late < 4; late++)
+            {
+                var have = false;
+                await Application.Current.Dispatcher.InvokeAsync(() => have = DetectedVideos.Count > 0);
+                if (have || generation != _pageGeneration || token.IsCancellationRequested)
+                    break;
+
+                HangProbe.Mark("vm.lateRetry.begin", $"i={late}");
+                await Task.Delay(TimeSpan.FromSeconds(2), token);
+                if (generation != _pageGeneration || token.IsCancellationRequested)
+                    break;
+
+                var hostLate = SelectedTab?.Host;
+                if (hostLate is not null)
+                {
+                    try { await hostLate.ProbeCurrentPageAsync(token); }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested) { return; }
+                    catch { /* enrichment */ }
+                }
+
+                await RunPagePassAsync(pageUrl, pageTitle, token, generation, runExternal: false);
+                HangProbe.Mark("vm.lateRetry.end", $"i={late} videos={DetectedVideos.Count}");
+            }
 
             await Application.Current.Dispatcher.InvokeAsync(() =>
             {
@@ -1596,13 +1625,13 @@ public sealed partial class MainViewModel : ObservableObject
 
             AddressBar = e.PageUrl.AbsoluteUri;
 
-            // Soft document URL change (SPA) without NavigationStarting.
+            // Soft document URL change (SPA) without NavigationStarting (modal_id etc.).
             var pageOnly = BuildPageIdentity(e.PageUrl);
             if (string.Equals(_lastNavigatedPageUrl, pageOnly, StringComparison.Ordinal) ||
                 string.Equals(_currentPageIdentity, pageOnly, StringComparison.Ordinal))
                 return;
 
-            StartPageDetectionSession(e.PageUrl, e.PageTitle, clearUi: true);
+            StartPageDetectionSession(e.PageUrl, e.PageTitle, clearUi: true, forceReplace: true);
         }, System.Windows.Threading.DispatcherPriority.Background);
     }
 

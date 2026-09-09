@@ -45,6 +45,41 @@ public class ExclusiveSiteDetectionTests
     }
 
     [Fact]
+    public async Task Douyin_Parked_Other_Work_Progressive_Adopted_On_Switch()
+    {
+        const string current = "7674888187625458982";
+        const string next = "7522534938898468147";
+        var page = new Uri("https://www.douyin.com/jingxuan?modal_id=" + current);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        detector.BeginSession(page, Guid.NewGuid());
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, rows) => last = rows.Single();
+
+        await detector.ProcessPageObservationAsync(page, "当前",
+            """{"identity":"content:7674888187625458982","album":false,"media":[]}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        // Next-work progressive is preloaded while current is active — must be parked, not lost.
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://v3-dy-o.zjcdn.com/video/tos/cn/obj/next.mp4?mime_type=video_mp4&__vid=" + next) with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 12_000_000
+        }, CancellationToken.None);
+
+        detector.Clear();
+        var nextPage = new Uri("https://www.douyin.com/jingxuan?modal_id=" + next);
+        detector.BeginSession(nextPage, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(nextPage, "下一条",
+            """{"identity":"content:7522534938898468147","album":false,"media":[]}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+
+        Assert.NotNull(last);
+        Assert.Equal(next, last!.MediaId);
+        Assert.Contains("next.mp4", last.Video!.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+        Assert.False(detector.Failed);
+    }
+
+    [Fact]
     public async Task Douyin_RejectsMismatchedPlayerObservation_AndUnboundNetwork()
     {
         var page = new Uri("https://www.douyin.com/video/7674888187625458982");

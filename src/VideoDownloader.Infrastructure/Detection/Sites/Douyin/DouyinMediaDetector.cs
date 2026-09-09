@@ -19,6 +19,12 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
     private string? _failureReason;
     /// <summary>True after a matching page observation sealed the current aweme (not merely page URL id).</summary>
     private bool _observationSealed;
+    /// <summary>
+    /// Progressive CDN seen while another aweme was active. Survives Clear/BeginSession so feed
+    /// swipe can adopt a preload that the browser will not re-request.
+    /// </summary>
+    private readonly Dictionary<string, List<MediaTrack>> _parkedByContentId =
+        new(StringComparer.Ordinal);
 
     public DouyinMediaDetector(ILogger<DouyinMediaDetector> logger)
     {
@@ -46,6 +52,8 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             _observationSealed = false;
             var id = DouyinIdentity.ExtractAwemeId(pageUrl);
             _session.SwitchContent(id, DouyinContentMode.Unknown);
+            if (id is not null)
+                AdoptParked(id);
             _logger.LogInformation(
                 "[DetectionRouter] Site=Douyin Detector={Detector} Exclusive=true GenericPipeline=Bypassed page={Path}",
                 Name, pageUrl.AbsolutePath);
@@ -99,13 +107,14 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 !DouyinPlayEvidence.IsBrowserPlay(networkEvent))
                 return Task.CompletedTask;
 
-            // Reject candidates that encode a different aweme id than the current work.
+            // Reject (but park progressive) candidates that encode a different aweme id.
             var urlId = DouyinIdentity.ExtractIdFromQuery(networkEvent.Url) ??
                         ExtractIdFromUrlPath(networkEvent.Url);
             if (_session.CurrentContentId is not null &&
                 urlId is not null &&
                 !string.Equals(urlId, _session.CurrentContentId, StringComparison.Ordinal))
             {
+                ParkOtherWorkProgressive(networkEvent, urlId);
                 _logger.LogInformation(
                     "Douyin skip preload/other work media current={Current} other={Other} host={Host}",
                     _session.CurrentContentId, urlId, networkEvent.Url.Host);
@@ -228,11 +237,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 // New work / mode: allow another Complete attempt and keep collecting.
                 _failed = false;
                 _failureReason = null;
-                // Hard id change clears candidates inside SwitchContent; soft null→id keeps them unbound.
-                if (idChanged &&
-                    _session.VideoCandidates.Count == 0 &&
-                    _session.AudioCandidates.Count == 0)
-                    _observationSealed = false;
+                _observationSealed = false;
             }
             else if (contentId is not null)
                 _session.CurrentContentId ??= contentId;
@@ -240,7 +245,10 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             // Matching observation for the active aweme — unlocks binding of id-less CDN progressive.
             if (contentId is not null &&
                 string.Equals(contentId, _session.CurrentContentId, StringComparison.Ordinal))
+            {
                 _observationSealed = true;
+                AdoptParked(contentId);
+            }
 
             if (!string.IsNullOrWhiteSpace(pageTitle) && string.IsNullOrWhiteSpace(_session.Caption))
                 _session.Caption = pageTitle.Trim();
@@ -602,6 +610,64 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             ? page.GetLeftPart(UriPartial.Authority)
             : context.Origin;
         return context with { Referer = referer, Origin = origin };
+    }
+
+    private void ParkOtherWorkProgressive(NormalizedNetworkEvent networkEvent, string urlId)
+    {
+        // Only park muxed progressive — MSE/audio stay out of the adopt path.
+        if (DouyinPlayEvidence.IsMseAdaptivePath(networkEvent.Url))
+            return;
+        var kind = DouyinPlayEvidence.InferKind(networkEvent.Url, networkEvent.MimeType);
+        if (kind is not (MediaTrackKind.Combined or MediaTrackKind.Unknown))
+            return;
+
+        var track = new MediaTrack(
+            "video",
+            MediaTrackKind.Combined,
+            networkEvent.Url,
+            null,
+            InferContainer(networkEvent.Url, networkEvent.MimeType),
+            null,
+            DouyinPlayEvidence.GetEntityLength(networkEvent),
+            EnrichContext(networkEvent.RequestContext))
+        {
+            Evidence = MediaEvidence.Heuristic,
+            ContentIdentity = "id:" + urlId,
+            IsMseTrack = false
+        };
+
+        if (!_parkedByContentId.TryGetValue(urlId, out var list))
+        {
+            list = [];
+            _parkedByContentId[urlId] = list;
+        }
+
+        Upsert(list, track);
+        // Bound memory across long feed sessions.
+        if (_parkedByContentId.Count > 24)
+        {
+            foreach (var stale in _parkedByContentId.Keys.Take(_parkedByContentId.Count - 16).ToList())
+                _parkedByContentId.Remove(stale);
+        }
+    }
+
+    private void AdoptParked(string contentId)
+    {
+        if (!_parkedByContentId.Remove(contentId, out var parked) || parked.Count == 0)
+            return;
+
+        foreach (var track in parked)
+        {
+            var owned = track with { ContentIdentity = "id:" + contentId };
+            if (owned.Kind == MediaTrackKind.Audio)
+                Upsert(_session.AudioCandidates, owned);
+            else
+                Upsert(_session.VideoCandidates, owned);
+        }
+
+        _logger.LogInformation(
+            "[DouyinOwnership] adopted parked progressive contentId={Id} count={Count}",
+            contentId, parked.Count);
     }
 
     /// <summary>
