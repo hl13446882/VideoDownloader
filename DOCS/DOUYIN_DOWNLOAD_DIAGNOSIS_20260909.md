@@ -48,3 +48,13 @@
 - 扩大基础设施测试：新增最后一项测试前，206 通过、6 失败、1 跳过。失败的 6 项在独立 HEAD=3bd0717 基线中全部复现（RepairMatrixTests 的 5 项旧共享探测测试，以及 UnifiedDownloadIntegrationTests），不是本次引入；未修改这些不相关流程。
 - 用修复后的生产 HttpMediaDownloader 重新获取“别让我一个人醉”：38,764,099 字节；ffprobe 识别 H.264 720×1280 + AAC，111.479002 秒；ffmpeg -xerror 全片解码成功。
 - 原损坏视频备份在 artifacts/douyin-repair/original-corrupt.mp4；验证后的新文件替换用户 Downloads 中同名文件。客户端关闭后，备份任务数据库并纠正该任务的目标路径（原记录残留 #），与实际文件一致。
+
+## 4. 后续发现：下载成下一条广告（作品归属错误）
+
+- 14:10:06 observation 当前作品为 7674888187625458982；14:10:14 任务 8ed9c349-d660-4c71-9f30-6aec2d4a7e82 请求 URL 带 __vid=7670164200798342410，实体 3,000,921 字节。两个作品 ID 明确不同。
+- 原因：DouyinIdentity 不识别 __vid；网络资源没有明确 ID 时直接赋予当前作品 ID；页面脚本优先采用固定页面身份，却混入不同播放器的 record/currentSrc；未验证作品归属的候选还能进入清晰度列表。
+- 修复：精确解析 query 键并加入 __vid；拒绝异作品 observation 与媒体 URL；匿名网络候选保持未绑定，必须经当前作品 observation 中同一资源确认，或 URL 自带匹配作品 ID，才能用于选片和清晰度列表。
+- 页面脚本优先使用播放器 DOM 身份；固定页面 ID 与播放器 ID 冲突时，仅取匹配页面 ID 的作品数据，不混入另一播放器；__vdProbe 同样限制 record 归属。currentSrc 还需匹配作品数据中的资源或 __vid。
+- 同一 /video/tos/ 对象的不同 CDN 地址可以继承已验证归属；仅身份迟到不再自动认领先前匿名预加载。
+- 51 项相关 .NET 测试通过（含 3 项新增归属回归）；node scripts/test-douyin-observation.cjs 的三种页面/播放器组合通过。既有传输修复继续保留。
+- 本次未删除已下载的广告文件，也未声称已经通过运行中 WebView 的实站验收；需在新版重新探测作品。文件能解码与作品内容正确是两项独立校验。

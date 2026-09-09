@@ -36,16 +36,15 @@ internal static class DouyinIdentity
 
     public static string? ExtractIdFromQuery(Uri pageUrl)
     {
-        var q = pageUrl.Query;
-        foreach (var key in new[] { "modal_id=", "aweme_id=", "item_id=", "video_id=" })
+        foreach (var pair in pageUrl.Query.TrimStart('?').Split('&'))
         {
-            var idx = q.IndexOf(key, StringComparison.OrdinalIgnoreCase);
-            if (idx < 0) continue;
-            var start = idx + key.Length;
-            var end = q.IndexOf('&', start);
-            var raw = end < 0 ? q[start..] : q[start..end];
-            if (Regex.IsMatch(raw, @"^\d{10,}$"))
-                return raw;
+            var parts = pair.Split('=', 2);
+            if (parts.Length != 2) continue;
+            var key = Uri.UnescapeDataString(parts[0]);
+            if (!new[] { "modal_id", "aweme_id", "item_id", "video_id", "__vid" }
+                .Contains(key, StringComparer.OrdinalIgnoreCase)) continue;
+            var raw = Uri.UnescapeDataString(parts[1]);
+            if (Regex.IsMatch(raw, @"^\d{10,}$")) return raw;
         }
         return null;
     }

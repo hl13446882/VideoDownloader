@@ -135,7 +135,10 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 Evidence = DouyinPlayEvidence.IsBrowserPlay(networkEvent)
                     ? MediaEvidence.BrowserObserved
                     : MediaEvidence.Heuristic,
-                ContentIdentity = _session.CurrentContentId is null ? null : "id:" + _session.CurrentContentId,
+                ContentIdentity = urlId is not null ? "id:" + urlId :
+                    _session.VideoCandidates.Concat(_session.AudioCandidates)
+                        .FirstOrDefault(t => ResourceKey(t.SourceUrl) == ResourceKey(networkEvent.Url) &&
+                                             BelongsToCurrent(t))?.ContentIdentity,
                 IsMseTrack = isMse
             };
 
@@ -181,6 +184,13 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             _session.Context = EnrichContext(context);
 
             var observedId = TryReadIdentity(pageScriptJson);
+            var pageId = DouyinIdentity.ExtractAwemeId(pageUrl);
+            var observationId = DouyinIdentity.ExtractIdFromIdentity(observedId);
+            if (pageId is not null && observationId is not null && pageId != observationId)
+            {
+                _logger.LogInformation("[DouyinOwnership] reject observation current={Current} observed={Observed}", pageId, observationId);
+                return Task.CompletedTask;
+            }
             var contentId = DouyinIdentity.ResolveContentId(pageUrl, observedId);
             var mode = DouyinContentModeResolver.Resolve(pageScriptJson, pageUrl);
             if (mode == DouyinContentMode.Unknown && contentId is not null)
@@ -239,12 +249,12 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             _failed = false;
             _failureReason = null;
             _logger.LogInformation(
-                "[DouyinSelect] session={Session} selected={Host}{Path} kind={Kind} formats={Formats} reason=progressive_muxed",
+                "[DouyinSelect] session={Session} selected={Host}{Path} kind={Kind} formats={Formats} reason=progressive_muxed owner={Owner}",
                 _session.SessionId,
                 descriptor.Video?.SourceUrl.Host,
                 TruncatePath(descriptor.Video?.SourceUrl.AbsolutePath ?? ""),
                 descriptor.Video?.Kind,
-                descriptor.Formats.Count);
+                descriptor.Formats.Count, descriptor.MediaId);
         }
 
         DescriptorsReady?.Invoke(this, [descriptor]);
@@ -278,10 +288,10 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             };
         }
 
-        var video = SelectBestVideo(_session.VideoCandidates, _session.AudioCandidates);
+        var video = SelectBestVideo(_session.VideoCandidates.Where(BelongsToCurrent).ToArray(), _session.AudioCandidates.Where(BelongsToCurrent).ToArray());
         if (video is null)
             return null;
-        var pairedAudio = SelectBest(_session.AudioCandidates);
+        var pairedAudio = SelectBest(_session.AudioCandidates.Where(BelongsToCurrent).ToArray());
         // Muxed progressive already carries audio — do not remux a second track.
         if (video.Kind == MediaTrackKind.Combined)
             pairedAudio = null;
@@ -293,7 +303,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             video.BrowserObserved, video.ContentLength,
             pairedAudio?.SourceUrl.Host);
 
-        var formats = BuildFormatLadder(_session.VideoCandidates, page);
+        var formats = BuildFormatLadder(_session.VideoCandidates.Where(BelongsToCurrent).ToArray(), page);
         return new MediaDescriptor(
             SiteIds.Douyin,
             page,
@@ -440,6 +450,15 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 {
                     if (item.ValueKind != JsonValueKind.String) continue;
                     if (!Uri.TryCreate(item.GetString(), UriKind.Absolute, out var url)) continue;
+                    var mediaId = DouyinIdentity.ExtractIdFromQuery(url) ?? ExtractIdFromUrlPath(url);
+                    if (mediaId is not null && mediaId != _session.CurrentContentId)
+                    {
+                        _logger.LogInformation("[DouyinOwnership] reject observation media current={Current} other={Other}", _session.CurrentContentId, mediaId);
+                        continue;
+                    }
+                    if (_session.CurrentMode != DouyinContentMode.Album && mediaId is null &&
+                        DouyinIdentity.ExtractIdFromIdentity(TryReadIdentity(json)) != _session.CurrentContentId)
+                        continue;
                     if (IsExcludedAlbumImage(url)) continue;
                     if (DouyinPlayEvidence.IsNonDownloadableHost(url)) continue;
                     if (!DouyinPlayEvidence.IsPlayableUrl(url)) continue;
@@ -552,14 +571,29 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         return context with { Referer = referer, Origin = origin };
     }
 
+    private bool BelongsToCurrent(MediaTrack track) =>
+        _session.CurrentContentId is not null &&
+        track.ContentIdentity == "id:" + _session.CurrentContentId;
+
+    private static string ResourceKey(Uri url)
+    {
+        var index = url.AbsolutePath.IndexOf("/video/tos/", StringComparison.Ordinal);
+        return index >= 0 ? url.AbsolutePath[index..] : url.GetLeftPart(UriPartial.Path);
+    }
+
     private static void Upsert(List<MediaTrack> list, MediaTrack track)
     {
-        var key = track.SourceUrl.GetLeftPart(UriPartial.Path);
+        var key = ResourceKey(track.SourceUrl);
         var idx = list.FindIndex(t =>
-            string.Equals(t.SourceUrl.GetLeftPart(UriPartial.Path), key, StringComparison.OrdinalIgnoreCase));
+            string.Equals(ResourceKey(t.SourceUrl), key, StringComparison.Ordinal));
         if (idx >= 0)
         {
             var existing = list[idx];
+            if (track.ContentIdentity is not null && existing.ContentIdentity is null)
+                existing = existing with { ContentIdentity = track.ContentIdentity };
+            list[idx] = existing;
+            if (track.ContentIdentity is null)
+                track = track with { ContentIdentity = existing.ContentIdentity };
             if ((track.ContentLength ?? 0) >= (existing.ContentLength ?? 0) ||
                 (track.BrowserObserved && !existing.BrowserObserved))
                 list[idx] = track;

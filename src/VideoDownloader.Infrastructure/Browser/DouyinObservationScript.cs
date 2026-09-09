@@ -201,7 +201,8 @@ internal static class DouyinObservationScript
             const active = activePlayer();
             if (!active) return null;
             const record=playerRecord(active);
-            let explicit = record ? 'content:'+(record.aweme_id||record.itemId||record.videoId||record.id) : '';
+            let explicit = '';
+            const recordId=record ? String(record.aweme_id||record.itemId||record.videoId||record.id||'') : '';
             let caption = record ? String(record.desc||record.description||record.title||'').trim() : '';
             for (let scope=active,i=0; scope && i<8; i++, scope=scope.parentElement) {
               for (const attr of ['data-e2e-vid','data-video-id','data-aweme-id','data-item-id']) {
@@ -214,17 +215,27 @@ internal static class DouyinObservationScript
               if (desc && !caption) caption = (desc.textContent||'').trim();
               if (explicit && caption) break;
             }
+            if(!explicit && recordId) explicit='content:'+recordId;
             const base = pageKey(location.href);
             const stablePage = ids.some(k => new URL(location.href).searchParams.has(k)) || /\/(video|note)\/[^/]+/.test(location.pathname);
             if(!stablePage && !explicit) return null;
-            const identity = stablePage ? base : location.host + ':' + explicit;
-            const awemeId=(explicit.match(/(\d{10,})/)||[])[1]
-              || (location.search.match(/modal_id=(\d{10,})/)||[])[1]
+            const pageId=(location.search.match(/(?:modal_id|aweme_id|item_id)=(\d{10,})/)||[])[1]
               || (location.pathname.match(/\/(?:video|note)\/(\d{10,})/)||[])[1];
-            const dataRecord = findAwemeRecordById(awemeId) || record;
-            const fromData = collectDouyinPlayUrls(dataRecord);
-            const fromPlayer=[active.currentSrc,active.src,...[...active.querySelectorAll('source')].map(e=>e.src)].filter(u=>/^https?:/i.test(u||''));
-            return { type:'vd-video-identity', identity, caption, href:location.href,
+            const playerId=(explicit.match(/(\d{10,})/)||[])[1];
+            const awemeId=pageId || playerId;
+            if(!awemeId) return null;
+            const samePlayer=playerId===awemeId;
+            const dataRecord=findAwemeRecordById(awemeId) || (recordId===awemeId ? record : null);
+            const fromData=collectDouyinPlayUrls(dataRecord);
+            const resourceKey=value=>{try{const u=new URL(value);const i=u.pathname.indexOf('/video/tos/');return i>=0 ? u.pathname.slice(i) : u.origin+u.pathname;}catch{return '';}};
+            const fromPlayer=samePlayer ? [active.currentSrc,active.src,...[...active.querySelectorAll('source')].map(e=>e.src)].filter(value=>{
+              if(!/^https?:/i.test(value||'')) return false;
+              const id=new URL(value).searchParams.get('__vid');
+              if(id) return id===awemeId;
+              return fromData.some(u=>resourceKey(u)===resourceKey(value));
+            }) : [];
+            caption=dataRecord ? String(dataRecord.desc||dataRecord.description||dataRecord.title||'').trim() : (samePlayer ? caption : '');
+            return { type:'vd-video-identity', identity:'content:'+awemeId, caption, href:location.href,
               media:[...new Set([...fromPlayer, ...fromData])] };
           };
           window.__vdProbe=()=>{
@@ -244,7 +255,9 @@ internal static class DouyinObservationScript
                 visit(child,depth+1,seen,budget);
               }
             };
-            if(record){
+            const observedId=(observation.identity.match(/(\d{10,})/)||[])[1];
+            const recordId=record ? String(record.aweme_id||record.itemId||record.videoId||record.id||'') : '';
+            if(record && observedId && recordId===observedId){
               if(!observation.caption) observation.caption=String(record.desc||record.description||record.title||'').trim();
               visit(record.video||record,0,new WeakSet(),{n:800});
               visit(record.music||{},0,new WeakSet(),{n:200});

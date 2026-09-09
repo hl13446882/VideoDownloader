@@ -16,6 +16,67 @@ namespace VideoDownloader.Infrastructure.Tests;
 
 public class ExclusiveSiteDetectionTests
 {
+    [Fact]
+    public async Task Douyin_RejectsNextAdFromNetworkAndObservation_AndKeepsAllFormatsOwned()
+    {
+        const string id = "7674888187625458982";
+        const string ad = "7670164200798342410";
+        var page = new Uri("https://www.douyin.com/jingxuan?modal_id=" + id);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        detector.BeginSession(page, Guid.NewGuid());
+        MediaDescriptor? result = null;
+        detector.DescriptorsReady += (_, rows) => result = rows.Single();
+        var adUrl = "https://v3.douyinvod.com/video/tos/cn/ad.mp4?__vid=" + ad;
+        var current = "https://v3.douyinvod.com/video/tos/cn/current.mp4";
+        await detector.ProcessNetworkAsync(Evt(page, adUrl) with { ContentLength = 90_000_000 }, CancellationToken.None);
+        await detector.ProcessPageObservationAsync(page, "current",
+            System.Text.Json.JsonSerializer.Serialize(new { identity = "content:" + id, media = new[] { adUrl, current } }),
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        // A larger anonymous preload must not inherit the active work's identity.
+        await detector.ProcessNetworkAsync(Evt(page, "https://v3.douyinvod.com/video/tos/cn/unknown-ad.mp4") with { ContentLength = 100_000_000 }, CancellationToken.None);
+        // Alternate CDN of the verified object can enrich its length without crossing work boundaries.
+        await detector.ProcessNetworkAsync(Evt(page, "https://v9.douyinvod.com/video/tos/cn/current.mp4") with { ContentLength = 8_000_000 }, CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.NotNull(result);
+        Assert.Equal(id, result.MediaId);
+        Assert.Contains("current.mp4", result.Video!.SourceUrl.AbsoluteUri);
+        Assert.Equal(8_000_000, result.Video.ContentLength);
+        Assert.All(result.Formats, f => Assert.Contains("current.mp4", f.SourceUrl.AbsoluteUri));
+    }
+
+    [Fact]
+    public async Task Douyin_RejectsMismatchedPlayerObservation_AndUnboundNetwork()
+    {
+        var page = new Uri("https://www.douyin.com/video/7674888187625458982");
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        detector.BeginSession(page, Guid.NewGuid());
+        var emitted = false;
+        detector.DescriptorsReady += (_, _) => emitted = true;
+        await detector.ProcessNetworkAsync(Evt(page, "https://v3.douyinvod.com/unknown.mp4"), CancellationToken.None);
+        await detector.ProcessPageObservationAsync(page, "ad",
+            """{"identity":"content:7670164200798342410","media":["https://v3.douyinvod.com/ad.mp4"]}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.False(emitted);
+        Assert.True(detector.Failed);
+    }
+
+    [Fact]
+    public async Task Douyin_LateIdentityMustNotAdoptUnidentifiedPreload()
+    {
+        var page = new Uri("https://www.douyin.com/jingxuan");
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        detector.BeginSession(page, Guid.NewGuid());
+        var emitted = false;
+        detector.DescriptorsReady += (_, _) => emitted = true;
+        await detector.ProcessNetworkAsync(Evt(page, "https://v3.douyinvod.com/preload.mp4"), CancellationToken.None);
+        await detector.ProcessPageObservationAsync(page, "current",
+            """{"identity":"content:7674888187625458982","media":[]}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.False(emitted);
+    }
+
     [Theory]
     [InlineData("bytes 0-52428799/52428800", 52428800L)]
     [InlineData("bytes 0-4613733/52428800", null)]
@@ -30,7 +91,7 @@ public class ExclusiveSiteDetectionTests
         await detector.ProcessPageObservationAsync(page, "当前作品", """{"media":[],"album":false}""", RequestContext.CreateEmpty(), CancellationToken.None);
         MediaDescriptor? result = null;
         detector.DescriptorsReady += (_, rows) => result = rows.Single();
-        await detector.ProcessNetworkAsync(Evt(page, "https://v3.douyinvod.com/current.mp4") with
+        await detector.ProcessNetworkAsync(Evt(page, "https://v3.douyinvod.com/current.mp4?__vid=7682715203741568283") with
         {
             StatusCode = 206, ContentLength = 4613734,
             ResponseHeaders = range is null ? new Dictionary<string,string>() : new Dictionary<string,string> { ["content-range"] = range }
@@ -317,7 +378,7 @@ public class ExclusiveSiteDetectionTests
 
         // Late identity bind must not wipe the progressive candidate already captured.
         await detector.ProcessNetworkAsync(Evt(page,
-            "https://v3-web-prime.douyinvod.com/video/tos/cn/obj/progressive?mime_type=video_mp4") with
+            "https://v3-web-prime.douyinvod.com/video/tos/cn/obj/progressive?mime_type=video_mp4&__vid=7680538459441859882") with
         {
             ResourceType = "Media", StatusCode = 206, ContentLength = 8_000_000,
             ResponseHeaders = new Dictionary<string, string> { ["content-range"] = "bytes 0-65535/8000000" }
@@ -411,13 +472,13 @@ public class ExclusiveSiteDetectionTests
         var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
-        var page = new Uri("https://www.douyin.com/jingxuan?modal_id=1");
+        var page = new Uri("https://www.douyin.com/jingxuan?modal_id=7680538459441859882");
         detector.BeginSession(page, Guid.NewGuid());
         await detector.ProcessPageObservationAsync(page, "t",
-            """{"identity":"content:1","album":false,"media":[]}""",
+            """{"identity":"content:7680538459441859882","album":false,"media":[]}""",
             RequestContext.CreateEmpty(), CancellationToken.None);
         await detector.ProcessNetworkAsync(Evt(page,
-            "https://v3-dy-o.zjcdn.com/video/tos/cn/obj/progressive.mp4?mime_type=video_mp4") with
+            "https://v3-dy-o.zjcdn.com/video/tos/cn/obj/progressive.mp4?mime_type=video_mp4&__vid=7680538459441859882") with
         {
             ResourceType = "Media", StatusCode = 200, ContentLength = 35_000_000
         }, CancellationToken.None);
@@ -563,13 +624,13 @@ public class ExclusiveSiteDetectionTests
         var page = new Uri("https://www.douyin.com/?recommend=1");
         detector.BeginSession(page, Guid.NewGuid());
         await detector.ProcessPageObservationAsync(page, "t",
-            """{"identity":"content:1","album":false,"media":[]}""",
+            """{"identity":"content:7680538459441859882","album":false,"media":[]}""",
             RequestContext.CreateEmpty(), CancellationToken.None);
         await detector.CompleteAsync(CancellationToken.None);
         Assert.True(detector.Failed);
 
         await detector.ProcessNetworkAsync(Evt(page,
-            "https://v3-dy-o.zjcdn.com/video/tos/cn/obj/full.mp4?mime_type=video_mp4") with
+            "https://v3-dy-o.zjcdn.com/video/tos/cn/obj/full.mp4?mime_type=video_mp4&__vid=7680538459441859882") with
         {
             ResourceType = "Media", StatusCode = 200, ContentLength = 8_000_000
         }, CancellationToken.None);
