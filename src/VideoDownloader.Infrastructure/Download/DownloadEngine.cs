@@ -515,7 +515,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             _stateMachine.Fail(job, ex.ErrorCode);
             // Keep .part / .parts so Resume can continue; cleanup happens on cancel/remove/complete.
             await _repository.SaveAsync(job, CancellationToken.None);
-            _logger.LogWarning("Download failed {JobId}: {Error}", job.Id, ex.ErrorCode);
+            _logger.LogWarning("Download failed {JobId}: {Error} detail={Detail}", job.Id, ex.ErrorCode,
+                VideoDownloader.Infrastructure.Logging.SanitizedLogger.SanitizeMessage(ex.Message));
         }
         catch (Exception ex)
         {
@@ -570,11 +571,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         {
             case DownloadBackendKind.DirectHttp:
             {
-                var progress = new Progress<long>(bytes =>
-                {
-                    job.DownloadedBytes = bytes;
-                });
-                await _httpDownloader.DownloadDirectAsync(job, progress, checkpoint, ct);
+                // The downloader owns this job's byte count; asynchronous progress must not write it back.
+                await _httpDownloader.DownloadDirectAsync(job, null, checkpoint, ct);
                 UpdateCompletedFileSize(job);
                 break;
             }
@@ -745,7 +743,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                 UpdatedAt = DateTimeOffset.UtcNow
             };
 
-            var progress = new Progress<long>(bytes =>
+            var progress = new InlineProgress(bytes =>
             {
                 job.DownloadedBytes = completedBytes + bytes;
             });
@@ -764,6 +762,11 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         }
 
         return (localTracks, tempDir);
+    }
+
+    private sealed class InlineProgress(Action<long> report) : IProgress<long>
+    {
+        public void Report(long value) => report(value);
     }
 
     private static void DeleteTempTracks(IEnumerable<MediaTrack> tracks)

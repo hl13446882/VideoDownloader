@@ -13,7 +13,7 @@ public sealed class RequestMessageFactory : IRequestMessageFactory
     public RequestMessageFactory(IOptions<AppOptions>? options = null) => _options = options?.Value ?? new AppOptions();
     private static readonly HashSet<string> BlockedHeaders = new(StringComparer.OrdinalIgnoreCase)
     {
-        "Host", "Content-Length", "Transfer-Encoding", "Connection"
+        "Host", "Content-Length", "Transfer-Encoding", "Connection", "Range", "If-Range"
     };
 
     public HttpRequestMessage Create(MediaResource resource, HttpMethod method) =>

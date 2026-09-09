@@ -122,21 +122,25 @@ public sealed class HttpMediaDownloader
         if (File.Exists(partPath))
         {
             offset = new FileInfo(partPath).Length;
-            job.DownloadedBytes = offset;
         }
 
+        job.DownloadedBytes = offset;
         var resource = BuildResource(variant, job);
         var url = variant.SourceUrl;
 
-        for (var redirect = 0; redirect < 8; redirect++)
+        var redirects = 0;
+        while (true)
         {
             using var request = _requestFactory.Create(
                 resource with { Url = url },
                 HttpMethod.Get);
 
+            request.Headers.Range = new RangeHeaderValue(offset, null);
+            request.Headers.Remove("If-Range");
+            request.Headers.AcceptEncoding.Clear();
+            request.Headers.AcceptEncoding.ParseAdd("identity");
             if (offset > 0)
             {
-                request.Headers.Range = new RangeHeaderValue(offset, null);
                 RequestMessageFactory.ApplyIfRange(request, job.ETag, job.LastModified);
             }
 
@@ -153,8 +157,8 @@ public sealed class HttpMediaDownloader
             if (IsRedirect(response.StatusCode))
             {
                 var next = ResolveRedirectUrl(url, response.Headers.Location);
-                if (next is null || next == url)
-                    break;
+                if (next is null || next == url || ++redirects > 8)
+                    throw new DownloadException(ErrorCodes.NetTimeout, "Too many redirects.");
                 url = next;
                 continue;
             }
@@ -162,6 +166,10 @@ public sealed class HttpMediaDownloader
             if (IsRetriableStatus(response.StatusCode))
                 throw new HttpRequestException($"Retriable status {(int)response.StatusCode}");
 
+            _logger.LogInformation("Download response job={JobId} status={Status} offset={Offset} range={Range} length={Length}",
+                job.Id, (int)response.StatusCode, offset, response.Content.Headers.ContentRange?.ToString(),
+                response.Content.Headers.ContentLength);
+            var previousOffset = offset;
             await using (var file = new FileStream(
                              partPath,
                              FileMode.OpenOrCreate,
@@ -182,11 +190,18 @@ public sealed class HttpMediaDownloader
 
             // Stream is closed: reconcile .part if the job was renamed mid-transfer.
             partPath = ReconcilePartPath(job, partPath);
+            if (response.StatusCode == HttpStatusCode.PartialContent &&
+                job.TotalBytes is long total && offset < total)
+            {
+                if (offset <= previousOffset)
+                    throw new DownloadException(ErrorCodes.IncompleteDownload, "Partial response made no progress.");
+                redirects = 0;
+                continue;
+            }
+            EnsureDownloadLooksComplete(job, offset);
             await FinalizeDownloadAsync(job, partPath, ct);
             return;
         }
-
-        throw new DownloadException(ErrorCodes.NetTimeout, "Too many redirects.");
     }
 
     private async Task<long> HandleResponseAsync(
@@ -204,7 +219,7 @@ public sealed class HttpMediaDownloader
         if (response.StatusCode == HttpStatusCode.NotFound)
             throw new DownloadException(ErrorCodes.Http404, "Resource not found (404).");
 
-        if (offset > 0 && response.StatusCode == HttpStatusCode.PartialContent)
+        if (response.StatusCode == HttpStatusCode.PartialContent)
         {
             if (!ValidateContentRange(response.Content.Headers.ContentRange, offset))
             {
@@ -225,7 +240,8 @@ public sealed class HttpMediaDownloader
             if (IsAlreadyComplete(response, file.Length))
             {
                 job.DownloadedBytes = file.Length;
-                return offset;
+                job.TotalBytes = file.Length;
+                return file.Length;
             }
 
             ResetPart(job, file);
@@ -252,7 +268,13 @@ public sealed class HttpMediaDownloader
 
         job.ETag = newEtag ?? job.ETag;
         job.LastModified = newModified ?? job.LastModified;
-        job.TotalBytes ??= InferTotalBytes(response, offset);
+        var responseTotal = InferTotalBytes(response, offset);
+        if (offset > 0 && responseTotal is long known && job.TotalBytes is long prior && known != prior)
+        {
+            ResetPart(job, file);
+            throw new DownloadException(ErrorCodes.RangeMismatch, "Entity length changed.");
+        }
+        job.TotalBytes = responseTotal ?? job.TotalBytes;
         if (_license?.DownloadLimitBytes is int demoLimit && job.TotalBytes is long total && total > demoLimit)
             throw new DownloadException(ErrorCodes.LicenseLimit, "DEMO download limit is 10 MiB.");
 
@@ -261,48 +283,39 @@ public sealed class HttpMediaDownloader
 
         await using var input = await response.Content.ReadAsStreamAsync(ct);
         var buffer = new byte[1024 * 1024];
+        var written = offset;
         int read;
         while ((read = await input.ReadAsync(buffer, ct)) > 0)
         {
-            if (_license?.DownloadLimitBytes is int streamLimit && job.DownloadedBytes + read > streamLimit)
+            if (_license?.DownloadLimitBytes is int streamLimit && written + read > streamLimit)
             {
                 file.SetLength(0);
                 throw new DownloadException(ErrorCodes.LicenseLimit, "DEMO download limit is 10 MiB.");
             }
             await file.WriteAsync(buffer.AsMemory(0, read), ct);
-            job.DownloadedBytes += read;
-            progress?.Report(job.DownloadedBytes);
+            written += read;
+            job.DownloadedBytes = written;
+            progress?.Report(written);
 
-            if (job.DownloadedBytes % (4 * 1024 * 1024) < read && checkpointAsync is not null)
+            if (written % (4 * 1024 * 1024) < read && checkpointAsync is not null)
                 await checkpointAsync();
         }
 
-        // After reading the body: never treat a short 206 window / tiny object as a finished VOD.
-        EnsureDownloadLooksComplete(job, response, offset);
-
-        return offset;
+        var received = written - offset;
+        if ((response.Content.Headers.ContentLength is long bodyLength && received != bodyLength) ||
+            (response.StatusCode == HttpStatusCode.PartialContent &&
+             written != response.Content.Headers.ContentRange!.To!.Value + 1))
+            throw new DownloadException(ErrorCodes.IncompleteDownload, "Response body length does not match its range.");
+        job.DownloadedBytes = file.Length;
+        return file.Length;
     }
 
-    private static void EnsureDownloadLooksComplete(DownloadJob job, HttpResponseMessage response, long startOffset)
+    private static void EnsureDownloadLooksComplete(DownloadJob job, long actualLength)
     {
-        var range = response.Content.Headers.ContentRange;
-        if (startOffset == 0 &&
-            response.StatusCode == HttpStatusCode.PartialContent &&
-            range?.Length is long entity &&
-            range.To is long to &&
-            to + 1 < entity)
-        {
-            throw new DownloadException(
-                ErrorCodes.IncompleteDownload,
-                $"Partial 206 window ended at {to + 1} of {entity} bytes.");
-        }
-
-        if (job.TotalBytes is long expected && expected > 0 && job.DownloadedBytes + 1024 < expected)
-        {
-            throw new DownloadException(
-                ErrorCodes.IncompleteDownload,
-                $"Downloaded {job.DownloadedBytes} of {expected} bytes.");
-        }
+        job.DownloadedBytes = actualLength;
+        if (job.TotalBytes is long expected && actualLength != expected)
+            throw new DownloadException(ErrorCodes.IncompleteDownload,
+                $"Downloaded {actualLength} of {expected} bytes.");
 
         var minBytes = job.Variant.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
             ? MediaResourceSizeFilter.MinProgressiveVideoBytes
@@ -371,6 +384,14 @@ public sealed class HttpMediaDownloader
     private async Task FinalizeDownloadAsync(DownloadJob job, string partPath, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
+        if (job.Variant.Container?.ToLowerInvariant() is "mp4" or "m4a" or "mov")
+        {
+            if (!Mp4StructureValidator.IsValid(partPath, ct))
+            {
+                ResetPart(job);
+                throw new DownloadException(ErrorCodes.IncompleteDownload, "Invalid MP4 structure; download will restart from zero.");
+            }
+        }
         var target = job.TargetPath;
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
         if (File.Exists(target))
@@ -402,6 +423,7 @@ public sealed class HttpMediaDownloader
         job.DownloadedBytes = 0;
         job.ETag = null;
         job.LastModified = null;
+        job.TotalBytes = null;
 
         var partPath = job.TargetPath + ".part";
         if (file is null && File.Exists(partPath))
@@ -409,12 +431,12 @@ public sealed class HttpMediaDownloader
     }
 
     private static bool ValidateContentRange(ContentRangeHeaderValue? range, long offset) =>
-        range?.From is not null && range.From.Value == offset;
+        range?.From == offset && range.To >= offset && range.Length > range.To;
 
     private static bool IsAlreadyComplete(HttpResponseMessage response, long localLength)
     {
         var total = response.Content.Headers.ContentRange?.Length;
-        return total.HasValue && localLength >= total.Value;
+        return total.HasValue && localLength == total.Value;
     }
 
     private static bool IsDiskFull(IOException ex) =>

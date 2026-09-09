@@ -56,7 +56,7 @@ public class HttpMediaDownloaderRetryTests
 
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new ByteArrayContent(new byte[1024])
+                Content = new ByteArrayContent(ValidMp4())
             };
         });
 
@@ -102,7 +102,7 @@ public class HttpMediaDownloaderRetryTests
             fallbackAttempts++;
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new ByteArrayContent(new byte[1024])
+                Content = new ByteArrayContent(ValidMp4())
             };
         }));
         var job = CreateJob();
@@ -123,6 +123,150 @@ public class HttpMediaDownloaderRetryTests
         Assert.Equal(1, fallbackAttempts);
         Assert.True(File.Exists(job.TargetPath));
         File.Delete(job.TargetPath);
+    }
+
+    // Minimal box fixture: these transport tests validate structure, not decoding.
+    private static byte[] ValidMp4()
+    {
+        var data = new byte[600 * 1024];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(data.AsSpan(0, 4), 12);
+        "moov"u8.CopyTo(data.AsSpan(4));
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(data.AsSpan(12, 4), data.Length - 12);
+        "mdat"u8.CopyTo(data.AsSpan(16));
+        return data;
+    }
+
+    private static HttpResponseMessage Partial(byte[] data, int start, int count)
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.PartialContent)
+        {
+            Content = new ByteArrayContent(data.AsSpan(start, count).ToArray())
+        };
+        response.Content.Headers.ContentRange = new(start, start + count - 1, data.Length);
+        return response;
+    }
+
+    [Fact]
+    public async Task BrowserRangeIsReplaced_AndManyWindowsContinueWithoutQueueRetry()
+    {
+        var data = ValidMp4();
+        var calls = 0;
+        var job = CreateJob();
+        job.Variant = job.Variant.WithRequestContext(RequestContext.CreateEmpty() with
+        {
+            Headers = new Dictionary<string, string> { ["Range"] = "bytes=819201-922541", ["If-Range"] = "old" }
+        });
+        using var client = new HttpClient(new StubHandler(request =>
+        {
+            var start = (int)request.Headers.Range!.Ranges.Single().From!.Value;
+            Assert.Null(request.Headers.IfRange);
+            Assert.Equal(calls++ * 16384, start);
+            return Partial(data, start, Math.Min(16384, data.Length - start));
+        }));
+        try
+        {
+            await CreateDownloader(client, 0).DownloadDirectAsync(job, null, null, CancellationToken.None);
+            Assert.True(calls > 8);
+            Assert.Equal(data, await File.ReadAllBytesAsync(job.TargetPath));
+            Assert.Equal(data.Length, job.DownloadedBytes);
+        }
+        finally { File.Delete(job.TargetPath); File.Delete(job.TargetPath + ".part"); }
+    }
+
+    [Fact]
+    public async Task NonZeroFirstResponseIsRejectedBeforeWriting()
+    {
+        var job = CreateJob();
+        using var client = new HttpClient(new StubHandler(_ => Partial(ValidMp4(), 8192, 100)));
+        try
+        {
+            var ex = await Assert.ThrowsAsync<DownloadException>(() =>
+                CreateDownloader(client, 0).DownloadDirectAsync(job, null, null, CancellationToken.None));
+            Assert.Equal(ErrorCodes.RangeMismatch, ex.ErrorCode);
+            Assert.False(File.Exists(job.TargetPath));
+            Assert.Equal(0, new FileInfo(job.TargetPath + ".part").Length);
+        }
+        finally { File.Delete(job.TargetPath + ".part"); }
+    }
+
+    [Fact]
+    public async Task FullSizeGarbageIsNotPromoted_EvenAfter416()
+    {
+        var job = CreateJob();
+        var data = new byte[600 * 1024];
+        await File.WriteAllBytesAsync(job.TargetPath + ".part", data);
+        using var client = new HttpClient(new StubHandler(_ =>
+        {
+            var r = new HttpResponseMessage(HttpStatusCode.RequestedRangeNotSatisfiable)
+                { Content = new ByteArrayContent([]) };
+            r.Content.Headers.ContentRange = new(data.Length);
+            return r;
+        }));
+        var ex = await Assert.ThrowsAsync<DownloadException>(() =>
+            CreateDownloader(client, 0).DownloadDirectAsync(job, null, null, CancellationToken.None));
+        Assert.Equal(ErrorCodes.IncompleteDownload, ex.ErrorCode);
+        Assert.False(File.Exists(job.TargetPath));
+        Assert.False(File.Exists(job.TargetPath + ".part"));
+    }
+
+    [Fact]
+    public async Task ShortBodyAndRangeMismatchCannotComplete()
+    {
+        var job = CreateJob();
+        using var client = new HttpClient(new StubHandler(_ =>
+        {
+            var r = Partial(ValidMp4(), 0, 100);
+            r.Content.Headers.ContentRange = new(0, 199, 600 * 1024);
+            return r;
+        }));
+        try
+        {
+            var ex = await Assert.ThrowsAsync<DownloadException>(() =>
+                CreateDownloader(client, 0).DownloadDirectAsync(job, null, null, CancellationToken.None));
+            Assert.Equal(ErrorCodes.IncompleteDownload, ex.ErrorCode);
+            Assert.False(File.Exists(job.TargetPath));
+        }
+        finally { File.Delete(job.TargetPath + ".part"); }
+    }
+
+    [Fact]
+    public async Task ResumeIgnoredByServerRestartsWithExactBytes()
+    {
+        var job = CreateJob();
+        var data = ValidMp4();
+        await File.WriteAllBytesAsync(job.TargetPath + ".part", new byte[4096]);
+        job.TotalBytes = 999999;
+        using var client = new HttpClient(new StubHandler(_ => new(HttpStatusCode.OK)
+            { Content = new ByteArrayContent(data) }));
+        try
+        {
+            await CreateDownloader(client, 0).DownloadDirectAsync(job, null, null, CancellationToken.None);
+            Assert.Equal(data, await File.ReadAllBytesAsync(job.TargetPath));
+            Assert.Equal(data.Length, job.TotalBytes);
+        }
+        finally { File.Delete(job.TargetPath); File.Delete(job.TargetPath + ".part"); }
+    }
+
+    [Fact]
+    public async Task StaleProgressCannotChangeAuthoritativeCompletionCount()
+    {
+        var job = CreateJob();
+        var data = ValidMp4();
+        using var client = new HttpClient(new StubHandler(_ => new(HttpStatusCode.OK)
+            { Content = new ByteArrayContent(data) }));
+        try
+        {
+            await CreateDownloader(client, 0).DownloadDirectAsync(job,
+                new CallbackProgress(_ => job.DownloadedBytes = 0), null, CancellationToken.None);
+            Assert.Equal(data.Length, job.DownloadedBytes);
+            Assert.Equal(data, await File.ReadAllBytesAsync(job.TargetPath));
+        }
+        finally { File.Delete(job.TargetPath); File.Delete(job.TargetPath + ".part"); }
+    }
+
+    private sealed class CallbackProgress(Action<long> report) : IProgress<long>
+    {
+        public void Report(long value) => report(value);
     }
 
     private static HttpMediaDownloader CreateDownloader(HttpClient client, int retryCount)
