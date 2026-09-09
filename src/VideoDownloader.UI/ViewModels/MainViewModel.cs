@@ -527,7 +527,7 @@ public sealed partial class MainViewModel : ObservableObject
                 // Real document navigation (including same-URL refresh) always starts a new
                 // session. Soft SPA identity / duplicate PageIdentity events still use anti-dup.
                 if (ReferenceEquals(SelectedTab, tab) && Uri.TryCreate(url, UriKind.Absolute, out var page))
-                    StartPageDetectionSession(page, null, clearUi: true, forceReplace: true);
+                    RestartDetectionForPageChange(page, null, mediaSessionKey: null);
             };
             tab.Host.MediaSessionChanged += (_, e) =>
             {
@@ -538,22 +538,17 @@ public sealed partial class MainViewModel : ObservableObject
                     lock (_pageSync)
                     {
                         // ABR/CDN switches can look like a new media URL while the initial
-                        // page pass is still assembling its format set. Keep that session intact.
-                        if (_detectionRunning &&
+                        // page pass is still assembling its format set. Keep that session intact
+                        // unless ForceRestart (e.g. significant duration jump on same id).
+                        if (!e.ForceRestart &&
+                            _detectionRunning &&
                             string.Equals(_currentPageIdentity, BuildPageIdentity(e.PageUrl, e.MediaSessionKey), StringComparison.Ordinal))
                             return;
                     }
-                    // Same-document content switch (feed swipe): new pipeline + clear network dedup.
-                    // resetMediaSession here means ResetDetectionSession (normalizer/pending), not the
-                    // media-session key — without it, swipe keeps stale CDP dedup and progressive
-                    // preloads never re-enter the detector.
-                    StartPageDetectionSession(
+                    RestartDetectionForPageChange(
                         e.PageUrl,
                         e.PageTitle,
-                        clearUi: true,
-                        forceReplace: true,
-                        mediaSessionKey: e.MediaSessionKey,
-                        resetMediaSession: true);
+                        mediaSessionKey: e.MediaSessionKey);
                 }, System.Windows.Threading.DispatcherPriority.Background);
             };
             tab.Host.OpenInNewTabRequested += (_, url) =>
@@ -605,7 +600,7 @@ public sealed partial class MainViewModel : ObservableObject
         var page = newValue.Host.CurrentPageUrl
                    ?? (Uri.TryCreate(newValue.Address, UriKind.Absolute, out var uri) ? uri : null);
         if (page is not null)
-            StartPageDetectionSession(page, newValue.Title, clearUi: true);
+            RestartDetectionForPageChange(page, newValue.Title, mediaSessionKey: newValue.Host.CurrentMediaSessionKey);
         else
             ClearDetectedVideos();
     }
@@ -719,7 +714,7 @@ public sealed partial class MainViewModel : ObservableObject
             else
             {
                 tab.PendingNavigationUrl = url;
-                StartPageDetectionSession(pageUrl, null, clearUi: true);
+                RestartDetectionForPageChange(pageUrl, null, mediaSessionKey: null);
             }
         }
         catch (Exception ex)
@@ -778,12 +773,69 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
-        // Manual probe兜底: wipe all detection state (incl. Douyin parks), then full session.
+        // Manual probe兜底: wipe all detection state, keep current media-session identity so
+        // exclusive sites (Douyin feed without modal_id) still Bind to the playing aweme.
         ClearStatus();
+        SetStatusKey("status.probeManual");
+        RestartDetectionForPageChange(pageUrl, tab?.Title, mediaSessionKey: tab?.Host.CurrentMediaSessionKey);
+    }
+
+    /// <summary>
+    /// Page/content change兜底 for exclusive + generic: HardClear (incl. Douyin parks),
+    /// clear UI, reset network dedupe, then full detection session.
+    /// </summary>
+    private void RestartDetectionForPageChange(Uri pageUrl, string? pageTitle, string? mediaSessionKey)
+    {
         HardResetDetectionPipeline();
         SelectedTab?.Host.ResetDetectionSession();
-        SetStatusKey("status.probeManual");
-        StartPageDetectionSession(pageUrl, tab?.Title, clearUi: true, forceReplace: true);
+        var enriched = EnrichPageUrlWithContentId(pageUrl, mediaSessionKey);
+        StartPageDetectionSession(
+            enriched,
+            pageTitle,
+            clearUi: true,
+            forceReplace: true,
+            mediaSessionKey: mediaSessionKey,
+            resetMediaSession: true);
+    }
+
+    /// <summary>
+    /// Feed roots often lack modal_id/video id in the address bar. When media-session already
+    /// knows the digits, stamp them onto the page URI so exclusive BeginSession binds correctly.
+    /// </summary>
+    private static Uri EnrichPageUrlWithContentId(Uri pageUrl, string? mediaSessionKey)
+    {
+        if (ExtractStableContentKey(null, pageUrl) is not null)
+            return pageUrl;
+        var stable = ExtractStableContentKey(mediaSessionKey, null);
+        if (stable is null)
+            return pageUrl;
+        var digits = System.Text.RegularExpressions.Regex.Match(stable, @"(\d{10,})");
+        if (!digits.Success)
+            return pageUrl;
+
+        var host = pageUrl.Host;
+        if (host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase))
+        {
+            var builder = new UriBuilder(pageUrl);
+            var query = builder.Query.TrimStart('?');
+            var parts = string.IsNullOrWhiteSpace(query)
+                ? new List<string>()
+                : query.Split('&', StringSplitOptions.RemoveEmptyEntries)
+                    .Where(p => !p.StartsWith("modal_id=", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+            parts.Add("modal_id=" + digits.Groups[1].Value);
+            builder.Query = string.Join('&', parts);
+            return builder.Uri;
+        }
+
+        if (host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase) &&
+            !pageUrl.AbsolutePath.Contains("/video/", StringComparison.OrdinalIgnoreCase))
+        {
+            return new Uri($"https://{pageUrl.Host}/video/{digits.Groups[1].Value}");
+        }
+
+        return pageUrl;
     }
 
     private void ClearDetectedVideos()
@@ -1585,7 +1637,10 @@ public sealed partial class MainViewModel : ObservableObject
                 string.Equals(_currentPageIdentity, pageOnly, StringComparison.Ordinal))
                 return;
 
-            StartPageDetectionSession(e.PageUrl, e.PageTitle, clearUi: true, forceReplace: true);
+            RestartDetectionForPageChange(
+                e.PageUrl,
+                e.PageTitle,
+                mediaSessionKey: tab.Host.CurrentMediaSessionKey);
         }, System.Windows.Threading.DispatcherPriority.Background);
     }
 

@@ -38,6 +38,35 @@ public sealed class DetectionAcceptanceTests
         Assert.Equal("video:A", WebView2Host.NormalizeMediaSessionKey("video:A"));
     }
 
+    [Theory]
+    [InlineData(null, 10.0, false)]
+    [InlineData(10.0, null, false)]
+    [InlineData(10.0, 10.5, false)]
+    [InlineData(10.0, 12.0, true)]
+    [InlineData(199.1, 1501.8, true)]
+    public void SignificantDurationChange_RequiresBothFiniteAndJump(double? prev, double? next, bool expected) =>
+        Assert.Equal(expected, WebView2Host.IsSignificantDurationChange(prev, next));
+
+    [Fact]
+    public async Task DurationJump_OnSameIdentity_ForcesMediaSessionRestart()
+    {
+        var pipeline = Create();
+        await pipeline.CompleteDiscoveryAsync(default);
+        using var host = new WebView2Host(Options.Create(new AppOptions()), Substitute.For<INetworkEventNormalizer>(),
+            pipeline, NullLogger<WebView2Host>.Instance);
+        var forced = 0;
+        host.MediaSessionChanged += (_, e) =>
+        {
+            if (e.ForceRestart)
+                forced++;
+        };
+        host.ObserveVideoIdentity("content:7683109159823577727", Page, durationSec: 40);
+        await Task.Delay(1800);
+        host.ObserveVideoIdentity("content:7683109159823577727", Page, durationSec: 199);
+        await Task.Delay(800);
+        Assert.Equal(1, forced);
+    }
+
     [Fact]
     public async Task SameDigitAweme_WithDifferentIdentityPrefix_DoesNotRestart()
     {

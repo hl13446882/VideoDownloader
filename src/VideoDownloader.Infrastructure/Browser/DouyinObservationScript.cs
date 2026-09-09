@@ -235,8 +235,9 @@ internal static class DouyinObservationScript
               return fromData.some(u=>resourceKey(u)===resourceKey(value));
             }) : [];
             caption=dataRecord ? String(dataRecord.desc||dataRecord.description||dataRecord.title||'').trim() : (samePlayer ? caption : '');
+            const durationSec=(Number.isFinite(active.duration)&&active.duration>0)?active.duration:null;
             return { type:'vd-video-identity', identity:'content:'+awemeId, caption, href:location.href,
-              media:[...new Set([...fromPlayer, ...fromData])] };
+              media:[...new Set([...fromPlayer, ...fromData])], durationSec };
           };
           window.__vdProbe=()=>{
             const observation=window.__vdObserve(); if(!observation) return null;

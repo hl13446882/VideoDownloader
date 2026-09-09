@@ -43,6 +43,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
     private bool _captureEnabled = true;
     private string? _mediaSessionKey;
     private string? _pendingMediaSessionKey;
+    private double? _mediaDurationSec;
     private CancellationTokenSource? _mediaSessionDebounceCts;
     private readonly object _mediaSessionLock = new();
 
@@ -233,7 +234,15 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
                 root.TryGetProperty("href", out var href) && href.GetString() == CurrentPageUrl?.AbsoluteUri &&
                 identity.GetString() is { Length: > 0 } key)
             {
-                ObserveVideoIdentity(key, CurrentPageUrl!);
+                double? durationSec = null;
+                if (root.TryGetProperty("durationSec", out var durationEl) &&
+                    durationEl.ValueKind == JsonValueKind.Number &&
+                    durationEl.TryGetDouble(out var duration) &&
+                    double.IsFinite(duration) &&
+                    duration > 0)
+                    durationSec = duration;
+
+                ObserveVideoIdentity(key, CurrentPageUrl!, durationSec);
                 if (root.TryGetProperty("caption", out var caption) &&
                     caption.GetString() is { Length: > 0 } text)
                 {
@@ -274,13 +283,30 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         // Kept for callers that report transport observations; these cannot change video identity.
     }
 
-    internal void ObserveVideoIdentity(string key, Uri page)
+    internal void ObserveVideoIdentity(string key, Uri page, double? durationSec = null)
     {
         _lastDocumentUrl = page;
         var normalized = NormalizeMediaSessionKey(key);
         CancellationTokenSource debounce;
+        bool durationRevision;
         lock (_mediaSessionLock)
         {
+            durationRevision = IsSignificantDurationChange(_mediaDurationSec, durationSec) &&
+                               string.Equals(NormalizeMediaSessionKey(_mediaSessionKey ?? string.Empty), normalized, StringComparison.Ordinal);
+            if (durationSec is > 0)
+                _mediaDurationSec = durationSec;
+
+            if (durationRevision)
+            {
+                // Same content id but reliable duration jump ⇒ treat as a new work; force restart.
+                _mediaSessionDebounceCts?.Cancel();
+                _mediaSessionDebounceCts?.Dispose();
+                _pendingMediaSessionKey = null;
+                debounce = _mediaSessionDebounceCts = new();
+                _ = CommitMediaSessionAsync(normalized, key, "duration-revision", debounce.Token, forceRestart: true);
+                return;
+            }
+
             if (normalized == NormalizeMediaSessionKey(_mediaSessionKey ?? string.Empty) &&
                 _mediaSessionKey is not null)
             {
@@ -299,12 +325,18 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         _ = CommitMediaSessionAsync(normalized, key, "dom-identity", debounce.Token);
     }
 
-    private async Task CommitMediaSessionAsync(string key, string rawMediaUrl, string source, CancellationToken token)
+    private async Task CommitMediaSessionAsync(
+        string key,
+        string rawMediaUrl,
+        string source,
+        CancellationToken token,
+        bool forceRestart = false)
     {
         try
         {
             // Settle ABR / multi-CDN bursts before committing a session switch.
-            await Task.Delay(TimeSpan.FromSeconds(1.5), token);
+            // Duration revisions are already debounced by the player; keep a short settle.
+            await Task.Delay(forceRestart ? TimeSpan.FromMilliseconds(400) : TimeSpan.FromSeconds(1.5), token);
         }
         catch (OperationCanceledException)
         {
@@ -316,7 +348,8 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         {
             if (token.IsCancellationRequested) return;
             var normalized = NormalizeMediaSessionKey(key);
-            if (string.Equals(NormalizeMediaSessionKey(_mediaSessionKey ?? string.Empty), normalized, StringComparison.Ordinal) &&
+            if (!forceRestart &&
+                string.Equals(NormalizeMediaSessionKey(_mediaSessionKey ?? string.Empty), normalized, StringComparison.Ordinal) &&
                 _mediaSessionKey is not null)
                 return;
 
@@ -332,11 +365,12 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
 
         // First primary media after navigation only anchors; avoids canceling the initial probe cycle.
         // Subsequent different session keys (same-URL feed swipe) restart detection.
-        if (previous is null && !_pipeline.IsCompleted)
+        if (!forceRestart && previous is null && !_pipeline.IsCompleted)
             return;
 
         // Same aweme with different identity string prefixes must not restart detection.
-        if (previous is not null &&
+        if (!forceRestart &&
+            previous is not null &&
             string.Equals(NormalizeMediaSessionKey(previous), key, StringComparison.Ordinal))
             return;
 
@@ -347,7 +381,8 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
                 _core?.DocumentTitle,
                 rawMediaUrl,
                 previous ?? "unobserved",
-                source));
+                source,
+                ForceRestart: forceRestart));
     }
 
     /// <summary>Collapse host-prefixed Douyin/TikTok ids to a stable <c>content:{digits}</c> key.</summary>
@@ -361,6 +396,19 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         return key.Trim();
     }
 
+    /// <summary>
+    /// True when both durations are known and differ enough to indicate a different work
+    /// (not merely NaN→metadata or tiny MSE timeline jitter).
+    /// </summary>
+    internal static bool IsSignificantDurationChange(double? previous, double? next)
+    {
+        if (previous is null or <= 0 || next is null or <= 0)
+            return false;
+        if (!double.IsFinite(previous.Value) || !double.IsFinite(next.Value))
+            return false;
+        return Math.Abs(previous.Value - next.Value) >= 2.0;
+    }
+
     private void ResetMediaSessionAnchor()
     {
         lock (_mediaSessionLock)
@@ -370,6 +418,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             _mediaSessionDebounceCts = null;
             _mediaSessionKey = null;
             _pendingMediaSessionKey = null;
+            _mediaDurationSec = null;
         }
     }
 
@@ -1215,4 +1264,5 @@ public sealed record MediaSessionChangedEventArgs(
     string? PageTitle,
     string MediaSessionKey,
     string PreviousMediaSessionKey,
-    string Source);
+    string Source,
+    bool ForceRestart = false);

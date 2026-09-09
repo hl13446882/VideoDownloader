@@ -18,7 +18,8 @@ internal static class YouTubeObservationScript
               || document.title || '').replace(/\s*-\s*YouTube\s*$/i,'').trim();
             const media=[];
             if(active){ for(const u of [active.currentSrc,active.src]) if(/^https?:/i.test(u||'')) media.push(u); }
-            return { type:'vd-video-identity', identity:location.host+':content:youtube:'+v, caption, href:location.href, media:[...new Set(media)] };
+            const durationSec=(active&&Number.isFinite(active.duration)&&active.duration>0)?active.duration:null;
+            return { type:'vd-video-identity', identity:location.host+':content:youtube:'+v, caption, href:location.href, media:[...new Set(media)], durationSec };
           };
           window.__vdProbe=()=>window.__vdObserve();
           let scheduled=false;

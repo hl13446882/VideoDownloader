@@ -99,8 +99,9 @@ internal static class TikTokObservationScript
               if(wrapId) explicit='content:'+wrapId;
             }
             if(!explicit) return null;
+            const durationSec=(Number.isFinite(active.duration)&&active.duration>0)?active.duration:null;
             return { type:'vd-video-identity', identity: location.host+':'+explicit, caption, href:location.href,
-              media:[...new Set([active.currentSrc,active.src].filter(u=>/^https?:/i.test(u||'')))] };
+              media:[...new Set([active.currentSrc,active.src].filter(u=>/^https?:/i.test(u||'')))], durationSec };
           };
           window.__vdProbe=()=>{
             const observation=window.__vdObserve(); if(!observation) return null;

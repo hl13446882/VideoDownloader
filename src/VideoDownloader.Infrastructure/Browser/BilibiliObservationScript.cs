@@ -12,7 +12,9 @@ internal static class BilibiliObservationScript
               || document.querySelector('meta[property="og:title"]')?.getAttribute('content')
               || document.title || '').trim();
             caption=caption.replace(/\s*[_|].*哔哩哔哩.*$/u,'').replace(/\s*[_-]\s*bilibili.*$/i,'').trim();
-            return { type:'vd-video-identity', identity:location.host+':content:'+bvid, caption, href:location.href, media:[] };
+            const active=[...document.querySelectorAll('video')].find(e=>{const r=e.getBoundingClientRect();return r.width>80&&r.height>80;});
+            const durationSec=(active&&Number.isFinite(active.duration)&&active.duration>0)?active.duration:null;
+            return { type:'vd-video-identity', identity:location.host+':content:'+bvid, caption, href:location.href, media:[], durationSec };
           };
           window.__vdProbe=()=>{
             const observation=window.__vdObserve(); if(!observation) return null;

@@ -232,7 +232,8 @@ internal static class VideoObservationScript
               identity: location.host+':content:'+bvid,
               caption,
               href:location.href,
-              media:[]
+              media:[],
+              durationSec:(()=>{const v=[...document.querySelectorAll('video')].find(e=>{const r=e.getBoundingClientRect();return r.width>80&&r.height>80;}); return (v&&Number.isFinite(v.duration)&&v.duration>0)?v.duration:null;})()
             };
           };
           window.__vdObserve = () => {
@@ -249,7 +250,7 @@ internal static class VideoObservationScript
                 const player=window.player_aaaa||window.player_data||{};
                 const heading=document.querySelector('.player-title,h2.title,.title h2,h2,h1');
                 const caption=String(player.vod_data?.vod_name||heading?.textContent||document.title||'').trim();
-                return {type:'vd-video-identity',identity:pageKey(location.href),caption,href:location.href,media:[]};
+                return {type:'vd-video-identity',identity:pageKey(location.href),caption,href:location.href,media:[],durationSec:null};
               }
               return null;
             }
@@ -300,7 +301,8 @@ internal static class VideoObservationScript
             // Feed roots without a concrete content id are not a stable logical video yet.
             if(!stablePage && !explicit) return null;
             const identity = stablePage ? base : location.host + ':' + explicit;
-            return { type:'vd-video-identity', identity, caption, href:location.href,
+            const durationSec=(Number.isFinite(active.duration)&&active.duration>0)?active.duration:null;
+            return { type:'vd-video-identity', identity, caption, href:location.href, durationSec,
               media:[...new Set([active.currentSrc,active.src,...[...active.querySelectorAll('source')].map(e=>e.src)].filter(u=>/^https?:/i.test(u||'')))] };
           };
           const findItemById = id => {
