@@ -97,7 +97,9 @@ public sealed class AppLogService
             config = config.WriteTo.File(
                 new SanitizingTextFormatter(),
                 logPath,
-                rollingInterval: RollingInterval.Day);
+                rollingInterval: RollingInterval.Day,
+                shared: true,
+                flushToDiskInterval: TimeSpan.FromSeconds(1));
         }
 
         Log.Logger = config.CreateLogger();

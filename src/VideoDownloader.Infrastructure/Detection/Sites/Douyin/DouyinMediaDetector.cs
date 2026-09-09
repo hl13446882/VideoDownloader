@@ -107,11 +107,20 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             }
 
             var kind = DouyinPlayEvidence.InferKind(networkEvent.Url, networkEvent.MimeType);
+            var isMse = DouyinPlayEvidence.IsMseAdaptivePath(networkEvent.Url);
             var ctx = EnrichContext(networkEvent.RequestContext);
             var length = DouyinPlayEvidence.GetEntityLength(networkEvent);
+            // Never promote MSE tracks to Combined — even if mime says video.
+            var trackKind = kind switch
+            {
+                MediaTrackKind.Audio => MediaTrackKind.Audio,
+                MediaTrackKind.Video => MediaTrackKind.Video,
+                _ when isMse => MediaTrackKind.Video,
+                _ => MediaTrackKind.Combined
+            };
             var track = new MediaTrack(
-                kind == MediaTrackKind.Audio ? "audio" : "video",
-                kind is MediaTrackKind.Audio or MediaTrackKind.Video ? kind : MediaTrackKind.Combined,
+                trackKind == MediaTrackKind.Audio ? "audio" : "video",
+                trackKind,
                 networkEvent.Url,
                 null,
                 InferContainer(networkEvent.Url, networkEvent.MimeType),
@@ -124,16 +133,30 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 Evidence = DouyinPlayEvidence.IsBrowserPlay(networkEvent)
                     ? MediaEvidence.BrowserObserved
                     : MediaEvidence.Heuristic,
-                ContentIdentity = _session.CurrentContentId is null ? null : "id:" + _session.CurrentContentId
+                ContentIdentity = _session.CurrentContentId is null ? null : "id:" + _session.CurrentContentId,
+                IsMseTrack = isMse
             };
+
+            _logger.LogInformation(
+                "[DouyinDetect] session={Session} host={Host} path={Path} candidateKind={Kind} mse={Mse} status={Status} len={Len}",
+                _session.SessionId,
+                networkEvent.Url.Host,
+                TruncatePath(networkEvent.Url.AbsolutePath),
+                isMse ? (trackKind == MediaTrackKind.Audio ? "MseAudioTrack" : "MseVideoTrack")
+                      : (trackKind == MediaTrackKind.Combined ? "ProgressiveMuxed" : trackKind.ToString()),
+                isMse,
+                isMse ? "deferred" : "accepted",
+                length);
 
             if (track.Kind == MediaTrackKind.Audio)
                 Upsert(_session.AudioCandidates, track);
             else
                 Upsert(_session.VideoCandidates, track);
 
+            // MSE-only observations must not force Video mode away from Album.
             if (_session.CurrentMode == DouyinContentMode.Unknown &&
-                track.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
+                track.Kind is MediaTrackKind.Video or MediaTrackKind.Combined &&
+                !isMse)
                 _session.SwitchContent(_session.CurrentContentId, DouyinContentMode.Video);
         }
 
@@ -192,14 +215,27 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             if (descriptor is null)
             {
                 _failed = true;
+                var hasMseOnly = _session.CurrentMode != DouyinContentMode.Album &&
+                                 _session.VideoCandidates.Any(t =>
+                                     t.IsMseTrack || DouyinPlayEvidence.IsMseVideoPath(t.SourceUrl));
                 _failureReason = _session.CurrentMode == DouyinContentMode.Album
                     ? "douyin_album_no_images"
-                    : "douyin_no_media";
+                    : hasMseOnly
+                        ? "douyin_mse_only"
+                        : "douyin_no_media";
                 _logger.LogWarning(
-                    "DouyinMediaDetector Failed reason={Reason} (no Generic fallback)",
-                    _failureReason);
+                    "[DouyinSelect] session={Session} selected=none reason={Reason} candidates={Count} (no Generic fallback)",
+                    _session.SessionId, _failureReason, _session.VideoCandidates.Count);
                 return Task.CompletedTask;
             }
+
+            _logger.LogInformation(
+                "[DouyinSelect] session={Session} selected={Host}{Path} kind={Kind} formats={Formats} reason=progressive_muxed",
+                _session.SessionId,
+                descriptor.Video?.SourceUrl.Host,
+                TruncatePath(descriptor.Video?.SourceUrl.AbsolutePath ?? ""),
+                descriptor.Video?.Kind,
+                descriptor.Formats.Count);
         }
 
         DescriptorsReady?.Invoke(this, [descriptor]);
@@ -248,7 +284,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             video.BrowserObserved, video.ContentLength,
             pairedAudio?.SourceUrl.Host);
 
-        var formats = BuildFormatLadder(_session.VideoCandidates, pairedAudio, page);
+        var formats = BuildFormatLadder(_session.VideoCandidates, page);
         return new MediaDescriptor(
             SiteIds.Douyin,
             page,
@@ -266,69 +302,60 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         };
     }
 
-    private static IReadOnlyList<MediaVariant> BuildFormatLadder(
-        IReadOnlyList<MediaTrack> videos, MediaTrack? audio, Uri page)
+    private IReadOnlyList<MediaVariant> BuildFormatLadder(IReadOnlyList<MediaTrack> videos, Uri page)
     {
         var list = new List<MediaVariant>();
         foreach (var track in videos
                      .Where(t => !DouyinPlayEvidence.IsNonDownloadableHost(t.SourceUrl) &&
-                                 !DouyinPlayEvidence.IsLivePullHost(t.SourceUrl))
-                     .OrderByDescending(t => ScoreTrack(t, audio is not null)))
+                                 !DouyinPlayEvidence.IsLivePullHost(t.SourceUrl) &&
+                                 !t.IsMseTrack &&
+                                 !DouyinPlayEvidence.IsMseVideoPath(t.SourceUrl) &&
+                                 t.Kind == MediaTrackKind.Combined)
+                     .OrderByDescending(t => ScoreTrack(t)))
         {
-            var tracks = new List<MediaTrack> { track };
-            if (track.Kind == MediaTrackKind.Video && audio is not null)
-                tracks.Add(audio);
             list.Add(new MediaVariant(
                 track.TrackId,
                 null,
                 null,
                 null,
                 track.Container,
-                tracks)
+                [track])
             {
                 RecoveryPageUrl = page,
                 ContentIdentity = track.ContentIdentity
             });
+
+            _logger.LogInformation(
+                "[DouyinVariant] host={Host} path={Path} downloadable=true priority=progressive contentLength={Len}",
+                track.SourceUrl.Host, TruncatePath(track.SourceUrl.AbsolutePath), track.ContentLength);
         }
         return list;
     }
 
     private static MediaTrack? SelectBestVideo(IReadOnlyList<MediaTrack> videos, IReadOnlyList<MediaTrack> audios)
     {
-        var hasAudio = audios.Any(t => !DouyinPlayEvidence.IsNonDownloadableHost(t.SourceUrl) ||
-                                       DouyinPlayEvidence.IsMusicPath(t.SourceUrl));
-        var ranked = videos
+        // Hard rule: media-video / MSE tracks are never ordinary download sources —
+        // not even as Video+Audio remux fallback.
+        return videos
             .Where(t => !DouyinPlayEvidence.IsNonDownloadableHost(t.SourceUrl) &&
-                        !DouyinPlayEvidence.IsLivePullHost(t.SourceUrl))
-            .OrderByDescending(t => ScoreTrack(t, hasAudio))
-            .ToList();
-        if (ranked.Count == 0)
-            return null;
-
-        // Prefer muxed progressive — media-video fMP4 often fails remux / is incomplete alone.
-        var combined = ranked.FirstOrDefault(t =>
-            t.Kind == MediaTrackKind.Combined &&
-            !DouyinPlayEvidence.IsPlayGateway(t.SourceUrl) &&
-            !t.SourceUrl.AbsolutePath.Contains("/media-video-", StringComparison.OrdinalIgnoreCase));
-        if (combined is not null)
-            return combined;
-
-        var best = ranked[0];
-        if (best.Kind == MediaTrackKind.Video && !hasAudio)
-            return null;
-
-        return best;
+                        !DouyinPlayEvidence.IsLivePullHost(t.SourceUrl) &&
+                        !t.IsMseTrack &&
+                        !DouyinPlayEvidence.IsMseVideoPath(t.SourceUrl) &&
+                        !DouyinPlayEvidence.IsPlayGateway(t.SourceUrl) &&
+                        t.Kind == MediaTrackKind.Combined)
+            .OrderByDescending(t => ScoreTrack(t, audios.Count > 0))
+            .FirstOrDefault();
     }
 
     private static int ScoreTrack(MediaTrack t, bool hasAudioPair = true)
     {
         if (DouyinPlayEvidence.IsLivePullHost(t.SourceUrl))
             return int.MinValue / 4;
+        if (t.IsMseTrack || DouyinPlayEvidence.IsMseAdaptivePath(t.SourceUrl))
+            return int.MinValue / 8;
 
         var score = 0;
         if (DouyinPlayEvidence.IsPlayGateway(t.SourceUrl)) score -= 2000;
-        if (t.SourceUrl.AbsolutePath.Contains("/media-video-", StringComparison.OrdinalIgnoreCase))
-            score -= hasAudioPair ? 200 : 900;
         if (DouyinPlayEvidence.IsStrongVodHost(t.SourceUrl)) score += 1000;
         if (t.BrowserObserved) score += 500;
         if (t.Kind == MediaTrackKind.Combined) score += 800;
@@ -339,6 +366,9 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         score += (int)Math.Min(t.ContentLength ?? 0, int.MaxValue) / (1024 * 1024);
         return score;
     }
+
+    private static string TruncatePath(string path) =>
+        path.Length <= 96 ? path : path[..96];
 
     private void ApplyObservationJson(string? json)
     {
@@ -392,9 +422,18 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                     if (DouyinPlayEvidence.IsNonDownloadableHost(url)) continue;
                     if (!DouyinPlayEvidence.IsPlayableUrl(url)) continue;
                     var kind = DouyinPlayEvidence.InferKind(url, null);
+                    var isMse = DouyinPlayEvidence.IsMseAdaptivePath(url);
+                    // Do NOT force media-video into Combined — that was the main fallback bug.
+                    var trackKind = kind switch
+                    {
+                        MediaTrackKind.Audio => MediaTrackKind.Audio,
+                        MediaTrackKind.Video => MediaTrackKind.Video,
+                        _ when isMse => MediaTrackKind.Video,
+                        _ => MediaTrackKind.Combined
+                    };
                     var track = new MediaTrack(
-                        kind == MediaTrackKind.Audio ? "audio" : "media",
-                        kind == MediaTrackKind.Audio ? MediaTrackKind.Audio : MediaTrackKind.Combined,
+                        trackKind == MediaTrackKind.Audio ? "audio" : "media",
+                        trackKind,
                         url,
                         null,
                         InferContainer(url, null),
@@ -404,14 +443,24 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                     {
                         IsValidated = true,
                         Evidence = MediaEvidence.DomObserved,
-                        ContentIdentity = _session.CurrentContentId is null ? null : "id:" + _session.CurrentContentId
+                        ContentIdentity = _session.CurrentContentId is null ? null : "id:" + _session.CurrentContentId,
+                        IsMseTrack = isMse
                     };
                     if (track.Kind == MediaTrackKind.Audio)
                         Upsert(_session.AudioCandidates, track);
-                    else if (_session.CurrentMode != DouyinContentMode.Album)
+                    else if (_session.CurrentMode == DouyinContentMode.Album)
+                    {
+                        // Album: ignore stray media-video; keep non-MSE media as possible BGM only when audio.
+                    }
+                    else if (!isMse)
                         Upsert(_session.VideoCandidates, track);
                     else
-                        Upsert(_session.AudioCandidates, track with { Kind = MediaTrackKind.Audio, TrackId = "bgm" });
+                    {
+                        Upsert(_session.VideoCandidates, track);
+                        _logger.LogInformation(
+                            "[DouyinDetect] session={Session} path={Path} candidateKind=MseVideoTrack status=deferred reason=observation_mse",
+                            _session.SessionId, TruncatePath(url.AbsolutePath));
+                    }
                 }
             }
         }

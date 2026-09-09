@@ -10,6 +10,7 @@ using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Core.Naming;
 using VideoDownloader.Infrastructure.Browser;
+using VideoDownloader.Infrastructure.Detection;
 using VideoDownloader.Infrastructure.Diagnostics;
 using VideoDownloader.UI.Localization;
 
@@ -102,7 +103,8 @@ public sealed partial class DetectedVideoViewModel : ObservableObject
         var previousUrl = SelectedVariant?.Variant.SourceUrl.AbsoluteUri;
 
         var built = video.Variants
-            .OrderByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
+            .OrderBy(v => MediaVariantRanking.IsMseOrPartialVariant(v) ? 1 : 0)
+            .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
             .ThenByDescending(v => v.Height ?? 0)
             .Select(variant => FormatVariantItem(variant, video))
             .GroupBy(v => v.Label, StringComparer.Ordinal)
@@ -134,6 +136,7 @@ public sealed partial class DetectedVideoViewModel : ObservableObject
         SelectedVariant =
             Variants.FirstOrDefault(v => v.Variant.VariantId == previousVariantId) ??
             Variants.FirstOrDefault(v => v.Variant.SourceUrl.AbsoluteUri == previousUrl) ??
+            Variants.FirstOrDefault(v => !MediaVariantRanking.IsMseOrPartialVariant(v.Variant)) ??
             Variants.FirstOrDefault();
     }
 

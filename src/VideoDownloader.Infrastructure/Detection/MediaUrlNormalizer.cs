@@ -15,10 +15,26 @@ public static class MediaUrlNormalizer
         "mt", "mv", "ms", "mm", "mn", "pl", "nh", "txp"
     };
 
+    /// <summary>
+    /// ByteDance MSE adaptive fMP4 track paths (<c>/media-video-*</c>, <c>/media-audio-*</c>).
+    /// Not progressive muxed VOD — ordinary download/remux must reject these.
+    /// </summary>
+    public static bool IsByteDanceMseTrack(Uri url)
+    {
+        var path = url.AbsolutePath;
+        return path.Contains("/media-video-", StringComparison.OrdinalIgnoreCase) ||
+               path.Contains("/media-audio-", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsByteDanceMseVideoTrack(Uri url) =>
+        url.AbsolutePath.Contains("/media-video-", StringComparison.OrdinalIgnoreCase);
+
     public static bool IsLikelySegment(Uri url)
     {
         var path = url.AbsolutePath.ToLowerInvariant();
         if (path.EndsWith(".m3u8") || path.EndsWith(".mpd")) return false;
+        if (IsByteDanceMseTrack(url))
+            return true;
         if (path.Contains("/seg") ||
             path.Contains("segment") ||
             path.Contains("/chunk") ||

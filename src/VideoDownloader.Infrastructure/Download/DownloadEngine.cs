@@ -7,6 +7,7 @@ using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Core.Naming;
 using VideoDownloader.Infrastructure.Configuration;
+using VideoDownloader.Infrastructure.Detection;
 using VideoDownloader.Infrastructure.Http;
 using VideoDownloader.Infrastructure.Licensing;
 using VideoDownloader.Infrastructure.Security;
@@ -72,6 +73,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         Uri? pageUrl = null,
         CancellationToken ct = default)
     {
+        RejectMseOrdinaryDownload(variant);
+
         if (_license.DownloadLimitBytes is int demoLimit && variant.TotalContentLength is long total && total > demoLimit)
             throw new DownloadException(ErrorCodes.LicenseLimit, "DEMO download limit is 10 MiB.");
         if (_license.DownloadLimitBytes is not null && variant.TotalContentLength is null &&
@@ -537,6 +540,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         CancellationToken ct)
     {
         job.Variant = EnsureDownloadContext(job);
+        RejectMseOrdinaryDownload(job.Variant);
+
         if (job.Variant.Tracks.Any(t => t.BrowserObserved) &&
             job.Variant.RequestContext.Cookies.Count == 0)
         {
@@ -993,6 +998,19 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                 "image" => ".jpg",
                 _ => track.Kind == MediaTrackKind.Audio ? ".m4a" : ".mp4"
             };
+
+    /// <summary>
+    /// Last-line defense: MSE adaptive tracks must never enter ordinary HTTP/ffmpeg remux.
+    /// </summary>
+    private static void RejectMseOrdinaryDownload(MediaVariant variant)
+    {
+        if (variant.Tracks.Any(t => t.IsMseTrack || MediaUrlNormalizer.IsByteDanceMseTrack(t.SourceUrl)))
+        {
+            throw new DownloadException(
+                ErrorCodes.MseTrackNotDownloadable,
+                "MSE adaptive media-video/media-audio tracks are not ordinary download sources.");
+        }
+    }
 
     private static string SanitizeFileName(string name)
     {

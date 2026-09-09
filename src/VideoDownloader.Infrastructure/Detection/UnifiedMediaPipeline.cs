@@ -453,9 +453,14 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
     /// </summary>
     public static bool IsInsufficientByteDanceDownloadObject(Uri url, long? contentLength)
     {
-        if (contentLength is null or <= 0)
-            return false;
         if (!IsByteDanceOrTikTokMediaCdn(url))
+            return false;
+
+        // Any media-video / media-audio adaptive track is not an ordinary complete download object.
+        if (MediaUrlNormalizer.IsByteDanceMseTrack(url))
+            return true;
+
+        if (contentLength is null or <= 0)
             return false;
 
         var kind = InferKindFromMime(null, url);

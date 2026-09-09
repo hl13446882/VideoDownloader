@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Infrastructure.Detection;
 
 namespace VideoDownloader.Infrastructure.Detection.Sites.Douyin;
 
@@ -109,6 +110,11 @@ internal static class DouyinPlayEvidence
 
     public static long? GetEntityLength(NormalizedNetworkEvent e)
     {
+        // MSE adaptive tracks: never promote Content-Range TOTAL into ContentLength —
+        // that made 1.5MB Range windows look like 332MB complete progressive files.
+        if (IsMseAdaptivePath(e.Url))
+            return null;
+
         var range = e.ResponseHeaders.FirstOrDefault(h => h.Key.Equals("Content-Range", StringComparison.OrdinalIgnoreCase)).Value;
         if (e.StatusCode == 206 || !string.IsNullOrWhiteSpace(range))
         {
@@ -120,17 +126,26 @@ internal static class DouyinPlayEvidence
                 parsed.To is not null)
             {
                 var window = parsed.To.Value - parsed.From.Value + 1;
-                // Tiny MSE Range windows must not advertise the full VOD size — that made
-                // 64KiB crumbs look like 10MB and UI/download picked undownloadable URLs.
+                // Tiny MSE Range windows must not advertise the full VOD size.
                 if (window <= MediaResourceSizeFilter.MinDisplayBytes)
                     return null;
-                if (parsed.To.Value < parsed.Length.Value)
-                    return parsed.Length;
+                // Incomplete partial: body length ≠ entity total. Do not treat TOTAL as ContentLength.
+                if (parsed.To.Value + 1 < parsed.Length.Value)
+                    return null;
+                return parsed.Length;
             }
             return null;
         }
         return e.ContentLength is > 0 ? e.ContentLength : null;
     }
+
+    /// <summary>Douyin/TikTok MSE adaptive fMP4 paths (<c>media-video-*</c> / <c>media-audio-*</c>).</summary>
+    public static bool IsMseAdaptivePath(Uri url) => MediaUrlNormalizer.IsByteDanceMseTrack(url);
+
+    public static bool IsMseVideoPath(Uri url) => MediaUrlNormalizer.IsByteDanceMseVideoTrack(url);
+
+    public static bool IsMseAudioPath(Uri url) =>
+        url.AbsolutePath.Contains("/media-audio-", StringComparison.OrdinalIgnoreCase);
 
     public static bool IsBrowserPlay(NormalizedNetworkEvent e) =>
         e.StatusCode is 200 or 206 &&
@@ -207,7 +222,7 @@ internal static class DouyinPlayEvidence
         var path = url.AbsolutePath;
         var full = url.AbsoluteUri;
 
-        // Adaptive fMP4: separate A/V tracks — never label media-video as Combined.
+        // Adaptive fMP4 MSE tracks — never label as Combined / progressive muxed.
         if (path.Contains("/media-audio-", StringComparison.OrdinalIgnoreCase) ||
             path.Contains("/ies-music/", StringComparison.OrdinalIgnoreCase) ||
             full.Contains("mime_type=audio", StringComparison.OrdinalIgnoreCase) ||

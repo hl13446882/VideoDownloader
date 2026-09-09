@@ -26,9 +26,12 @@ public static class MediaDescriptorMapper
             : descriptor.DisplayTitle!;
         var preferred = variants
             .Where(v => v.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined))
+            .Where(v => !v.Tracks.Any(t => t.IsMseTrack || MediaUrlNormalizer.IsByteDanceMseTrack(t.SourceUrl)))
             .OrderByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
             .ThenByDescending(v => v.Height ?? 0)
             .FirstOrDefault()
+            ?? variants.FirstOrDefault(v =>
+                !v.Tracks.Any(t => t.IsMseTrack || MediaUrlNormalizer.IsByteDanceMseTrack(t.SourceUrl)))
             ?? variants.FirstOrDefault();
         var title = AppendDetectedMeta(baseTitle, preferred);
 
@@ -76,8 +79,10 @@ public static class MediaDescriptorMapper
         if (descriptor.Formats.Count > 0)
         {
             // Drop illegal "Combined + separate audio remux" duplicates; keep ladder + audio-only modes.
+            // Never surface ByteDance MSE adaptive tracks as ordinary download variants.
             return descriptor.Formats
                 .Where(v => v.Tracks.Count > 0)
+                .Where(v => !v.Tracks.Any(t => t.IsMseTrack || MediaUrlNormalizer.IsByteDanceMseTrack(t.SourceUrl)))
                 .Where(v => !(v.Tracks.Any(t => t.Kind == MediaTrackKind.Combined) &&
                               v.Tracks.Any(t => t.Kind == MediaTrackKind.Audio && t.TrackId != "audio-extract")))
                 .GroupBy(v => string.Join("|", v.Tracks.Select(t => t.SourceUrl.AbsoluteUri)), StringComparer.OrdinalIgnoreCase)
@@ -132,6 +137,14 @@ public static class MediaDescriptorMapper
         }
 
         var list = new List<MediaVariant>();
+        var videoIsMse = descriptor.Video is not null &&
+                         (descriptor.Video.IsMseTrack ||
+                          MediaUrlNormalizer.IsByteDanceMseVideoTrack(descriptor.Video.SourceUrl));
+
+        // MSE video (+ optional audio) must NOT become an ordinary remux DownloadVariant.
+        if (videoIsMse)
+            return list;
+
         if (descriptor.Video is not null && descriptor.Audio is not null &&
             descriptor.Video.Kind != MediaTrackKind.Combined)
         {

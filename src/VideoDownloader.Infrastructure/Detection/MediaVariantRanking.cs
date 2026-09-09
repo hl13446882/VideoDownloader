@@ -30,7 +30,7 @@ public static class MediaVariantRanking
         variant.Tracks.Any(t => t.Kind is MediaTrackKind.Audio or MediaTrackKind.Combined);
 
     /// <summary>
-    /// Prefer non-FLV progressive/adaptive VOD, then largest byte size / bandwidth / height.
+    /// Prefer progressive/muxed VOD over MSE/partial tracks; size only ranks within the same delivery class.
     /// </summary>
     public static IReadOnlyList<MediaVariant> Rank(IEnumerable<MediaVariant> variants) =>
         variants
@@ -41,6 +41,8 @@ public static class MediaVariantRanking
                     ? 1 : 0)
             .ThenByDescending(v => HasVideo(v) ? 1 : 0)
             .ThenByDescending(v => MediaVariantReconciler.HasCompleteAudio(v) ? 1 : 0)
+            // Ordinary progressive Combined first; MSE adaptive tracks last (never default).
+            .ThenBy(v => IsMseOrPartialVariant(v) ? 1 : 0)
             // Prefer real playlists over bare fMP4/TS segments observed via MSE.
             .ThenByDescending(v =>
                 string.Equals(v.Container, "hls", StringComparison.OrdinalIgnoreCase) ||
@@ -57,8 +59,13 @@ public static class MediaVariantRanking
             .ThenByDescending(v => v.Height ?? 0)
             .ToArray();
 
+    public static bool IsMseOrPartialVariant(MediaVariant variant) =>
+        variant.Tracks.Any(t =>
+            t.IsMseTrack ||
+            MediaUrlNormalizer.IsByteDanceMseTrack(t.SourceUrl));
+
     public static MediaVariant? SelectPreferredVideo(IEnumerable<MediaVariant> variants) =>
-        Rank(variants).FirstOrDefault(HasVideo);
+        Rank(variants).FirstOrDefault(v => HasVideo(v) && !IsMseOrPartialVariant(v));
 
     public static MediaVariant? SelectPreferredAudio(IEnumerable<MediaVariant> variants) =>
         Rank(variants).FirstOrDefault(v => HasAudio(v) && !HasVideo(v))

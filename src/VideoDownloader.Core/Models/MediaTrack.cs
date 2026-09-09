@@ -36,4 +36,10 @@ public sealed record MediaTrack(
     /// Present only for clear-key encrypted HLS media playlists. Null for all other media.
     /// </summary>
     public HlsMedia? Hls { get; init; }
+
+    /// <summary>
+    /// True for ByteDance MSE adaptive fMP4 tracks (<c>media-video-*</c> / <c>media-audio-*</c>).
+    /// These require reconstruction and must never enter the ordinary progressive download path.
+    /// </summary>
+    public bool IsMseTrack { get; init; }
 }

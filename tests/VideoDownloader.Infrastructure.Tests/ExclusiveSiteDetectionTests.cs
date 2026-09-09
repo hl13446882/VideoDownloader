@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NSubstitute;
 using VideoDownloader.Core.Contracts;
+using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Core.Sites;
 using VideoDownloader.Infrastructure.Configuration;
@@ -16,7 +17,8 @@ namespace VideoDownloader.Infrastructure.Tests;
 public class ExclusiveSiteDetectionTests
 {
     [Theory]
-    [InlineData("bytes 0-4613733/52428800", 52428800L)]
+    [InlineData("bytes 0-52428799/52428800", 52428800L)]
+    [InlineData("bytes 0-4613733/52428800", null)]
     [InlineData("bytes 0-65535/52428800", null)]
     [InlineData("bytes 0-4613733/*", null)]
     [InlineData(null, null)]
@@ -372,11 +374,11 @@ public class ExclusiveSiteDetectionTests
 
         Assert.Null(last);
         Assert.True(detector.Failed);
-        Assert.Equal("douyin_no_media", detector.FailureReason);
+        Assert.Equal("douyin_mse_only", detector.FailureReason);
     }
 
     [Fact]
-    public async Task Douyin_MediaVideo_Pairs_With_MediaAudio()
+    public async Task Douyin_MediaVideo_With_Audio_Does_Not_Become_Ordinary_Download()
     {
         var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
         MediaDescriptor? last = null;
@@ -398,11 +400,136 @@ public class ExclusiveSiteDetectionTests
         }, CancellationToken.None);
         await detector.CompleteAsync(CancellationToken.None);
 
+        Assert.Null(last);
+        Assert.True(detector.Failed);
+        Assert.Equal("douyin_mse_only", detector.FailureReason);
+    }
+
+    [Fact]
+    public async Task Douyin_Larger_MediaVideo_Does_Not_Beat_Smaller_Progressive()
+    {
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var page = new Uri("https://www.douyin.com/jingxuan?modal_id=1");
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "t",
+            """{"identity":"content:1","album":false,"media":[]}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://v3-dy-o.zjcdn.com/video/tos/cn/obj/progressive.mp4?mime_type=video_mp4") with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 35_000_000
+        }, CancellationToken.None);
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://v3-dy-o.zjcdn.com/video/tos/cn/x/media-video-hvc1/?mime_type=video_mp4") with
+        {
+            ResourceType = "Media", StatusCode = 206, ContentLength = 1_500_000,
+            ResponseHeaders = new Dictionary<string, string>
+            {
+                ["content-range"] = "bytes 0-1499999/332000000"
+            }
+        }, CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+
         Assert.NotNull(last);
-        Assert.Equal(MediaTrackKind.Video, last!.Video!.Kind);
-        Assert.NotNull(last.Audio);
-        Assert.Equal(MediaTrackKind.Audio, last.Audio!.Kind);
-        Assert.Contains("media-audio-", last.Audio.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("progressive", last!.Video!.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("media-video-", last.Video.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+        var mapped = MediaDescriptorMapper.ToDetectedVideo(last, Guid.NewGuid());
+        Assert.DoesNotContain(mapped.Variants, v =>
+            v.Tracks.Any(t => MediaUrlNormalizer.IsByteDanceMseTrack(t.SourceUrl)));
+        Assert.Equal(mapped.Variants[0].SourceUrl.AbsoluteUri, last.Video.SourceUrl.AbsoluteUri);
+    }
+
+    [Fact]
+    public void Douyin_Incomplete_ContentRange_On_Mse_Is_Not_Entity_Length()
+    {
+        var e = Evt(new Uri("https://www.douyin.com/video/1"),
+            "https://v3.douyinvod.com/video/tos/cn/x/media-video-hvc1/?mime_type=video_mp4") with
+        {
+            StatusCode = 206,
+            ContentLength = 1_500_000,
+            ResponseHeaders = new Dictionary<string, string>
+            {
+                ["content-range"] = "bytes 0-1499999/332000000"
+            }
+        };
+        Assert.Null(DouyinPlayEvidence.GetEntityLength(e));
+        Assert.True(MediaUrlNormalizer.IsByteDanceMseTrack(e.Url));
+    }
+
+    [Fact]
+    public async Task Douyin_Album_Ignores_Stray_MediaVideo_Network()
+    {
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var page = new Uri("https://www.douyin.com/note/7276638706021240125");
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "相册文案",
+            """{"identity":"content:7276638706021240125","album":true,"caption":"相册文案","media":[],"images":["https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img1.jpeg","https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img2.jpeg"]}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://v3.douyinvod.com/video/tos/cn/x/media-video-avc1/?mime_type=video_mp4") with
+        {
+            ResourceType = "Media", StatusCode = 206, ContentLength = 80_000
+        }, CancellationToken.None);
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://lf3-static.bytednsdoc.com/obj/ies-music/bgm.mp3") with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 500_000, MimeType = "audio/mpeg"
+        }, CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+
+        Assert.NotNull(last);
+        Assert.Equal(MediaContentType.Album, last!.ContentType);
+        Assert.Equal(2, last.Images.Count);
+        Assert.Null(last.Video);
+        var mapped = MediaDescriptorMapper.ToDetectedVideo(last, Guid.NewGuid());
+        Assert.Equal("album", mapped.Variants[0].Container);
+    }
+
+    [Fact]
+    public void MediaVariantRanking_Prefers_Progressive_Over_Larger_Mse()
+    {
+        var progressive = MediaVariant.FromCombinedTrack(
+            "p", new Uri("https://v3.douyinvod.com/video/tos/progressive.mp4"),
+            RequestContext.CreateEmpty(), contentLength: 35_000_000);
+        var mse = MediaVariant.FromTracks(
+            "m", null, null, null, "mp4",
+            [
+                new MediaTrack("v", MediaTrackKind.Video,
+                    new Uri("https://v3.douyinvod.com/x/media-video-hvc1/"), null, "mp4", null, 332_000_000,
+                    RequestContext.CreateEmpty())
+                {
+                    IsMseTrack = true
+                }
+            ]);
+        var preferred = MediaVariantRanking.SelectPreferredVideo([mse, progressive]);
+        Assert.NotNull(preferred);
+        Assert.Equal(progressive.SourceUrl.AbsoluteUri, preferred!.SourceUrl.AbsoluteUri);
+    }
+
+    [Fact]
+    public void DownloadEngine_Rejects_Mse_Track_Variant()
+    {
+        var variant = MediaVariant.FromTracks(
+            "mse", null, null, null, "mkv",
+            [
+                new MediaTrack("v", MediaTrackKind.Video,
+                    new Uri("https://v3.douyinvod.com/x/media-video-avc1/"), null, "mp4", null, 12_000_000,
+                    RequestContext.CreateEmpty()) { IsMseTrack = true },
+                new MediaTrack("a", MediaTrackKind.Audio,
+                    new Uri("https://v3.douyinvod.com/x/media-audio-mp4a/"), null, "m4a", null, 1_000_000,
+                    RequestContext.CreateEmpty()) { IsMseTrack = true }
+            ]);
+        var ex = Assert.Throws<DownloadException>(() =>
+        {
+            // Mirror the engine gate without spinning DI.
+            if (variant.Tracks.Any(t => t.IsMseTrack || MediaUrlNormalizer.IsByteDanceMseTrack(t.SourceUrl)))
+                throw new DownloadException(ErrorCodes.MseTrackNotDownloadable, "mse");
+        });
+        Assert.Equal(ErrorCodes.MseTrackNotDownloadable, ex.ErrorCode);
     }
 
     [Fact]

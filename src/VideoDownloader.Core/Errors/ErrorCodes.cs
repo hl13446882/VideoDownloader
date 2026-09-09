@@ -23,4 +23,6 @@ public static class ErrorCodes
     public const string HumanVerification = "HUMAN_VERIFICATION";
     public const string VideoDenied = "VIDEO_DENIED";
     public const string AudioOnly = "AUDIO_ONLY";
+    /// <summary>Ordinary downloader rejected an MSE/partial track that is not a complete progressive source.</summary>
+    public const string MseTrackNotDownloadable = "MSE_TRACK_NOT_DOWNLOADABLE";
 }
