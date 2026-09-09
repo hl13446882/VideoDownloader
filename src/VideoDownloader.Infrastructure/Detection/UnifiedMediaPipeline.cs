@@ -209,6 +209,14 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         if (page is null)
             return Task.CompletedTask;
 
+        if (IsExclusiveSiteHost(page))
+        {
+            _logger.LogWarning(
+                "UnifiedMediaPipeline rejected exclusive site host={Host} (use RoutedMediaDetectionPipeline)",
+                page.Host);
+            return Task.CompletedTask;
+        }
+
         // Drop late events from a previous document after navigation / Clear.
         if (_page is not null && e.PageUrl is not null && !SamePage(e.PageUrl, _page))
             return Task.CompletedTask;
@@ -221,18 +229,14 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         _page ??= page;
 
         var pageContext = new PageMediaContext(page, _title, _observedIdentity, SessionId, _author);
-        var siteAdapter = _siteAdapters?.Resolve(page);
+        // Unified serves Generic/Other only — never special-site MediaAdapters.
         var genericAdapter = _siteAdapters?.Generic;
+        var siteAdapter = genericAdapter;
         var browserPlay = IsBrowserPlayEvidence(e);
-        var specialSite = siteAdapter is not null &&
-                          genericAdapter is not null &&
-                          !ReferenceEquals(siteAdapter, genericAdapter);
 
-        NetworkCandidateDecision siteDecision = new(NetworkCandidateDecisionKind.Default, siteAdapter?.Name ?? "none");
+        NetworkCandidateDecision siteDecision = new(NetworkCandidateDecisionKind.Default, "none");
         NetworkCandidateDecision genericDecision = new(NetworkCandidateDecisionKind.Default, genericAdapter?.Name ?? "generic");
-        if (siteAdapter is not null)
-            siteDecision = siteAdapter.EvaluateNetworkCandidate(e, pageContext);
-        if (genericAdapter is not null && (!specialSite || siteDecision.Kind == NetworkCandidateDecisionKind.Default))
+        if (genericAdapter is not null)
             genericDecision = genericAdapter.EvaluateNetworkCandidate(e, pageContext);
         else if (genericAdapter is null)
         {
@@ -257,9 +261,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             }
         }
 
-        var finalDecision = specialSite && siteDecision.Kind != NetworkCandidateDecisionKind.Default
-            ? siteDecision
-            : _candidatePolicy.Combine(siteDecision, genericDecision);
+        var finalDecision = _candidatePolicy.Combine(siteDecision, genericDecision);
         if (finalDecision.Kind is NetworkCandidateDecisionKind.StrongAccept or NetworkCandidateDecisionKind.Accept ||
             siteDecision.Kind != NetworkCandidateDecisionKind.Default)
         {
@@ -504,6 +506,15 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         ct.ThrowIfCancellationRequested();
         using var work = _session.TryEnter(continuation);
         if (work is null) return;
+
+        if (IsExclusiveSiteHost(pageUrl))
+        {
+            _logger.LogWarning(
+                "UnifiedMediaPipeline rejected exclusive site probe host={Host} (use RoutedMediaDetectionPipeline)",
+                pageUrl.Host);
+            return;
+        }
+
         _page = pageUrl;
 
         if (IsDirectMediaPage(pageUrl))
@@ -660,10 +671,10 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
 
     private Uri ResolveExternalPageUrlCore(Uri pageUrl, string? observedIdentity)
     {
-        if (_siteAdapters is not null)
+        // Special-site URL rewrite lives in exclusive detectors; Generic only here.
+        if (_siteAdapters?.Generic is { } generic)
         {
-            var adapter = _siteAdapters.Resolve(pageUrl);
-            var rewritten = adapter.CanonicalizeExternalPageUrl(pageUrl, observedIdentity);
+            var rewritten = generic.CanonicalizeExternalPageUrl(pageUrl, observedIdentity);
             if (rewritten is not null)
                 return rewritten;
         }
@@ -1957,6 +1968,22 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                path.Contains("/ies-music/", StringComparison.OrdinalIgnoreCase) ||
                path.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase) ||
                path.EndsWith(".m4a", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Exclusive sites (Douyin/TikTok/YouTube/Bilibili) must never enter Unified.
+    /// </summary>
+    internal static bool IsExclusiveSiteHost(Uri pageUrl)
+    {
+        var host = pageUrl.Host;
+        return host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("b23.tv", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

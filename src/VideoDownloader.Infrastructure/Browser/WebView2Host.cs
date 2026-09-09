@@ -185,11 +185,11 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             return;
 
 
-        await _core.AddScriptToExecuteOnDocumentCreatedAsync(VideoObservationScript.Install);
+        await _core.AddScriptToExecuteOnDocumentCreatedAsync(SiteObservationBootstrap.Install);
         _core.WebMessageReceived += OnWebMessageReceived;
         try
         {
-            await _core.ExecuteScriptAsync(VideoObservationScript.Install);
+            await _core.ExecuteScriptAsync(SiteObservationBootstrap.Install);
         }
         catch (Exception ex)
         {

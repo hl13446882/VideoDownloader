@@ -5,9 +5,8 @@ using VideoDownloader.Infrastructure.Detection;
 
 namespace VideoDownloader.Infrastructure.Sites.MediaAdapters;
 
-/// <summary>
-/// TikTok discovery / admission / refresh hints. Does not download.
-/// </summary>
+/// <summary>Obsolete shared-pipeline filter. Replaced by TikTokMediaDetector.</summary>
+[Obsolete("Use TikTokMediaDetector via SiteDetectionRouter; not registered in DI.")]
 public sealed class TikTokMediaAdapter : ISiteMediaAdapter
 {
     private static readonly Regex VideoIdPath = new(

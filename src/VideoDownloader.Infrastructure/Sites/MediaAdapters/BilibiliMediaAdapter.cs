@@ -5,7 +5,8 @@ using VideoDownloader.Infrastructure.Detection;
 
 namespace VideoDownloader.Infrastructure.Sites.MediaAdapters;
 
-/// <summary>Bilibili-only admission: playurl / upos / DASH m4s / BV identity.</summary>
+/// <summary>Obsolete shared-pipeline filter. Replaced by BilibiliMediaDetector.</summary>
+[Obsolete("Use BilibiliMediaDetector via SiteDetectionRouter; not registered in DI.")]
 public sealed class BilibiliMediaAdapter : ISiteMediaAdapter
 {
     public string Name => "bilibili";

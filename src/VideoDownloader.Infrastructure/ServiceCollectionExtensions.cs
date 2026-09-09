@@ -46,13 +46,17 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IManifestResolver, ManifestResolver>();
         services.AddSingleton<IExternalSiteResolver, YtDlpResolver>();
         services.AddSingleton<ISiteMediaAdapter, VideoDownloader.Infrastructure.Sites.MediaAdapters.GenericMediaAdapter>();
-        services.AddSingleton<ISiteMediaAdapter, VideoDownloader.Infrastructure.Sites.MediaAdapters.TikTokMediaAdapter>();
-        services.AddSingleton<ISiteMediaAdapter, VideoDownloader.Infrastructure.Sites.MediaAdapters.DouyinMediaAdapter>();
-        services.AddSingleton<ISiteMediaAdapter, VideoDownloader.Infrastructure.Sites.MediaAdapters.YouTubeMediaAdapter>();
-        services.AddSingleton<ISiteMediaAdapter, VideoDownloader.Infrastructure.Sites.MediaAdapters.BilibiliMediaAdapter>();
+        // Douyin/TikTok/YouTube/Bilibili use exclusive detectors — do not register MediaAdapters.
         services.AddSingleton<ICandidateDecisionPolicy, CandidateDecisionPolicy>();
         services.AddSingleton<ISiteMediaAdapterResolver, SiteMediaAdapterResolver>();
-        services.AddSingleton<IMediaDetectionPipeline, VideoDownloader.Infrastructure.Detection.UnifiedMediaPipeline>();
+        services.AddSingleton<ISiteDetectionRouter, SiteDetectionRouter>();
+        services.AddSingleton<VideoDownloader.Core.Contracts.IExclusiveSiteMediaDetector, VideoDownloader.Infrastructure.Detection.Sites.Douyin.DouyinMediaDetector>();
+        services.AddSingleton<VideoDownloader.Core.Contracts.IExclusiveSiteMediaDetector, VideoDownloader.Infrastructure.Detection.Sites.TikTok.TikTokMediaDetector>();
+        services.AddSingleton<VideoDownloader.Core.Contracts.IExclusiveSiteMediaDetector, VideoDownloader.Infrastructure.Detection.Sites.YouTube.YouTubeMediaDetector>();
+        services.AddSingleton<VideoDownloader.Core.Contracts.IExclusiveSiteMediaDetector, VideoDownloader.Infrastructure.Detection.Sites.Bilibili.BilibiliMediaDetector>();
+        services.AddSingleton<IExclusiveSiteMediaDetectorResolver, ExclusiveSiteMediaDetectorResolver>();
+        services.AddSingleton<VideoDownloader.Infrastructure.Detection.UnifiedMediaPipeline>();
+        services.AddSingleton<IMediaDetectionPipeline, VideoDownloader.Infrastructure.Detection.RoutedMediaDetectionPipeline>();
         services.AddSingleton<VideoDownloader.Infrastructure.Download.M3u8DownloadAdapter>();
         services.AddSingleton<IRequestMessageFactory, RequestMessageFactory>();
         services.AddSingleton<VideoDownloader.Infrastructure.Http.MediaAvailabilityValidator>();

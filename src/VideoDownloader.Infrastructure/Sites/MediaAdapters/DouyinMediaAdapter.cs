@@ -5,7 +5,8 @@ using VideoDownloader.Infrastructure.Detection;
 
 namespace VideoDownloader.Infrastructure.Sites.MediaAdapters;
 
-/// <summary>Douyin-only network admission and page identity. Separate from TikTok.</summary>
+/// <summary>Obsolete shared-pipeline filter. Replaced by DouyinMediaDetector.</summary>
+[Obsolete("Use DouyinMediaDetector via SiteDetectionRouter; not registered in DI.")]
 public sealed class DouyinMediaAdapter : ISiteMediaAdapter
 {
     private static readonly Regex VideoIdPath = new(

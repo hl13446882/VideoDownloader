@@ -5,7 +5,8 @@ using VideoDownloader.Infrastructure.Detection;
 
 namespace VideoDownloader.Infrastructure.Sites.MediaAdapters;
 
-/// <summary>YouTube-only admission: videoplayback / itag / sabr / shorts identity.</summary>
+/// <summary>Obsolete shared-pipeline filter. Replaced by YouTubeMediaDetector.</summary>
+[Obsolete("Use YouTubeMediaDetector via SiteDetectionRouter; not registered in DI.")]
 public sealed class YouTubeMediaAdapter : ISiteMediaAdapter
 {
     public string Name => "youtube";

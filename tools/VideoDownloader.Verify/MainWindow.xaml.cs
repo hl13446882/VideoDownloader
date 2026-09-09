@@ -137,8 +137,12 @@ public partial class MainWindow : Window
             if (selectedVariant is not null)
                 (downloadOk, downloadNote) = await TryProbeDownloadAsync(selectedVariant);
 
-            var externalError = (_services.GetRequiredService<IMediaDetectionPipeline>() as UnifiedMediaPipeline)
-                ?.LastExternalError;
+            var externalError = _services.GetRequiredService<IMediaDetectionPipeline>() switch
+            {
+                UnifiedMediaPipeline unified => unified.LastExternalError,
+                RoutedMediaDetectionPipeline => null,
+                _ => null
+            };
 
             var result = new SiteResult(
                 url,
