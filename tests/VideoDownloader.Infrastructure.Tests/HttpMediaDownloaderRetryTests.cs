@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using VideoDownloader.Core.Errors;
@@ -245,6 +246,80 @@ public class HttpMediaDownloaderRetryTests
             Assert.Equal(data.Length, job.TotalBytes);
         }
         finally { File.Delete(job.TargetPath); File.Delete(job.TargetPath + ".part"); }
+    }
+
+    [Fact]
+    public async Task Aligned206Resume_KeepsProgress_WhenEtagDrifts()
+    {
+        var data = ValidMp4();
+        var prefix = data.AsSpan(0, 8192).ToArray();
+        var job = CreateJob();
+        await File.WriteAllBytesAsync(job.TargetPath + ".part", prefix);
+        job.DownloadedBytes = prefix.Length;
+        job.TotalBytes = data.Length;
+        job.ETag = "\"old-etag\"";
+        job.LastModified = "Mon, 01 Jan 2024 00:00:00 GMT";
+
+        using var client = new HttpClient(new StubHandler(request =>
+        {
+            var start = (int)request.Headers.Range!.Ranges.Single().From!.Value;
+            Assert.Equal(prefix.Length, start);
+            var response = Partial(data, start, data.Length - start);
+            response.Headers.ETag = new EntityTagHeaderValue("\"new-etag\"");
+            response.Content.Headers.LastModified = DateTimeOffset.Parse("Tue, 02 Jan 2024 00:00:00 GMT");
+            return response;
+        }));
+
+        try
+        {
+            await CreateDownloader(client, 0).DownloadDirectAsync(job, null, null, CancellationToken.None);
+            Assert.Equal(data, await File.ReadAllBytesAsync(job.TargetPath));
+            Assert.Equal("\"new-etag\"", job.ETag);
+            Assert.False(File.Exists(job.TargetPath + ".part"));
+        }
+        finally
+        {
+            if (File.Exists(job.TargetPath)) File.Delete(job.TargetPath);
+            if (File.Exists(job.TargetPath + ".part")) File.Delete(job.TargetPath + ".part");
+        }
+    }
+
+    [Fact]
+    public async Task Aligned206Resume_Resets_WhenContentLengthChanges()
+    {
+        var data = ValidMp4();
+        var prefix = data.AsSpan(0, 8192).ToArray();
+        var job = CreateJob();
+        await File.WriteAllBytesAsync(job.TargetPath + ".part", prefix);
+        job.DownloadedBytes = prefix.Length;
+        job.TotalBytes = data.Length + 1000; // recorded length no longer matches CDN
+        job.ETag = "\"same\"";
+
+        var calls = 0;
+        using var client = new HttpClient(new StubHandler(_ =>
+        {
+            calls++;
+            if (calls == 1)
+            {
+                // First resume attempt reports a different total → RangeMismatch → reset → retry from 0.
+                var response = Partial(data, prefix.Length, 100);
+                return response;
+            }
+
+            return Partial(data, 0, data.Length);
+        }));
+
+        try
+        {
+            await CreateDownloader(client, retryCount: 1).DownloadDirectAsync(job, null, null, CancellationToken.None);
+            Assert.Equal(2, calls);
+            Assert.Equal(data, await File.ReadAllBytesAsync(job.TargetPath));
+        }
+        finally
+        {
+            if (File.Exists(job.TargetPath)) File.Delete(job.TargetPath);
+            if (File.Exists(job.TargetPath + ".part")) File.Delete(job.TargetPath + ".part");
+        }
     }
 
     [Fact]

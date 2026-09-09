@@ -91,7 +91,11 @@ public sealed class HttpMediaDownloader
             {
                 ResetPart(job);
                 lastError = ex;
-                _logger.LogWarning("Range resume reset for {JobId}, attempt {Attempt}", job.Id, attempt);
+                _logger.LogWarning(
+                    "Range resume reset for {JobId}, attempt {Attempt}: {Reason}",
+                    job.Id,
+                    attempt,
+                    SanitizedLogger.SanitizeMessage(ex.Message));
             }
             catch (HttpRequestException ex) when (attempt < maxAttempts)
             {
@@ -231,6 +235,10 @@ public sealed class HttpMediaDownloader
         }
         else if (offset > 0 && response.StatusCode == HttpStatusCode.OK)
         {
+            // Server ignored Range (or If-Range failed) — must restart; partial bytes are not trustworthy.
+            _logger.LogWarning(
+                "Server ignored Range (HTTP 200) for {JobId}; restarting from zero",
+                job.Id);
             ResetPart(job, file);
             offset = 0;
             job.DownloadedBytes = 0;
@@ -252,28 +260,45 @@ public sealed class HttpMediaDownloader
 
         var newEtag = response.Headers.ETag?.Tag;
         var newModified = response.Content.Headers.LastModified?.ToString("R");
+        var responseTotal = InferTotalBytes(response, offset);
 
-        if (offset > 0 &&
-            (!string.IsNullOrWhiteSpace(job.ETag) && newEtag is not null &&
-             !string.Equals(job.ETag, newEtag, StringComparison.OrdinalIgnoreCase) ||
-             !string.IsNullOrWhiteSpace(job.LastModified) && newModified is not null &&
-             !string.Equals(job.LastModified, newModified, StringComparison.OrdinalIgnoreCase)))
+        // Length is the hard identity check for resume. ETag/Last-Modified on signed CDNs often
+        // rotate even when the object bytes are unchanged.
+        if (offset > 0 && responseTotal is long known && job.TotalBytes is long prior && known != prior)
         {
             ResetPart(job, file);
-            job.DownloadedBytes = 0;
-            job.ETag = newEtag;
-            job.LastModified = newModified;
-            throw new DownloadException(ErrorCodes.RangeMismatch, "Entity version changed.");
+            throw new DownloadException(
+                ErrorCodes.RangeMismatch,
+                $"Entity length changed ({prior} -> {known}).");
+        }
+
+        var etagDrift = !string.IsNullOrWhiteSpace(job.ETag) && newEtag is not null &&
+                        !string.Equals(job.ETag, newEtag, StringComparison.OrdinalIgnoreCase);
+        var modifiedDrift = !string.IsNullOrWhiteSpace(job.LastModified) && newModified is not null &&
+                            !string.Equals(job.LastModified, newModified, StringComparison.OrdinalIgnoreCase);
+        if (offset > 0 && (etagDrift || modifiedDrift))
+        {
+            var alignedPartial = response.StatusCode == HttpStatusCode.PartialContent &&
+                                 ValidateContentRange(response.Content.Headers.ContentRange, offset) &&
+                                 (job.TotalBytes is null || responseTotal == job.TotalBytes);
+            if (!alignedPartial)
+            {
+                ResetPart(job, file);
+                job.DownloadedBytes = 0;
+                job.ETag = newEtag;
+                job.LastModified = newModified;
+                throw new DownloadException(ErrorCodes.RangeMismatch, "Entity version changed.");
+            }
+
+            _logger.LogInformation(
+                "Keeping aligned 206 resume for {JobId} despite validator drift (etag={EtagDrift}, modified={ModifiedDrift})",
+                job.Id,
+                etagDrift,
+                modifiedDrift);
         }
 
         job.ETag = newEtag ?? job.ETag;
         job.LastModified = newModified ?? job.LastModified;
-        var responseTotal = InferTotalBytes(response, offset);
-        if (offset > 0 && responseTotal is long known && job.TotalBytes is long prior && known != prior)
-        {
-            ResetPart(job, file);
-            throw new DownloadException(ErrorCodes.RangeMismatch, "Entity length changed.");
-        }
         job.TotalBytes = responseTotal ?? job.TotalBytes;
         if (_license?.DownloadLimitBytes is int demoLimit && job.TotalBytes is long total && total > demoLimit)
             throw new DownloadException(ErrorCodes.LicenseLimit, "DEMO download limit is 10 MiB.");
