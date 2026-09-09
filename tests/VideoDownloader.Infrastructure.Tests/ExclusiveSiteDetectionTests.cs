@@ -135,6 +135,45 @@ public class ExclusiveSiteDetectionTests
     }
 
     [Fact]
+    public void DouyinObservationScript_Resolves_Path_Then_Player_Then_Query()
+    {
+        var body = VideoDownloader.Infrastructure.Browser.DouyinObservationScript.Body;
+        Assert.Contains("resolveAwemeId", body, StringComparison.Ordinal);
+        Assert.Contains("pathAwemeId", body, StringComparison.Ordinal);
+        Assert.Contains("playerAwemeId", body, StringComparison.Ordinal);
+        Assert.Contains("queryAwemeId", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("const awemeId=pageId || playerId", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("awemeId=pageId || playerId", body, StringComparison.Ordinal);
+        Assert.Contains("playerAwemeId(active, record) || queryAwemeId()", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Douyin_Observation_Id_Change_Switches_Content_In_Same_Session()
+    {
+        var page = new Uri("https://www.douyin.com/jingxuan?modal_id=7674888187625458982");
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "一",
+            """{"identity":"content:7674888187625458982","album":false,"media":[]}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, rows) => last = rows.Single();
+        await detector.ProcessPageObservationAsync(page, "二",
+            """{"identity":"content:7522534938898468147","album":false,"media":[],"durationSec":20}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://v3-dy-o.zjcdn.com/hash/video/tos/cn/tos-cn-ve-15/next.mp4?mime_type=video_mp4") with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 9_000_000
+        }, CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+
+        Assert.NotNull(last);
+        Assert.Equal("7522534938898468147", last!.MediaId);
+    }
+
+    [Fact]
     public async Task Douyin_Rejects_Unbound_Progressive_That_Mismatches_Observed_Duration()
     {
         var page = new Uri("https://www.douyin.com/jingxuan?modal_id=7680898097882840454");

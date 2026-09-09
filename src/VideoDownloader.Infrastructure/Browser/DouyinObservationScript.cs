@@ -133,12 +133,38 @@ internal static class DouyinObservationScript
             for(const root of roots){ const r=find(root,0); if(r) return r; }
             return null;
           };
+          const pathAwemeId = () => (location.pathname.match(/\/(?:video|note)\/(\d{10,})/)||[])[1] || null;
+          const queryAwemeId = () => (location.search.match(/(?:modal_id|aweme_id|item_id)=(\d{10,})/)||[])[1] || null;
+          const playerAwemeId = (active, record) => {
+            let explicit = '';
+            const recordId = record ? String(record.aweme_id||record.itemId||record.videoId||record.id||'') : '';
+            if (active) {
+              for (let scope=active,i=0; scope && i<8; i++, scope=scope.parentElement) {
+                for (const attr of ['data-e2e-vid','data-video-id','data-aweme-id','data-item-id']) {
+                  const value = scope.getAttribute(attr);
+                  if (value && !explicit) explicit = value;
+                }
+                const wrap = (scope.id||'').match(/^xgwrapper-\d+-(\d{10,})$/);
+                if (wrap && !explicit) explicit = wrap[1];
+                if (explicit) break;
+              }
+            }
+            const fromExplicit = (String(explicit).match(/(\d{10,})/)||[])[1] || '';
+            const fromRecord = (recordId.match(/(\d{10,})/)||[])[1] || '';
+            return fromExplicit || fromRecord || null;
+          };
+          // Dedicated /video|/note: pathId wins. Feed/search/home/modal/SPA: playerId wins; query is fallback only.
+          // Never prefer query/page id over the active player (stale modal_id freezes identity across swipes).
+          const resolveAwemeId = (active, record) => {
+            const pathId = pathAwemeId();
+            if (pathId) return pathId;
+            return playerAwemeId(active, record) || queryAwemeId() || null;
+          };
           const observeDouyinAlbum = () => {
             let record=null;
-            const currentRecord=playerRecord(activePlayer());
-            const expectedId=(location.search.match(/modal_id=(\d{10,})/)||[])[1]
-              || (location.pathname.match(/\/(?:video|note)\/(\d{10,})/)||[])[1]
-              || String(currentRecord?.aweme_id||currentRecord?.itemId||currentRecord?.videoId||currentRecord?.id||'');
+            const active = activePlayer();
+            const currentRecord=playerRecord(active);
+            const expectedId=resolveAwemeId(active, currentRecord);
             if(!expectedId) return null;
             const roots=[];
             const push=v=>{if(v&&typeof v==='object')roots.push(v);};
@@ -169,8 +195,7 @@ internal static class DouyinObservationScript
               }).slice(0,24);
               const audio=[...document.querySelectorAll('audio,video')].find(e=>/^https?:/i.test(e.currentSrc||e.src||''));
               if(imgs.length<1) return null;
-              const id=(location.search.match(/modal_id=(\d{10,})/)||[])[1]
-                || (location.pathname.match(/\/(?:video|note)\/(\d{10,})/)||[])[1];
+              const id=expectedId;
               const caption=(document.querySelector('[data-e2e="browse-video-desc"],.desc')?.textContent
                 || document.title || '').trim().replace(/\s*[_|].*抖音.*$/u,'').trim();
               const media=[]; if(audio) media.push(audio.currentSrc||audio.src);
@@ -190,7 +215,7 @@ internal static class DouyinObservationScript
               }
             };
             pushAudio(music.play_url||music.playUrl||music);
-            const id=String(record.aweme_id||record.itemId||record.videoId||record.id||'');
+            const id=String(record.aweme_id||record.itemId||record.videoId||record.id||expectedId||'');
             const caption=String(record.desc||record.description||record.title||'').trim();
             return { type:'vd-video-identity', identity: id ? (location.host+':content:'+id) : pageKey(location.href),
               caption, href:location.href, media:[...new Set(audioUrls)], images, album:true };
@@ -201,30 +226,21 @@ internal static class DouyinObservationScript
             const active = activePlayer();
             if (!active) return null;
             const record=playerRecord(active);
-            let explicit = '';
             const recordId=record ? String(record.aweme_id||record.itemId||record.videoId||record.id||'') : '';
             let caption = record ? String(record.desc||record.description||record.title||'').trim() : '';
             for (let scope=active,i=0; scope && i<8; i++, scope=scope.parentElement) {
-              for (const attr of ['data-e2e-vid','data-video-id','data-aweme-id','data-item-id']) {
-                const value = scope.getAttribute(attr);
-                if (value && !explicit) explicit = 'content:' + value;
-              }
-              const wrap = (scope.id||'').match(/^xgwrapper-\d+-(\d{10,})$/);
-              if(wrap && !explicit) explicit = 'content:'+wrap[1];
               const desc = scope.querySelector('[data-e2e="browse-video-desc"],[data-e2e="video-desc"],[data-e2e="detail-desc"]');
               if (desc && !caption) caption = (desc.textContent||'').trim();
-              if (explicit && caption) break;
+              if (caption) break;
             }
-            if(!explicit && recordId) explicit='content:'+recordId;
-            const base = pageKey(location.href);
-            const stablePage = ids.some(k => new URL(location.href).searchParams.has(k)) || /\/(video|note)\/[^/]+/.test(location.pathname);
-            if(!stablePage && !explicit) return null;
-            const pageId=(location.search.match(/(?:modal_id|aweme_id|item_id)=(\d{10,})/)||[])[1]
-              || (location.pathname.match(/\/(?:video|note)\/(\d{10,})/)||[])[1];
-            const playerId=(explicit.match(/(\d{10,})/)||[])[1];
-            const awemeId=pageId || playerId;
+            const pathId = pathAwemeId();
+            const playerId = playerAwemeId(active, record);
+            const queryId = queryAwemeId();
+            const awemeId = resolveAwemeId(active, record);
             if(!awemeId) return null;
-            const samePlayer=playerId===awemeId;
+            // Feed without player/query and without dedicated path cannot claim a stable work id.
+            if(!pathId && !playerId && !queryId) return null;
+            const samePlayer = !playerId || playerId === awemeId;
             const dataRecord=findAwemeRecordById(awemeId) || (recordId===awemeId ? record : null);
             const fromData=collectDouyinPlayUrls(dataRecord);
             const resourceKey=value=>{try{const u=new URL(value);const i=u.pathname.indexOf('/video/tos/');return i>=0 ? u.pathname.slice(i) : u.origin+u.pathname;}catch{return '';}};
