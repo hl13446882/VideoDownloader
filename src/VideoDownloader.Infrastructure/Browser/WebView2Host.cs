@@ -385,7 +385,10 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
                 ForceRestart: forceRestart));
     }
 
-    /// <summary>Collapse host-prefixed Douyin/TikTok ids to a stable <c>content:{digits}</c> key.</summary>
+    /// <summary>
+    /// Collapse host-prefixed site ids to a stable content key.
+    /// Digit aweme/item ids (Douyin/TikTok) unchanged; YouTube/Bilibili are additive.
+    /// </summary>
     internal static string NormalizeMediaSessionKey(string key)
     {
         if (string.IsNullOrWhiteSpace(key))
@@ -393,6 +396,21 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         var digits = System.Text.RegularExpressions.Regex.Match(key, @"(\d{10,})");
         if (digits.Success)
             return "content:" + digits.Groups[1].Value;
+
+        var yt = System.Text.RegularExpressions.Regex.Match(
+            key,
+            @"(?:content:)?youtube:(?<id>[\w-]{6,})",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (yt.Success)
+            return "content:youtube:" + yt.Groups["id"].Value;
+
+        var bv = System.Text.RegularExpressions.Regex.Match(
+            key,
+            @"\b(?<id>BV[\w]+)",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (bv.Success)
+            return "content:bilibili:" + bv.Groups["id"].Value;
+
         return key.Trim();
     }
 

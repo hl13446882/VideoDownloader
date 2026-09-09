@@ -101,25 +101,51 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
     public async Task ProcessPageObservationAsync(
         Uri pageUrl, string? pageTitle, string? pageScriptJson, RequestContext context, CancellationToken ct)
     {
+        string? contentId;
+        Uri resolveUrl;
+        RequestContext enriched;
         lock (_gate)
         {
             if (_pageUrl is null) BeginSession(pageUrl, _sessionId == Guid.Empty ? Guid.NewGuid() : _sessionId);
             _pageUrl = pageUrl;
             _context = Enrich(context);
-            _contentId ??= ExtractContentId(pageUrl) ?? ReadId(pageScriptJson);
+            contentId = ExtractContentId(pageUrl) ?? ReadId(pageScriptJson);
+            if (!string.IsNullOrWhiteSpace(contentId) &&
+                !string.Equals(_contentId, contentId, StringComparison.OrdinalIgnoreCase))
+            {
+                _contentId = contentId;
+                _formats.Clear();
+                _tracks.Clear();
+                _failed = false;
+                _failureReason = null;
+                _externalAttempted = false;
+            }
+            else
+                _contentId ??= contentId;
+
             if (!string.IsNullOrWhiteSpace(pageTitle)) _caption ??= pageTitle.Trim();
             ApplyJson(pageScriptJson);
+            resolveUrl = _pageUrl;
+            enriched = _context;
         }
 
-        if (_external is null || _externalAttempted || _pageUrl is null)
+        if (string.IsNullOrWhiteSpace(contentId))
             return;
 
-        _externalAttempted = true;
+        bool alreadyAttempted;
+        lock (_gate) alreadyAttempted = _externalAttempted;
+        if (_external is null || alreadyAttempted)
+            return;
+
+        var hasCookies = enriched.Cookies.Count > 0;
         try
         {
-            var videos = await _external.ResolveAsync(_pageUrl, _context, ct);
+            var videos = await _external.ResolveAsync(resolveUrl, enriched, ct);
             lock (_gate)
             {
+                if (videos.Count > 0 || hasCookies)
+                    _externalAttempted = true;
+
                 foreach (var v in videos)
                 {
                     if (_contentId is not null &&
@@ -150,6 +176,11 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
         catch (Exception ex)
         {
             _logger.LogInformation(ex, "Bilibili exclusive external resolve failed (no Generic fallback)");
+            lock (_gate)
+            {
+                if (hasCookies)
+                    _externalAttempted = true;
+            }
         }
     }
 

@@ -102,28 +102,55 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
     public async Task ProcessPageObservationAsync(
         Uri pageUrl, string? pageTitle, string? pageScriptJson, RequestContext context, CancellationToken ct)
     {
+        string? contentId;
+        Uri resolveUrl;
+        RequestContext enriched;
         lock (_gate)
         {
             if (_pageUrl is null) BeginSession(pageUrl, _sessionId == Guid.Empty ? Guid.NewGuid() : _sessionId);
             _pageUrl = pageUrl;
             _context = Enrich(context);
-            _contentId ??= ExtractVideoId(pageUrl) ?? ReadId(pageScriptJson);
+            contentId = ExtractVideoId(pageUrl) ?? ReadId(pageScriptJson);
+            if (!string.IsNullOrWhiteSpace(contentId) &&
+                !string.Equals(_contentId, contentId, StringComparison.OrdinalIgnoreCase))
+            {
+                _contentId = contentId;
+                _formats.Clear();
+                _tracks.Clear();
+                _failed = false;
+                _failureReason = null;
+                _externalAttempted = false;
+            }
+            else
+                _contentId ??= contentId;
+
             if (!string.IsNullOrWhiteSpace(pageTitle)) _caption ??= pageTitle.Trim();
             ApplyMediaJson(pageScriptJson);
+            resolveUrl = _pageUrl;
+            enriched = _context;
         }
 
-        if (_external is null || _externalAttempted || _pageUrl is null)
+        // Home/feed without concrete v= — wait; do not burn the external resolve slot.
+        if (string.IsNullOrWhiteSpace(contentId))
             return;
 
-        // YouTube owns its external resolve; never via Unified.
-        _externalAttempted = true;
-        Diagnostics.HangProbe.Mark("youtube.ytdlp.begin", _pageUrl.AbsoluteUri);
+        bool alreadyAttempted;
+        lock (_gate) alreadyAttempted = _externalAttempted;
+        if (_external is null || alreadyAttempted)
+            return;
+
+        var hasCookies = enriched.Cookies.Count > 0;
+        Diagnostics.HangProbe.Mark("youtube.ytdlp.begin", $"{resolveUrl.AbsoluteUri} cookies={enriched.Cookies.Count}");
         try
         {
-            var videos = await _external.ResolveAsync(_pageUrl, _context, ct);
+            var videos = await _external.ResolveAsync(resolveUrl, enriched, ct);
             Diagnostics.HangProbe.Mark("youtube.ytdlp.end", $"count={videos.Count}");
             lock (_gate)
             {
+                // Latch only after cookied attempt or success so no-cookie bot fails can retry.
+                if (videos.Count > 0 || hasCookies)
+                    _externalAttempted = true;
+
                 foreach (var v in videos.Where(v =>
                              string.IsNullOrWhiteSpace(_contentId) ||
                              string.Equals(v.SiteContentId, _contentId, StringComparison.OrdinalIgnoreCase) ||
@@ -133,7 +160,6 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
                         _caption = v.DisplayTitle;
                     foreach (var variant in v.Variants)
                     {
-                        // Reject Combined+extra-audio remux packs; keep ladder and audio-only.
                         if (variant.Tracks.Any(t => t.Kind == MediaTrackKind.Combined) &&
                             variant.Tracks.Any(t => t.Kind == MediaTrackKind.Audio))
                             continue;
@@ -155,6 +181,11 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         {
             Diagnostics.HangProbe.Mark("youtube.ytdlp.fail", ex.GetType().Name + " " + ex.Message);
             _logger.LogInformation(ex, "YouTube exclusive yt-dlp resolve failed (no Generic fallback)");
+            lock (_gate)
+            {
+                if (hasCookies)
+                    _externalAttempted = true;
+            }
         }
     }
 

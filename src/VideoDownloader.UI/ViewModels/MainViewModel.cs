@@ -549,8 +549,7 @@ public sealed partial class MainViewModel : ObservableObject
             tab.Host.PageIdentityChanged += (_, e) => OnTabPageIdentityChanged(tab, e);
             tab.Host.NavigationStarted += (_, url) =>
             {
-                // Real document navigation (including same-URL refresh) always starts a new
-                // session. Soft SPA identity / duplicate PageIdentity events still use anti-dup.
+                // Document navigation → same singleton full re-probe entry as manual Probe.
                 if (ReferenceEquals(SelectedTab, tab) && Uri.TryCreate(url, UriKind.Absolute, out var page))
                     RestartDetectionForPageChange(page, null, mediaSessionKey: null);
             };
@@ -562,19 +561,17 @@ public sealed partial class MainViewModel : ObservableObject
                 {
                     lock (_pageSync)
                     {
-                        // ABR/CDN switches can look like a new media URL while the initial
-                        // page pass is still assembling its format set. Keep that session intact
-                        // unless ForceRestart (e.g. significant duration jump on same id).
+                        // Duplicate identity for the session already under probe — skip only.
                         if (!e.ForceRestart &&
                             _detectionRunning &&
                             string.Equals(_currentPageIdentity, BuildPageIdentity(e.PageUrl, e.MediaSessionKey), StringComparison.Ordinal))
                             return;
                     }
+                    // Content switch → same singleton full re-probe as manual Probe.
                     RestartDetectionForPageChange(
                         e.PageUrl,
                         e.PageTitle,
-                        mediaSessionKey: e.MediaSessionKey,
-                        destroySameContent: e.ForceRestart);
+                        mediaSessionKey: e.MediaSessionKey);
                 }, System.Windows.Threading.DispatcherPriority.Background);
             };
             tab.Host.OpenInNewTabRequested += (_, url) =>
@@ -812,26 +809,24 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
-        // Manual probe always destroys the active singleton run, even for the same aweme.
+        // Manual probe: singleton destroy + full re-probe (same entry as auto navigation/SPA/session).
         ClearStatus();
         SetStatusKey("status.probeManual");
         RestartDetectionForPageChange(
             pageUrl,
             tab?.Title,
-            mediaSessionKey: tab?.Host.CurrentMediaSessionKey,
-            destroySameContent: true);
+            mediaSessionKey: tab?.Host.CurrentMediaSessionKey);
     }
 
     /// <summary>
-    /// Page/content change or manual probe: cancel in-flight work, wipe UI + detector session,
-    /// then BeginSession once on the routed singleton entry.
-    /// Same-aweme MediaSession/PageIdentity duplicates must not Reenter twice and wipe media.
+    /// Unified singleton detection entry for every site: wipe UI, destroy the routed detector
+    /// session, BeginSession once, fully re-probe. Manual Probe and automatic navigation /
+    /// SPA / media-session switches all use this path.
     /// </summary>
     private void RestartDetectionForPageChange(
         Uri pageUrl,
         string? pageTitle,
-        string? mediaSessionKey,
-        bool destroySameContent = false)
+        string? mediaSessionKey)
     {
         var enriched = EnrichPageUrlWithContentId(pageUrl, mediaSessionKey);
         StartPageDetectionSession(
@@ -842,12 +837,13 @@ public sealed partial class MainViewModel : ObservableObject
             mediaSessionKey: mediaSessionKey,
             resetMediaSession: true,
             forceFullRestart: true,
-            destroySameContent: destroySameContent);
+            destroySameContent: true);
     }
 
     /// <summary>
     /// Feed roots often lack modal_id/video id in the address bar. When media-session already
-    /// knows the digits, stamp them onto the page URI so exclusive BeginSession binds correctly.
+    /// knows the content id, stamp it onto the page URI so exclusive BeginSession binds correctly.
+    /// Douyin/TikTok digit stamping is unchanged; YouTube/Bilibili enrichment is additive only.
     /// </summary>
     private static Uri EnrichPageUrlWithContentId(Uri pageUrl, string? mediaSessionKey)
     {
@@ -856,30 +852,53 @@ public sealed partial class MainViewModel : ObservableObject
         var stable = ExtractStableContentKey(mediaSessionKey, null);
         if (stable is null)
             return pageUrl;
-        var digits = System.Text.RegularExpressions.Regex.Match(stable, @"(\d{10,})");
-        if (!digits.Success)
-            return pageUrl;
 
         var host = pageUrl.Host;
-        if (host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase))
+
+        // Existing Douyin / TikTok digit enrichment — do not alter.
+        var digits = System.Text.RegularExpressions.Regex.Match(stable, @"^content:(\d{10,})$");
+        if (digits.Success)
         {
-            var builder = new UriBuilder(pageUrl);
-            var query = builder.Query.TrimStart('?');
-            var parts = string.IsNullOrWhiteSpace(query)
-                ? new List<string>()
-                : query.Split('&', StringSplitOptions.RemoveEmptyEntries)
-                    .Where(p => !p.StartsWith("modal_id=", StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-            parts.Add("modal_id=" + digits.Groups[1].Value);
-            builder.Query = string.Join('&', parts);
-            return builder.Uri;
+            var id = digits.Groups[1].Value;
+            if (host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
+                host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase))
+            {
+                var builder = new UriBuilder(pageUrl);
+                var query = builder.Query.TrimStart('?');
+                var parts = string.IsNullOrWhiteSpace(query)
+                    ? new List<string>()
+                    : query.Split('&', StringSplitOptions.RemoveEmptyEntries)
+                        .Where(p => !p.StartsWith("modal_id=", StringComparison.OrdinalIgnoreCase))
+                        .ToList();
+                parts.Add("modal_id=" + id);
+                builder.Query = string.Join('&', parts);
+                return builder.Uri;
+            }
+
+            if (host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase) &&
+                !pageUrl.AbsolutePath.Contains("/video/", StringComparison.OrdinalIgnoreCase))
+            {
+                return new Uri($"https://{pageUrl.Host}/video/{id}");
+            }
         }
 
-        if (host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase) &&
-            !pageUrl.AbsolutePath.Contains("/video/", StringComparison.OrdinalIgnoreCase))
+        if (stable.StartsWith("content:youtube:", StringComparison.OrdinalIgnoreCase) &&
+            (host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
+             host.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase) ||
+             host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase)))
         {
-            return new Uri($"https://{pageUrl.Host}/video/{digits.Groups[1].Value}");
+            var videoId = stable["content:youtube:".Length..];
+            if (videoId.Length > 0)
+                return new Uri($"https://www.youtube.com/watch?v={videoId}");
+        }
+
+        if (stable.StartsWith("content:bilibili:", StringComparison.OrdinalIgnoreCase) &&
+            (host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase) ||
+             host.Contains("b23.tv", StringComparison.OrdinalIgnoreCase)))
+        {
+            var bvid = stable["content:bilibili:".Length..];
+            if (bvid.Length > 0)
+                return new Uri($"https://www.bilibili.com/video/{bvid}");
         }
 
         return pageUrl;
@@ -1142,7 +1161,9 @@ public sealed partial class MainViewModel : ObservableObject
                     try
                     {
                         HangProbe.Mark("vm.pagePass.refresh.begin");
-                        await tab.Host.RefreshContextSnapshotAsync(token);
+                        // Force WebView cookie jar for yt-dlp even when CaptureCookies is off
+                        // (YouTube/Bilibili bot checks). Does not change Douyin detector code.
+                        await tab.Host.RefreshContextSnapshotAsync(token, forceCookies: true);
                         HangProbe.Mark("vm.pagePass.probe1.begin");
                         await tab.Host.ProbeCurrentPageAsync(token);
                         HangProbe.Mark("vm.pagePass.probe1.end");
@@ -1828,7 +1849,8 @@ public sealed partial class MainViewModel : ObservableObject
             return true;
 
         var currentPage = current.Split('\n')[0];
-        var videoPage = BuildPageIdentity(video.PageUrl);
+        var videoIdentity = BuildPageIdentity(video.PageUrl);
+        var videoPage = videoIdentity.Split('\n')[0];
         if (string.Equals(currentPage, videoPage, StringComparison.OrdinalIgnoreCase))
             return true;
 
@@ -1839,12 +1861,23 @@ public sealed partial class MainViewModel : ObservableObject
                 StringComparison.OrdinalIgnoreCase))
             return true;
 
-        // Douyin/TikTok feed: page is often "/" while current identity keeps "?recommend=1"
-        // or "/jingxuan?modal_id=…". Same host must still accept the exclusive card.
+        // Same stable content id even when query/list params differ.
+        var currentStable = ExtractStableContentKeyFromIdentity(current);
+        var videoStable = ExtractStableContentKeyFromIdentity(videoIdentity);
+        if (currentStable is not null &&
+            videoStable is not null &&
+            string.Equals(currentStable, videoStable, StringComparison.Ordinal))
+            return true;
+
+        // Exclusive-site feed soft-nav: same host accepts the exclusive card.
+        // Douyin/TikTok paths kept; YouTube/Bilibili added so content-keyed identities are not dropped.
         if (Uri.TryCreate(currentPage, UriKind.Absolute, out var cur) &&
             (cur.Host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
              cur.Host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase) ||
-             cur.Host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase)) &&
+             cur.Host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase) ||
+             cur.Host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
+             cur.Host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase) ||
+             cur.Host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase)) &&
             string.Equals(cur.Host, video.PageUrl.Host, StringComparison.OrdinalIgnoreCase))
             return true;
 
@@ -1869,14 +1902,30 @@ public sealed partial class MainViewModel : ObservableObject
     {
         if (!string.IsNullOrWhiteSpace(mediaSessionKey))
         {
+            // Douyin/TikTok digit ids (unchanged).
             var fromKey = System.Text.RegularExpressions.Regex.Match(mediaSessionKey, @"(\d{10,})");
             if (fromKey.Success)
                 return "content:" + fromKey.Groups[1].Value;
+
+            var ytKey = System.Text.RegularExpressions.Regex.Match(
+                mediaSessionKey,
+                @"(?:content:)?youtube:(?<id>[\w-]{6,})",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (ytKey.Success)
+                return "content:youtube:" + ytKey.Groups["id"].Value;
+
+            var bvKey = System.Text.RegularExpressions.Regex.Match(
+                mediaSessionKey,
+                @"\b(?<id>BV[\w]+)",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (bvKey.Success)
+                return "content:bilibili:" + bvKey.Groups["id"].Value;
         }
 
         if (pageUrl is null)
             return null;
 
+        // Douyin/TikTok path + query digits (unchanged).
         var path = System.Text.RegularExpressions.Regex.Match(
             pageUrl.AbsolutePath, @"/(?:video|note)/(?<id>\d{10,})",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
@@ -1893,6 +1942,31 @@ public sealed partial class MainViewModel : ObservableObject
             if (System.Text.RegularExpressions.Regex.IsMatch(raw, @"^\d{10,}$"))
                 return "content:" + raw;
         }
+
+        // YouTube watch / Shorts / youtu.be (additive).
+        var ytWatch = System.Text.RegularExpressions.Regex.Match(
+            pageUrl.Query, @"[?&]v=(?<id>[\w-]{6,})",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (ytWatch.Success)
+            return "content:youtube:" + ytWatch.Groups["id"].Value;
+        var ytShorts = System.Text.RegularExpressions.Regex.Match(
+            pageUrl.AbsolutePath, @"/shorts/(?<id>[\w-]{6,})",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (ytShorts.Success)
+            return "content:youtube:" + ytShorts.Groups["id"].Value;
+        if (pageUrl.Host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase))
+        {
+            var id = pageUrl.AbsolutePath.Trim('/');
+            if (id.Length >= 6)
+                return "content:youtube:" + id.Split('/')[0];
+        }
+
+        // Bilibili BV (additive).
+        var bv = System.Text.RegularExpressions.Regex.Match(
+            pageUrl.AbsolutePath, @"/video/(?<id>BV[\w]+)",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (bv.Success)
+            return "content:bilibili:" + bv.Groups["id"].Value;
 
         return null;
     }

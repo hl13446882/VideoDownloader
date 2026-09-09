@@ -89,6 +89,12 @@ public partial class MainWindow : Window
                 options.ExternalResolvers.Enabled = !Environment.GetCommandLineArgs().Contains("--local");
                 options.ExternalResolvers.YtDlpPath = Path.Combine(publishRoot, "tools", "yt-dlp.exe");
                 options.Download.DefaultSavePath = Path.Combine(Path.GetTempPath(), "VideoDownloaderVerifyDownloads");
+                // Live YouTube/Bilibili bot checks need the WebView cookie jar for yt-dlp.
+                if (Environment.GetCommandLineArgs().Contains("--live"))
+                {
+                    options.Browser.CaptureCookies = true;
+                    options.ExternalResolvers.UseBrowserCookies = true;
+                }
                 if (Environment.GetCommandLineArgs().Contains("--local"))
                 {
                     options.Browser.UserDataFolder = Path.Combine(
