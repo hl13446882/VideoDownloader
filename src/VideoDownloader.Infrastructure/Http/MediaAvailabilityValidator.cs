@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using VideoDownloader.Core.Contracts;
+using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
 
@@ -92,6 +93,20 @@ public sealed class MediaAvailabilityValidator(IHttpClientFactory clients, IRequ
                 throw new DownloadException(ErrorCodes.InvalidFormat, "Response is a document, not media bytes.");
             if (!(track.Kind == MediaTrackKind.Image ? LooksLikeImage(data.AsSpan(0, count)) : LooksLikeMedia(data.AsSpan(0, count))))
                 throw new DownloadException(ErrorCodes.InvalidFormat, "Media sample has no recognized container header.");
+
+            // Reject watermark / preview shells that sniff as media but are far below a real VOD object.
+            if (track.Kind is MediaTrackKind.Combined or MediaTrackKind.Video)
+            {
+                var declared = response.Content.Headers.ContentRange?.Length
+                    ?? (response.StatusCode == HttpStatusCode.OK
+                        ? response.Content.Headers.ContentLength
+                        : null);
+                if (declared is long len and > 0 and < MediaResourceSizeFilter.MinProgressiveVideoBytes)
+                    throw new DownloadException(
+                        ErrorCodes.InvalidFormat,
+                        $"Media object too small ({len} bytes).");
+            }
+
             return url;
         }
         throw new DownloadException(ErrorCodes.NetTimeout, "Media redirect limit exceeded.");

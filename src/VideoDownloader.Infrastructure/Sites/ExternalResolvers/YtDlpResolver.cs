@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using VideoDownloader.Core.Contracts;
+using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Json;
@@ -659,7 +660,9 @@ public sealed class YtDlpResolver : IExternalSiteResolver
                         f.TryGetProperty("acodec", out var ac) &&
                         ac.ValueKind == JsonValueKind.String &&
                         ac.GetString() is not "none" and not null)
+            .Where(f => TryGetSize(f) is null or >= MediaResourceSizeFilter.MinProgressiveVideoBytes)
             .OrderByDescending(f => JsonNumber.TryInt32Prop(f, "height", out var hv) ? hv : 0)
+            .ThenByDescending(f => TryGetSize(f) ?? 0)
             .ThenByDescending(f => JsonNumber.TryDoubleProp(f, "tbr", out var tb) ? tb : 0)
             .FirstOrDefault();
     }
@@ -692,9 +695,12 @@ public sealed class YtDlpResolver : IExternalSiteResolver
             .Select(group => group
                 .OrderByDescending(f => HasUsableFormatUrl(f, directOnly: true))
                 .ThenByDescending(f => StringPropertyEquals(f, "ext", "mp4"))
+                .ThenByDescending(f => TryGetSize(f) ?? 0)
                 .ThenByDescending(f => TryGetBitrate(f) ?? 0)
                 .First())
+            .Where(f => TryGetSize(f) is null or >= MediaResourceSizeFilter.MinProgressiveVideoBytes)
             .OrderByDescending(f => JsonNumber.TryInt32Prop(f, "height", out var height) ? height : 0)
+            .ThenByDescending(f => TryGetSize(f) ?? 0)
             .ThenByDescending(f => TryGetBitrate(f) ?? 0)
             .Take(12);
 

@@ -150,4 +150,57 @@ public class DownloadPolicyAcceptanceTests
         Assert.Contains("zjcdn", primary.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
         Assert.Contains(primary.Alternatives, a => a.SourceUrl.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase));
     }
+
+    [Fact]
+    public void IsKnownUndersizedVideo_RejectsPreviewShell()
+    {
+        var tiny = MediaVariant.FromCombinedTrack(
+            "tiny",
+            new Uri("https://cdn.test/preview.mp4"),
+            RequestContext.CreateEmpty(),
+            contentLength: 340649);
+        Assert.True(MediaAddressRenewal.IsKnownUndersizedVideo(tiny));
+
+        var ok = MediaVariant.FromCombinedTrack(
+            "ok",
+            new Uri("https://cdn.test/full.mp4"),
+            RequestContext.CreateEmpty(),
+            contentLength: 5 * 1024 * 1024);
+        Assert.False(MediaAddressRenewal.IsKnownUndersizedVideo(ok));
+    }
+
+    [Fact]
+    public async Task ResolveAsync_SkipsUndersizedRenewedAddress()
+    {
+        var page = new Uri("https://www.douyin.com/video/100");
+        var context = RequestContext.CreateEmpty();
+        var old = MediaVariant.FromCombinedTrack(
+            "v", new Uri("https://v3-web-prime.douyinvod.com/a.mp4"), context) with
+        {
+            ContentIdentity = "id:100",
+            RecoveryPageUrl = page
+        };
+        var tiny = MediaVariant.FromCombinedTrack(
+            "tiny", new Uri("https://cdn.test/tiny.mp4"), context, contentLength: 340649) with
+        {
+            ContentIdentity = "id:100",
+            RecoveryPageUrl = page
+        };
+        var full = MediaVariant.FromCombinedTrack(
+            "full", new Uri("https://v3-dy-o.zjcdn.com/full.mp4"), context, contentLength: 8 * 1024 * 1024) with
+        {
+            ContentIdentity = "id:100",
+            RecoveryPageUrl = page
+        };
+        var resolver = Substitute.For<IExternalSiteResolver>();
+        resolver.IsAvailable.Returns(true);
+        resolver.ResolveAsync(page, context, Arg.Any<CancellationToken>()).Returns(
+            Task.FromResult<IReadOnlyList<DetectedVideo>>(
+            [
+                new(Guid.NewGuid(), "douyin", "100", "t", page, MediaFamily.DirectMp4, [tiny, full], false)
+            ]));
+
+        var renewed = await MediaAddressRenewal.ResolveAsync(page, old, context, [resolver], default);
+        Assert.Equal(full.SourceUrl, renewed.SourceUrl);
+    }
 }

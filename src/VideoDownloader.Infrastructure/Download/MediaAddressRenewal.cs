@@ -1,4 +1,5 @@
 using VideoDownloader.Core.Contracts;
+using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Infrastructure.Detection;
@@ -36,14 +37,21 @@ internal static class MediaAddressRenewal
                         ? previous.ContentIdentity == "id:" + v.SiteContentId : v.PageUrl == page))
                 .SelectMany(v => v.Variants)
                 .Where(v => Compatible(previous, v) &&
+                    !IsKnownUndersizedVideo(v) &&
                     (validate is not null || !v.Tracks.Select(t => t.SourceUrl).SequenceEqual(previous.Tracks.Select(t => t.SourceUrl))))
-                .OrderByDescending(DurableHostScore)
-                .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
-                .Take(4);
+                .OrderByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
+                .ThenByDescending(DurableHostScore)
+                .Take(8);
             foreach (var match in matches)
                 try
                 {
                     if (validate is not null) await validate(match, timeout.Token);
+                    if (IsKnownUndersizedVideo(match))
+                    {
+                        errors.Add("renewed:undersized");
+                        continue;
+                    }
+
                     return match with { ContentIdentity = previous.ContentIdentity, RecoveryPageUrl = page, Alternatives = [] };
                 }
                 catch (DownloadException ex) { errors.Add("renewed:" + ex.ErrorCode); }
@@ -68,10 +76,17 @@ internal static class MediaAddressRenewal
         foreach (var alternate in previous.Alternatives
                      .OrderByDescending(DurableHostScore)
                      .ThenByDescending(a => SameHost(previous, a) ? 0 : 1)
+                     .ThenByDescending(a => a.TotalContentLength ?? a.Bandwidth ?? 0)
                      .Take(6))
         {
             if (!SameContent(previous, alternate) || !Compatible(previous, alternate)) continue;
+            if (IsKnownUndersizedVideo(alternate)) continue;
             if (string.Equals(alternate.SourceUrl.AbsoluteUri, previous.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
+                continue;
+            // Same fragile signed host rarely unlocks after 403; prefer other hosts when present.
+            if (IsFragileSignedHost(previous.SourceUrl) &&
+                SameHost(previous, alternate) &&
+                previous.Alternatives.Any(a => !SameHost(previous, a) && !IsKnownUndersizedVideo(a)))
                 continue;
             try
             {
@@ -88,6 +103,20 @@ internal static class MediaAddressRenewal
         }
 
         return null;
+    }
+
+    /// <summary>Reject watermark / preview shells whose declared size is below a credible VOD floor.</summary>
+    internal static bool IsKnownUndersizedVideo(MediaVariant variant)
+    {
+        if (!variant.Tracks.Any(t => t.Kind is MediaTrackKind.Combined or MediaTrackKind.Video))
+            return false;
+
+        if (variant.TotalContentLength is > 0 and < MediaResourceSizeFilter.MinProgressiveVideoBytes)
+            return true;
+
+        return variant.Tracks.Any(t =>
+            t.Kind is MediaTrackKind.Combined or MediaTrackKind.Video &&
+            t.ContentLength is > 0 and < MediaResourceSizeFilter.MinProgressiveVideoBytes);
     }
 
     internal static bool Compatible(MediaVariant a, MediaVariant b) =>
