@@ -80,6 +80,9 @@ public sealed class DatabaseOptions
 
 public sealed class LoggingOptions
 {
+    /// <summary>When false, Serilog file sink and HangProbe disk writes are off.</summary>
+    public bool Enabled { get; set; }
+
     public string MinimumLevel { get; set; } = "Information";
     public string LogPath { get; set; } =
         Path.Combine(

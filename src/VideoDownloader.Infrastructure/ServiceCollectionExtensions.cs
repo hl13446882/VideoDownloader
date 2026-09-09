@@ -2,7 +2,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Serilog;
-using Serilog.Events;
 using System.Net;
 using System.Net.Sockets;
 using VideoDownloader.Core.Aggregation;
@@ -34,7 +33,9 @@ public static class ServiceCollectionExtensions
         services.AddSingleton(options);
         services.AddSingleton(Microsoft.Extensions.Options.Options.Create(options));
 
-        ConfigureSerilog(options);
+        var appLog = new AppLogService(options);
+        appLog.ApplyFromOptions();
+        services.AddSingleton(appLog);
 
         services.AddSingleton<INetworkEventNormalizer>(sp =>
             new NetworkEventNormalizer(
@@ -183,25 +184,6 @@ public static class ServiceCollectionExtensions
         }
 
         throw lastError ?? new SocketException((int)SocketError.HostNotFound);
-    }
-
-    private static void ConfigureSerilog(AppOptions options)
-    {
-        var logPath = PathExpander.Expand(options.Logging.LogPath);
-        Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
-
-        var level = Enum.TryParse<LogEventLevel>(options.Logging.MinimumLevel, true, out var parsed)
-            ? parsed
-            : LogEventLevel.Information;
-
-        Log.Logger = new LoggerConfiguration()
-            .MinimumLevel.Is(level)
-            .Enrich.FromLogContext()
-            .WriteTo.File(
-                new SanitizingTextFormatter(),
-                logPath,
-                rollingInterval: RollingInterval.Day)
-            .CreateLogger();
     }
 
     public static async Task InitializeInfrastructureAsync(this IServiceProvider services)

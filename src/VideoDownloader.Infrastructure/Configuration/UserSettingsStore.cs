@@ -83,6 +83,7 @@ public sealed class UserSettingsStore
         Database = new DatabaseOptions { Path = source.Database.Path },
         Logging = new LoggingOptions
         {
+            Enabled = source.Logging.Enabled,
             MinimumLevel = source.Logging.MinimumLevel,
             LogPath = source.Logging.LogPath
         },

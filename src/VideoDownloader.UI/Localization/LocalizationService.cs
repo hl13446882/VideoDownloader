@@ -97,6 +97,10 @@ public sealed partial class LocalizationService : ObservableObject
         OnPropertyChanged(nameof(SettingsFailedRetryInterval));
         OnPropertyChanged(nameof(SettingsFailedRetryIntervalTip));
         OnPropertyChanged(nameof(SettingsLogLevel));
+        OnPropertyChanged(nameof(SettingsEnableLogging));
+        OnPropertyChanged(nameof(SettingsEnableLoggingTip));
+        OnPropertyChanged(nameof(SettingsClearLogs));
+        OnPropertyChanged(nameof(SettingsClearLogsTip));
         OnPropertyChanged(nameof(SettingsAutoRecover));
         OnPropertyChanged(nameof(SettingsSave));
         OnPropertyChanged(nameof(SettingsClose));
@@ -139,6 +143,10 @@ public sealed partial class LocalizationService : ObservableObject
     public string SettingsFailedRetryInterval => T("settings.failedRetryInterval");
     public string SettingsFailedRetryIntervalTip => T("settings.failedRetryIntervalTip");
     public string SettingsLogLevel => T("settings.logLevel");
+    public string SettingsEnableLogging => T("settings.enableLogging");
+    public string SettingsEnableLoggingTip => T("settings.enableLoggingTip");
+    public string SettingsClearLogs => T("settings.clearLogs");
+    public string SettingsClearLogsTip => T("settings.clearLogsTip");
     public string SettingsAutoRecover => T("settings.autoRecover");
     public string SettingsSave => T("settings.save");
     public string SettingsClose => T("settings.close");
@@ -184,6 +192,16 @@ public sealed partial class LocalizationService : ObservableObject
         ["settings.failedRetryIntervalTip"] = ("失败任务每隔多少秒自动恢复；0 关闭。默认 10。",
             "Seconds between auto-resume of failed jobs; 0 disables. Default 10."),
         ["settings.logLevel"] = ("日志级别", "Log level"),
+        ["settings.enableLogging"] = ("启用日志", "Enable logging"),
+        ["settings.enableLoggingTip"] = ("开启后写入应用日志与诊断日志，便于调试；关闭则不再落盘。",
+            "When on, writes app and diagnostic logs for debugging; when off, nothing is written to disk."),
+        ["settings.clearLogs"] = ("清理日志", "Clear logs"),
+        ["settings.clearLogsTip"] = ("删除本地全部应用日志与诊断日志文件。", "Delete all local app and diagnostic log files."),
+        ["settings.clearLogsConfirm"] = ("确定清理全部日志文件？此操作不可恢复。",
+            "Clear all log files? This cannot be undone."),
+        ["settings.clearLogsDone"] = ("已清理 {0} 个日志文件。", "Cleared {0} log file(s)."),
+        ["settings.clearLogsPartial"] = ("已清理 {0} 个，{1} 个未能删除（可能仍被占用）。",
+            "Cleared {0}; {1} could not be deleted (may still be in use)."),
         ["settings.autoRecover"] = ("启动时自动恢复已暂停的下载", "Auto-resume paused downloads on startup"),
         ["settings.save"] = ("保存", "Save"),
         ["settings.close"] = ("关闭", "Close"),
@@ -191,7 +209,8 @@ public sealed partial class LocalizationService : ObservableObject
         ["settings.invalidConcurrent"] = ("最大并发必须是数字。", "Max concurrent must be a number."),
         ["settings.invalidRetry"] = ("重试次数必须是数字。", "Retry count must be a number."),
         ["settings.invalidFailedRetryInterval"] = ("失败捞起间隔必须是数字。", "Failed retry interval must be a number."),
-        ["settings.saved"] = ("设置已保存。并发数变更需重启应用后生效。", "Settings saved. Concurrent changes need an app restart."),
+        ["settings.saved"] = ("设置已保存。日志开关立即生效；并发数变更需重启应用后生效。",
+            "Settings saved. Logging applies immediately; concurrent changes need an app restart."),
         ["dialog.title"] = ("提示", "Notice"),
         ["dialog.removeTitle"] = ("移除下载任务", "Remove download"),
         ["dialog.removeBody"] = ("请选择移除方式：\n\n是 — 删除记录并删除已下载文件\n否 — 仅删除记录，保留文件\n取消 — 不移除",

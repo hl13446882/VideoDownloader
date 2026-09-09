@@ -4,16 +4,23 @@ namespace VideoDownloader.Infrastructure.Diagnostics;
 
 /// <summary>
 /// Fire-and-forget hang localization. Writes only to disk/Debug — never touches the WPF dispatcher.
+/// Gated by <see cref="SetEnabled"/> together with app file logging.
 /// </summary>
 public static class HangProbe
 {
     private static readonly object Gate = new();
     private static readonly string[] Paths = ResolvePaths();
+    private static volatile bool _enabled;
 
     public static IReadOnlyList<string> LogPaths => Paths;
 
+    public static void SetEnabled(bool enabled) => _enabled = enabled;
+
     public static void Reset(string? reason = null)
     {
+        if (!_enabled)
+            return;
+
         lock (Gate)
         {
             foreach (var path in Paths)
@@ -35,6 +42,9 @@ public static class HangProbe
 
     public static void Mark(string stage, string? detail = null)
     {
+        if (!_enabled)
+            return;
+
         var line =
             $"{DateTime.Now:HH:mm:ss.fff} T{Environment.CurrentManagedThreadId} {stage}" +
             (string.IsNullOrWhiteSpace(detail) ? "" : " " + detail) +
