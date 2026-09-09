@@ -57,6 +57,28 @@ public class DownloadFileNameBuilderTests
 
         Assert.DoesNotContain("#", name);
         Assert.DoesNotContain("发布者", name);
+        Assert.Contains("山歌追上云朵夫妻版", name);
+        Assert.DoesNotContain("舞蹈", name); // topics still stripped when caption remains
+        Assert.True(new System.Globalization.StringInfo(name).LengthInTextElements
+                    <= DownloadFileNameBuilder.MaxStemLength);
+        Assert.EndsWith("_1080p", name);
+    }
+
+    [Fact]
+    public void Build_HashtagOnlyCaption_UsesTopicTextAsStem()
+    {
+        var video = CreateVideo(
+            SiteIds.Douyin,
+            "aweme-topic-only",
+            "#舞蹈 #藏族舞 #月月舞蹈夫妇原创",
+            new Uri("https://www.douyin.com/video/aweme-topic-only"),
+            null);
+
+        var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
+
+        Assert.DoesNotContain("#", name);
+        Assert.Contains("舞蹈", name);
+        Assert.DoesNotContain("douyin.com", name, StringComparison.OrdinalIgnoreCase);
         Assert.True(new System.Globalization.StringInfo(name).LengthInTextElements
                     <= DownloadFileNameBuilder.MaxStemLength);
         Assert.EndsWith("_1080p", name);

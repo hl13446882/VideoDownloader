@@ -195,10 +195,25 @@ public static partial class DownloadFileNameBuilder
         if (string.IsNullOrWhiteSpace(value))
             return string.Empty;
 
-        // Drop hashtags / mentions that blow up Douyin/TikTok titles.
-        var cleaned = HashtagRegex().Replace(value, " ");
-        cleaned = MentionRegex().Replace(cleaned, " ");
-        cleaned = WhitespaceRegex().Replace(cleaned, " ").Trim();
+        // Prefer non-topic caption text; hashtags/mentions usually bloat Douyin/TikTok titles.
+        var withoutTags = HashtagRegex().Replace(value, " ");
+        withoutTags = MentionRegex().Replace(withoutTags, " ");
+        var cleaned = FinalizeTitleCleanup(withoutTags);
+
+        // If stripping topics left nothing (caption was only #话题…), keep topic bodies as the stem.
+        if (string.IsNullOrWhiteSpace(cleaned))
+        {
+            var topics = ExtractHashtagBodies(value);
+            if (topics.Count > 0)
+                cleaned = FinalizeTitleCleanup(string.Join(" ", topics));
+        }
+
+        return cleaned;
+    }
+
+    private static string FinalizeTitleCleanup(string value)
+    {
+        var cleaned = WhitespaceRegex().Replace(value, " ").Trim();
         // Remove spaces to preserve more title text within the filename budget.
         cleaned = cleaned.Replace(" ", "", StringComparison.Ordinal);
         // Strip detection meta glued onto DisplayTitle (resolution/size/container).
@@ -206,6 +221,19 @@ public static partial class DownloadFileNameBuilder
         // Drop "· 2" multi-card suffixes that are not part of the caption.
         cleaned = MultiCardSuffixRegex().Replace(cleaned, string.Empty);
         return cleaned;
+    }
+
+    private static List<string> ExtractHashtagBodies(string value)
+    {
+        var topics = new List<string>();
+        foreach (Match match in HashtagRegex().Matches(value))
+        {
+            var body = match.Value.TrimStart('#').Trim();
+            if (body.Length > 0)
+                topics.Add(body);
+        }
+
+        return topics;
     }
 
     private static string Sanitize(string value)
