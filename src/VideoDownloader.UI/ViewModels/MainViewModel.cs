@@ -815,6 +815,18 @@ public sealed partial class MainViewModel : ObservableObject
         lock (_pageSync)
         {
             var pageKey = BuildPageIdentity(pageUrl, mediaSessionKey);
+            var stableIncoming = ExtractStableContentKey(mediaSessionKey, pageUrl);
+            var stableCurrent = ExtractStableContentKeyFromIdentity(_currentPageIdentity);
+            // Same Douyin/TikTok aweme: ignore URL query noise / identity prefix flicker that
+            // otherwise forceReplace-wipes progressive already captured for long VODs.
+            if (forceReplace &&
+                _detectionRunning &&
+                stableIncoming is not null &&
+                string.Equals(stableIncoming, stableCurrent, StringComparison.Ordinal))
+            {
+                return;
+            }
+
             // Same document already being probed — ignore duplicate NavigationStarted/PageIdentity.
             if (clearUi &&
                 !forceReplace &&
@@ -1669,11 +1681,56 @@ public sealed partial class MainViewModel : ObservableObject
     {
         var builder = new UriBuilder(pageUrl) { Fragment = string.Empty };
         var page = builder.Uri.AbsoluteUri.TrimEnd('/');
+        var stable = ExtractStableContentKey(mediaSessionKey, pageUrl);
+        if (!string.IsNullOrWhiteSpace(stable))
+            return page + "\n" + stable;
         if (string.IsNullOrWhiteSpace(mediaSessionKey))
             return page;
 
         // This is a logical identity, not a transport URL to normalize.
         return page + "\n" + mediaSessionKey;
+    }
+
+    private static string? ExtractStableContentKey(string? mediaSessionKey, Uri? pageUrl)
+    {
+        if (!string.IsNullOrWhiteSpace(mediaSessionKey))
+        {
+            var fromKey = System.Text.RegularExpressions.Regex.Match(mediaSessionKey, @"(\d{10,})");
+            if (fromKey.Success)
+                return "content:" + fromKey.Groups[1].Value;
+        }
+
+        if (pageUrl is null)
+            return null;
+
+        var path = System.Text.RegularExpressions.Regex.Match(
+            pageUrl.AbsolutePath, @"/(?:video|note)/(?<id>\d{10,})",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (path.Success)
+            return "content:" + path.Groups["id"].Value;
+
+        foreach (var key in new[] { "modal_id=", "item_id=", "aweme_id=" })
+        {
+            var idx = pageUrl.Query.IndexOf(key, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) continue;
+            var start = idx + key.Length;
+            var end = pageUrl.Query.IndexOf('&', start);
+            var raw = end < 0 ? pageUrl.Query[start..] : pageUrl.Query[start..end];
+            if (System.Text.RegularExpressions.Regex.IsMatch(raw, @"^\d{10,}$"))
+                return "content:" + raw;
+        }
+
+        return null;
+    }
+
+    private static string? ExtractStableContentKeyFromIdentity(string? pageIdentity)
+    {
+        if (string.IsNullOrWhiteSpace(pageIdentity))
+            return null;
+        var parts = pageIdentity.Split('\n');
+        if (parts.Length >= 2)
+            return ExtractStableContentKey(parts[1], null);
+        return ExtractStableContentKey(null, Uri.TryCreate(parts[0], UriKind.Absolute, out var page) ? page : null);
     }
 
     private void RepositionDetectedVideo(DetectedVideoViewModel vm)

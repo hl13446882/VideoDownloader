@@ -45,6 +45,38 @@ public class ExclusiveSiteDetectionTests
     }
 
     [Fact]
+    public async Task Douyin_Clear_Parks_Current_Progressive_For_Same_Work_Relaunch()
+    {
+        const string id = "7683109159823577727";
+        var page = new Uri("https://www.douyin.com/jingxuan?modal_id=" + id);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        detector.BeginSession(page, Guid.NewGuid());
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, rows) => last = rows.Single();
+
+        await detector.ProcessPageObservationAsync(page, "长视频",
+            """{"identity":"content:7683109159823577727","album":false,"media":[]}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://v3-web-prime.douyinvod.com/video/tos/cn/tos-cn-ve-15/ocGfQGUPICNPAQI9Oe76BnnBHYYe8AMagoAaLV/?mime_type=video_mp4") with
+        {
+            ResourceType = "Media", StatusCode = 200, ContentLength = 80_000_000
+        }, CancellationToken.None);
+
+        // Soft-nav thrash: Clear wipes candidates but must park progressive for same aweme.
+        detector.Clear();
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "长视频",
+            """{"identity":"content:7683109159823577727","album":false,"media":[]}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+
+        Assert.NotNull(last);
+        Assert.Contains("ocGfQGUPICNPAQI9Oe76BnnBHYYe8AMagoAaLV", last!.Video!.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+        Assert.False(detector.Failed);
+    }
+
+    [Fact]
     public async Task Douyin_Parked_Other_Work_Progressive_Adopted_On_Switch()
     {
         const string current = "7674888187625458982";

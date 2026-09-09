@@ -239,7 +239,11 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
                 {
                     bool apply;
                     lock (_mediaSessionLock)
-                        apply = key == _mediaSessionKey || key == _pendingMediaSessionKey;
+                    {
+                        var normalized = NormalizeMediaSessionKey(key);
+                        apply = string.Equals(NormalizeMediaSessionKey(_mediaSessionKey ?? string.Empty), normalized, StringComparison.Ordinal) ||
+                                string.Equals(NormalizeMediaSessionKey(_pendingMediaSessionKey ?? string.Empty), normalized, StringComparison.Ordinal);
+                    }
                     if (apply)
                         _pipeline.UpdateCaption(_pipeline.SessionId, text);
                 }
@@ -273,22 +277,26 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
     internal void ObserveVideoIdentity(string key, Uri page)
     {
         _lastDocumentUrl = page;
+        var normalized = NormalizeMediaSessionKey(key);
         CancellationTokenSource debounce;
         lock (_mediaSessionLock)
         {
-            if (key == _mediaSessionKey)
+            if (normalized == NormalizeMediaSessionKey(_mediaSessionKey ?? string.Empty) &&
+                _mediaSessionKey is not null)
             {
                 _mediaSessionDebounceCts?.Cancel();
                 _pendingMediaSessionKey = null;
                 return;
             }
-            if (key == _pendingMediaSessionKey) return;
-            _pendingMediaSessionKey = key;
+            if (normalized == NormalizeMediaSessionKey(_pendingMediaSessionKey ?? string.Empty) &&
+                _pendingMediaSessionKey is not null)
+                return;
+            _pendingMediaSessionKey = normalized;
             _mediaSessionDebounceCts?.Cancel();
             _mediaSessionDebounceCts?.Dispose();
             debounce = _mediaSessionDebounceCts = new();
         }
-        _ = CommitMediaSessionAsync(key, key, "dom-identity", debounce.Token);
+        _ = CommitMediaSessionAsync(normalized, key, "dom-identity", debounce.Token);
     }
 
     private async Task CommitMediaSessionAsync(string key, string rawMediaUrl, string source, CancellationToken token)
@@ -296,7 +304,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         try
         {
             // Settle ABR / multi-CDN bursts before committing a session switch.
-            await Task.Delay(1500, token);
+            await Task.Delay(TimeSpan.FromSeconds(1.5), token);
         }
         catch (OperationCanceledException)
         {
@@ -307,12 +315,15 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         lock (_mediaSessionLock)
         {
             if (token.IsCancellationRequested) return;
-            if (string.Equals(_mediaSessionKey, key, StringComparison.Ordinal))
+            var normalized = NormalizeMediaSessionKey(key);
+            if (string.Equals(NormalizeMediaSessionKey(_mediaSessionKey ?? string.Empty), normalized, StringComparison.Ordinal) &&
+                _mediaSessionKey is not null)
                 return;
 
             previous = _mediaSessionKey;
-            _mediaSessionKey = key;
+            _mediaSessionKey = normalized;
             _pendingMediaSessionKey = null;
+            key = normalized;
         }
 
         var page = CurrentPageUrl;
@@ -324,6 +335,11 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         if (previous is null && !_pipeline.IsCompleted)
             return;
 
+        // Same aweme with different identity string prefixes must not restart detection.
+        if (previous is not null &&
+            string.Equals(NormalizeMediaSessionKey(previous), key, StringComparison.Ordinal))
+            return;
+
         MediaSessionChanged?.Invoke(
             this,
             new MediaSessionChangedEventArgs(
@@ -332,6 +348,17 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
                 rawMediaUrl,
                 previous ?? "unobserved",
                 source));
+    }
+
+    /// <summary>Collapse host-prefixed Douyin/TikTok ids to a stable <c>content:{digits}</c> key.</summary>
+    internal static string NormalizeMediaSessionKey(string key)
+    {
+        if (string.IsNullOrWhiteSpace(key))
+            return key;
+        var digits = System.Text.RegularExpressions.Regex.Match(key, @"(\d{10,})");
+        if (digits.Success)
+            return "content:" + digits.Groups[1].Value;
+        return key.Trim();
     }
 
     private void ResetMediaSessionAnchor()

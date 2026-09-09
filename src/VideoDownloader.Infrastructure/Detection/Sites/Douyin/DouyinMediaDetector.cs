@@ -64,6 +64,9 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
     {
         lock (_gate)
         {
+            // Soft-nav thrash (same aweme, new session id) must not throw away progressive
+            // already captured — browser will not re-request the cached CDN object.
+            ParkCurrentOwnedProgressive();
             _session.Reset();
             _failed = false;
             _failureReason = null;
@@ -610,6 +613,35 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             ? page.GetLeftPart(UriPartial.Authority)
             : context.Origin;
         return context with { Referer = referer, Origin = origin };
+    }
+
+    private void ParkCurrentOwnedProgressive()
+    {
+        var id = _session.CurrentContentId;
+        if (id is null)
+            return;
+
+        var owned = _session.VideoCandidates
+            .Where(t => !t.IsMseTrack &&
+                        t.Kind == MediaTrackKind.Combined &&
+                        !DouyinPlayEvidence.IsSuspiciousTinyProgressive(t) &&
+                        BelongsToCurrent(t))
+            .ToList();
+        if (owned.Count == 0)
+            return;
+
+        if (!_parkedByContentId.TryGetValue(id, out var list))
+        {
+            list = [];
+            _parkedByContentId[id] = list;
+        }
+
+        foreach (var track in owned)
+            Upsert(list, track with { ContentIdentity = "id:" + id });
+
+        _logger.LogInformation(
+            "[DouyinOwnership] parked current progressive before reset contentId={Id} count={Count}",
+            id, owned.Count);
     }
 
     private void ParkOtherWorkProgressive(NormalizedNetworkEvent networkEvent, string urlId)

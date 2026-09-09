@@ -29,6 +29,33 @@ public sealed class DetectionAcceptanceTests
     }
 
     [Fact]
+    public void NormalizeMediaSessionKey_Collapses_Host_Prefixed_Digit_Ids()
+    {
+        Assert.Equal("content:7683109159823577727",
+            WebView2Host.NormalizeMediaSessionKey("content:7683109159823577727"));
+        Assert.Equal("content:7683109159823577727",
+            WebView2Host.NormalizeMediaSessionKey("www.douyin.com:content:7683109159823577727"));
+        Assert.Equal("video:A", WebView2Host.NormalizeMediaSessionKey("video:A"));
+    }
+
+    [Fact]
+    public async Task SameDigitAweme_WithDifferentIdentityPrefix_DoesNotRestart()
+    {
+        var pipeline = Create();
+        await pipeline.CompleteDiscoveryAsync(default);
+        using var host = new WebView2Host(Options.Create(new AppOptions()), Substitute.For<INetworkEventNormalizer>(),
+            pipeline, NullLogger<WebView2Host>.Instance);
+        var changes = 0;
+        host.MediaSessionChanged += (_, _) => changes++;
+        host.ObserveVideoIdentity("content:7683109159823577727", Page);
+        await Task.Delay(1800);
+        host.ObserveVideoIdentity("www.douyin.com:content:7683109159823577727", Page);
+        await Task.Delay(1800);
+        Assert.Equal(1, changes);
+        Assert.Equal("content:7683109159823577727", host.CurrentMediaSessionKey);
+    }
+
+    [Fact]
     public async Task CaptionEnrichmentAfterCompletion_DoesNotReopenDiscovery()
     {
         var pipeline=Create();
