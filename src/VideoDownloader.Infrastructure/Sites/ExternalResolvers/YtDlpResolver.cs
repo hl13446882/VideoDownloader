@@ -69,9 +69,9 @@ public sealed class YtDlpResolver : IExternalSiteResolver
         {
             var path = PathExpander.Expand(_options.ExternalResolvers.YtDlpPath);
             var resolveUrl = CanonicalizePageUrl(pageUrl);
-            var cookieFile = _options.Browser.CaptureCookies && _options.ExternalResolvers.UseBrowserCookies
-                ? await WriteCookieFileAsync(context, pageUrl, ct)
-                : null;
+            // Use cookies already on the request context (download 403 recovery attaches live WebView cookies).
+            // CaptureCookies/UseBrowserCookies only gates whether the browser auto-harvests into context.
+            var cookieFile = await WriteCookieFileAsync(context, pageUrl, ct);
             if (cookieFile is null &&
                 siteId is SiteIds.YouTube or SiteIds.Bilibili or SiteIds.TikTok or SiteIds.Douyin)
             {

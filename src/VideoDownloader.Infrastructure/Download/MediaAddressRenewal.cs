@@ -16,17 +16,9 @@ internal static class MediaAddressRenewal
         try
         {
         var errors = new List<string>();
-        foreach (var alternate in previous.Alternatives.Take(4))
-        {
-            if (validate is null || previous.ContentIdentity is null || alternate.ContentIdentity != previous.ContentIdentity || !Compatible(previous, alternate)) continue;
-            try
-            {
-                await validate(alternate, timeout.Token);
-                return alternate with { RecoveryPageUrl = previous.RecoveryPageUrl, Alternatives = [] };
-            }
-            catch (DownloadException ex) { errors.Add("alternate:" + ex.ErrorCode); }
-            catch (HttpRequestException) { errors.Add("alternate:network"); }
-        }
+        var alternate = await TryAlternativesAsync(previous, validate, timeout.Token, errors);
+        if (alternate is not null)
+            return alternate;
         page = previous.RecoveryPageUrl ?? page;
         // Feed roots (?recommend=1) are not stable; rebuild a detail URL from content identity.
         if (!HasStableContentAddress(page))
@@ -44,7 +36,10 @@ internal static class MediaAddressRenewal
                         ? previous.ContentIdentity == "id:" + v.SiteContentId : v.PageUrl == page))
                 .SelectMany(v => v.Variants)
                 .Where(v => Compatible(previous, v) &&
-                    (validate is not null || !v.Tracks.Select(t => t.SourceUrl).SequenceEqual(previous.Tracks.Select(t => t.SourceUrl)))).Take(4);
+                    (validate is not null || !v.Tracks.Select(t => t.SourceUrl).SequenceEqual(previous.Tracks.Select(t => t.SourceUrl))))
+                .OrderByDescending(DurableHostScore)
+                .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
+                .Take(4);
             foreach (var match in matches)
                 try
                 {
@@ -60,8 +55,74 @@ internal static class MediaAddressRenewal
         { throw new DownloadException(ErrorCodes.NetTimeout, "HTTP_403 recovery timed out."); }
     }
 
-    internal static bool Compatible(MediaVariant a, MediaVariant b) => a.Height == b.Height &&
+    /// <summary>
+    /// Try sibling format URLs only (no yt-dlp). Used so 403 recovery can switch CDN before gateway renew.
+    /// </summary>
+    internal static async Task<MediaVariant?> TryAlternativesAsync(
+        MediaVariant previous,
+        Func<MediaVariant, CancellationToken, Task>? validate,
+        CancellationToken ct,
+        List<string>? errors = null)
+    {
+        errors ??= [];
+        foreach (var alternate in previous.Alternatives
+                     .OrderByDescending(DurableHostScore)
+                     .ThenByDescending(a => SameHost(previous, a) ? 0 : 1)
+                     .Take(6))
+        {
+            if (!SameContent(previous, alternate) || !Compatible(previous, alternate)) continue;
+            if (string.Equals(alternate.SourceUrl.AbsoluteUri, previous.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
+                continue;
+            try
+            {
+                if (validate is not null) await validate(alternate, ct);
+                return alternate with
+                {
+                    ContentIdentity = previous.ContentIdentity ?? alternate.ContentIdentity,
+                    RecoveryPageUrl = previous.RecoveryPageUrl ?? alternate.RecoveryPageUrl,
+                    Alternatives = []
+                };
+            }
+            catch (DownloadException ex) { errors.Add("alternate:" + ex.ErrorCode); }
+            catch (HttpRequestException) { errors.Add("alternate:network"); }
+        }
+
+        return null;
+    }
+
+    internal static bool Compatible(MediaVariant a, MediaVariant b) =>
+        // Same ladder rung when both declare height; otherwise allow Combined↔Combined swaps so
+        // Douyin format siblings (often height=null) remain usable after a rejected CDN.
+        (a.Height is null || b.Height is null || a.Height == b.Height) &&
         a.Tracks.Select(t => t.Kind).Order().SequenceEqual(b.Tracks.Select(t => t.Kind).Order());
+
+    internal static bool SameContent(MediaVariant a, MediaVariant b)
+    {
+        if (a.ContentIdentity is { Length: > 0 } left &&
+            b.ContentIdentity is { Length: > 0 } right)
+            return string.Equals(left, right, StringComparison.Ordinal);
+        // Missing identity on one side: still accept when both are Combined and share recovery page.
+        return a.RecoveryPageUrl is not null &&
+               b.RecoveryPageUrl is not null &&
+               string.Equals(a.RecoveryPageUrl.AbsoluteUri, b.RecoveryPageUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static int DurableHostScore(MediaVariant variant)
+    {
+        var host = variant.SourceUrl.Host;
+        if (host.Contains("zjcdn", StringComparison.OrdinalIgnoreCase)) return 300;
+        if (host.Contains("bytecdn", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("byteicdn", StringComparison.OrdinalIgnoreCase)) return 200;
+        if (host.Contains("web-prime", StringComparison.OrdinalIgnoreCase)) return -400;
+        if (host.Contains("douyinvod", StringComparison.OrdinalIgnoreCase)) return 50;
+        return 0;
+    }
+
+    private static bool SameHost(MediaVariant a, MediaVariant b) =>
+        string.Equals(a.SourceUrl.Host, b.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
+
+    internal static bool IsFragileSignedHost(Uri url) =>
+        url.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase);
 
     internal static Uri? RecoveryAddress(Uri page, string? identity)
     {

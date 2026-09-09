@@ -92,7 +92,7 @@ public static class MediaDescriptorMapper
             var recovery = ResolveRecoveryPage(descriptor);
             // Drop illegal "Combined + separate audio remux" duplicates; keep ladder + audio-only modes.
             // Never surface ByteDance MSE adaptive tracks as ordinary download variants.
-            return descriptor.Formats
+            var ladder = descriptor.Formats
                 .Where(v => v.Tracks.Count > 0)
                 .Where(v => !v.Tracks.Any(t => t.IsMseTrack || MediaUrlNormalizer.IsByteDanceMseTrack(t.SourceUrl)))
                 .Where(v => !(v.Tracks.Any(t => t.Kind == MediaTrackKind.Combined) &&
@@ -112,8 +112,28 @@ public static class MediaDescriptorMapper
                             : recovery
                     };
                 })
-                .OrderByDescending(v => v.Height ?? 0)
+                // Prefer durable CDNs (zjcdn) over fragile signed hosts (web-prime) as the default pick.
+                .OrderByDescending(MediaAddressRenewal.DurableHostScore)
+                .ThenByDescending(v => v.Height ?? 0)
                 .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
+                .ToArray();
+
+            // Attach sibling formats so HTTP 403 recovery can switch hosts without rediscovery.
+            return ladder
+                .Select(primary =>
+                {
+                    var alts = ladder
+                        .Where(x => !string.Equals(
+                            x.SourceUrl.AbsoluteUri,
+                            primary.SourceUrl.AbsoluteUri,
+                            StringComparison.OrdinalIgnoreCase))
+                        .OrderByDescending(MediaAddressRenewal.DurableHostScore)
+                        .ThenByDescending(x => x.TotalContentLength ?? x.Bandwidth ?? 0)
+                        .Take(4)
+                        .Select(x => x with { Alternatives = [] })
+                        .ToArray();
+                    return primary with { Alternatives = alts };
+                })
                 .ToArray();
         }
 

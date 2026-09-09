@@ -498,6 +498,13 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             .OrderByDescending(t => ScoreTrack(t, audios.Count > 0))
             .ToList();
 
+        // When a durable CDN exists, never default to fragile web-prime for the primary pick.
+        var durable = progressive
+            .Where(t => !t.SourceUrl.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (durable.Count > 0)
+            progressive = durable;
+
         // Prefer known large objects over unknown-length crumbs when both exist.
         var sized = progressive.Where(t => t.ContentLength is >= MediaResourceSizeFilter.MinProgressiveVideoBytes).ToList();
         if (sized.Count > 0)
@@ -518,8 +525,8 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         if (DouyinPlayEvidence.IsPlayGateway(t.SourceUrl)) score -= 2000;
         if (DouyinPlayEvidence.IsStrongVodHost(t.SourceUrl)) score += 1000;
         // zjcdn progressive downloads reliably; web-prime douyinvod often 403s outside WebView.
-        if (t.SourceUrl.Host.Contains("zjcdn", StringComparison.OrdinalIgnoreCase)) score += 350;
-        if (t.SourceUrl.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase)) score -= 450;
+        if (t.SourceUrl.Host.Contains("zjcdn", StringComparison.OrdinalIgnoreCase)) score += 500;
+        if (t.SourceUrl.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase)) score -= 900;
         if (t.BrowserObserved) score += 500;
         if (t.Kind == MediaTrackKind.Combined) score += 800;
         if (t.Kind == MediaTrackKind.Video)

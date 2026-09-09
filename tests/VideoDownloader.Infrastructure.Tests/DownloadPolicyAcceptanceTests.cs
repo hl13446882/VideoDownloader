@@ -2,6 +2,7 @@ using NSubstitute;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Infrastructure.Detection;
 using VideoDownloader.Infrastructure.Download;
 
 namespace VideoDownloader.Infrastructure.Tests;
@@ -88,5 +89,65 @@ public class DownloadPolicyAcceptanceTests
         Assert.Equal(ErrorCodes.PermissionDenied,DownloadEngine.ClassifyError(new UnauthorizedAccessException()));
         Assert.Equal(ErrorCodes.InvalidFormat,DownloadEngine.ClassifyError(new InvalidDataException()));
         Assert.Equal(ErrorCodes.NetTimeout,DownloadEngine.ClassifyError(new HttpRequestException()));
+    }
+
+    [Fact]
+    public async Task RejectedAddress_SwitchesToDurableAlternateHost()
+    {
+        var context = RequestContext.CreateEmpty();
+        var recovery = new Uri("https://www.douyin.com/video/100");
+        var rejected = MediaVariant.FromCombinedTrack(
+            "web-prime",
+            new Uri("https://v3-web-prime.douyinvod.com/video/tos/cn/obj/a.mp4"),
+            context) with
+        {
+            ContentIdentity = "id:100",
+            RecoveryPageUrl = recovery,
+            Alternatives =
+            [
+                MediaVariant.FromCombinedTrack(
+                    "zjcdn",
+                    new Uri("https://v3-dy-o.zjcdn.com/video/tos/cn/obj/b.mp4"),
+                    context) with
+                {
+                    ContentIdentity = "id:100",
+                    RecoveryPageUrl = recovery
+                }
+            ]
+        };
+
+        var switched = await MediaAddressRenewal.TryAlternativesAsync(rejected, validate: null, CancellationToken.None);
+        Assert.NotNull(switched);
+        Assert.Contains("zjcdn", switched!.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void MediaDescriptorMapper_WiresSiblingFormatsAsAlternatives()
+    {
+        var ctx = RequestContext.CreateEmpty();
+        var page = new Uri("https://www.douyin.com/video/100");
+        var webPrime = MediaVariant.FromCombinedTrack(
+            "a", new Uri("https://v3-web-prime.douyinvod.com/video/tos/cn/obj/a.mp4"), ctx);
+        var zjcdn = MediaVariant.FromCombinedTrack(
+            "b", new Uri("https://v3-dy-o.zjcdn.com/video/tos/cn/obj/b.mp4"), ctx);
+        var descriptor = new MediaDescriptor(
+            "douyin",
+            page,
+            "100",
+            MediaContentType.Video,
+            zjcdn.Tracks[0],
+            null,
+            [],
+            ctx,
+            0.9)
+        {
+            Formats = [webPrime, zjcdn]
+        };
+
+        var video = MediaDescriptorMapper.ToDetectedVideo(descriptor, Guid.NewGuid());
+        Assert.Contains(video.Variants, v => v.SourceUrl.Host.Contains("zjcdn", StringComparison.OrdinalIgnoreCase));
+        var primary = video.Variants.First(v => v.Tracks.Any(t => t.Kind == MediaTrackKind.Combined));
+        Assert.Contains("zjcdn", primary.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(primary.Alternatives, a => a.SourceUrl.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase));
     }
 }

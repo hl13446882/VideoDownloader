@@ -428,6 +428,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             var cookieRetried = false;
             var gatewayRenewed = false;
             var addressRenewed = false;
+            var alternatesTried = false;
 
             while (true)
             {
@@ -451,6 +452,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                         pageUrl = MediaAddressRenewal.RecoveryAddress(pageUrl, job.Variant.ContentIdentity) ?? pageUrl;
 
                     var browserObserved = job.Variant.Tracks.Any(t => t.BrowserObserved);
+                    var fragileSigned = MediaAddressRenewal.IsFragileSignedHost(job.Variant.SourceUrl);
                     var refreshed = await _contextProvider.RefreshContextAsync(
                         pageUrl,
                         job.Variant.SourceUrl,
@@ -458,8 +460,29 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                         cts.Token,
                         forceCookies: browserObserved || !cookieRetried);
 
-                    // Prefer cookie retry once for WebView-sourced URLs; then renew the signed object.
-                    if (browserObserved && !cookieRetried)
+                    // Rejected address: try sibling formats / other hosts before retrying the same URL.
+                    if (!alternatesTried && job.Variant.Alternatives.Count > 0)
+                    {
+                        alternatesTried = true;
+                        var switched = await MediaAddressRenewal.TryAlternativesAsync(
+                            job.Variant,
+                            _availability is null ? null : _availability.ValidateAsync,
+                            cts.Token);
+                        if (switched is not null)
+                        {
+                            job.Variant = switched.WithRequestContext(refreshed);
+                            ResetTransferState(job);
+                            await checkpoint();
+                            _logger.LogInformation(
+                                "Switched to alternate media address for job {JobId} host={Host}",
+                                job.Id, job.Variant.SourceUrl.Host);
+                            continue;
+                        }
+                    }
+
+                    // Prefer cookie retry once for WebView-sourced URLs — skip fragile signed CDNs
+                    // that already 403'd (web-prime); refreshing cookies rarely unlocks them.
+                    if (browserObserved && !cookieRetried && !fragileSigned)
                     {
                         cookieRetried = true;
                         job.Variant = job.Variant.WithRequestContext(refreshed);
