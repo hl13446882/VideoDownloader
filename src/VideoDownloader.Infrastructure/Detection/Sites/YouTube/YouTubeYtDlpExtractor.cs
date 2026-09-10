@@ -15,12 +15,17 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
 {
     private readonly AppOptions _options;
     private readonly ILogger<YouTubeYtDlpExtractor> _logger;
+    private readonly IProbeMethodStats _probeStats;
     private bool? _available;
 
-    public YouTubeYtDlpExtractor(IOptions<AppOptions> options, ILogger<YouTubeYtDlpExtractor> logger)
+    public YouTubeYtDlpExtractor(
+        IOptions<AppOptions> options,
+        ILogger<YouTubeYtDlpExtractor> logger,
+        IProbeMethodStats probeStats)
     {
         _options = options.Value;
         _logger = logger;
+        _probeStats = probeStats;
     }
 
     public string? LastError { get; private set; }
@@ -83,18 +88,21 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                     siteId);
             }
 
-            string?[] clientAttempts = siteId is SiteIds.YouTube
-                ?
-                [
-                    // Prefer android first — web often fails with "Requested format is not available"
-                    // and was burning ~4s×N before a working client.
-                    "youtube:player_client=android,web",
-                    "youtube:player_client=ios,web",
-                    "youtube:player_client=web",
-                    "youtube:player_client=tv_embedded",
-                    null
-                ]
-                : [null];
+            string?[] clientAttemptsDefault =
+            [
+                // Prefer android first — web often fails with "Requested format is not available"
+                // and was burning ~4s×N before a working client.
+                "youtube:player_client=android,web",
+                "youtube:player_client=ios,web",
+                "youtube:player_client=web",
+                "youtube:player_client=tv_embedded",
+                null
+            ];
+            // Reorder by historical success rate so the hottest client is tried first.
+            var clientAttempts = _probeStats.OrderBySuccessRate(
+                SiteIds.YouTube,
+                clientAttemptsDefault,
+                ProbeMethods.YtDlpClient).ToArray();
 
             // Browser-cookie use is opt-in. When it is enabled, retry YouTube without
             // the captured session too because stale sessions can prevent extraction.
@@ -109,6 +117,7 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                 {
                     foreach (var extractorArgs in clientAttempts)
                     {
+                        var method = ProbeMethods.YtDlpClient(extractorArgs);
                         var videos = await RunYtDlpOnceAsync(
                             path,
                             resolveUrl,
@@ -124,8 +133,11 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                             // adaptive set burned 15–25s after a working android/web result.
                             LastError = null;
                             LastFailureIsHumanVerification = false;
+                            _probeStats.Record(SiteIds.YouTube, method, true);
                             return videos;
                         }
+
+                        _probeStats.Record(SiteIds.YouTube, method, false);
 
                         // Human verification is definitive for this page context —
                         // further player_client swaps in the same context are wasted work.

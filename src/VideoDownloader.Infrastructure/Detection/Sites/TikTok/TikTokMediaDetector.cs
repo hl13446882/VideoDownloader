@@ -19,6 +19,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
 
     private readonly ILogger<TikTokMediaDetector> _logger;
     private readonly TikTokYtDlpExtractor _ytdlp;
+    private readonly IProbeMethodStats _probeStats;
     private readonly object _gate = new();
     private Guid _sessionId;
     private Uri? _pageUrl;
@@ -37,10 +38,12 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
 
     public TikTokMediaDetector(
         ILogger<TikTokMediaDetector> logger,
-        TikTokYtDlpExtractor ytdlp)
+        TikTokYtDlpExtractor ytdlp,
+        IProbeMethodStats probeStats)
     {
         _logger = logger;
         _ytdlp = ytdlp;
+        _probeStats = probeStats;
     }
 
     public string Name => "TikTokMediaDetector";
@@ -198,18 +201,25 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
 
         try
         {
-            // embed/v2 works for many items; some return Unsupported URL — fall back to @tiktok/video/{id}.
-            Uri[] resolveAttempts =
-            [
-                new Uri($"https://www.tiktok.com/embed/v2/{contentId}"),
-                new Uri($"https://www.tiktok.com/@tiktok/video/{contentId}")
-            ];
+            // Prefer historically stronger URL shape first (embed vs canonical).
+            var resolveAttempts = _probeStats.OrderBySuccessRate(
+                SiteIds.TikTok,
+                new (Uri Url, string Method)[]
+                {
+                    (new Uri($"https://www.tiktok.com/embed/v2/{contentId}"), ProbeMethods.YtDlpUrl("embed")),
+                    (new Uri($"https://www.tiktok.com/@tiktok/video/{contentId}"), ProbeMethods.YtDlpUrl("canonical"))
+                },
+                x => x.Method);
             IReadOnlyList<DetectedVideo> videos = [];
             foreach (var attempt in resolveAttempts)
             {
-                videos = await _ytdlp.ResolveAsync(attempt, enriched, ct);
+                videos = await _ytdlp.ResolveAsync(attempt.Url, enriched, ct);
                 if (videos.Count > 0)
+                {
+                    _probeStats.Record(SiteIds.TikTok, attempt.Method, true);
                     break;
+                }
+                _probeStats.Record(SiteIds.TikTok, attempt.Method, false);
             }
 
             lock (_gate)
@@ -272,30 +282,39 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
     public Task CompleteAsync(CancellationToken ct)
     {
         MediaDescriptor? d;
+        string? winMethod = null;
         lock (_gate)
         {
-            d = Build();
+            d = Build(out winMethod);
             if (d is null)
             {
                 _failed = true;
                 _failureReason = _album ? "tiktok_album_no_images" : "tiktok_no_media";
                 _logger.LogWarning("TikTokMediaDetector Failed reason={Reason} (no Generic fallback)", _failureReason);
+                if (_externalAttempted)
+                    _probeStats.Record(SiteIds.TikTok, ProbeMethods.YtDlp, false);
                 return Task.CompletedTask;
             }
 
             _failed = false;
             _failureReason = null;
+            if (!string.IsNullOrWhiteSpace(winMethod))
+                _probeStats.Record(SiteIds.TikTok, winMethod!, true);
         }
         DescriptorsReady?.Invoke(this, [d]);
         return Task.CompletedTask;
     }
 
-    private MediaDescriptor? Build()
+    private MediaDescriptor? Build() => Build(out _);
+
+    private MediaDescriptor? Build(out string? winningMethod)
     {
+        winningMethod = null;
         if (_pageUrl is null) return null;
         if (_album)
         {
             if (_images.Count == 0) return null;
+            winningMethod = ProbeMethods.AlbumImages;
             return new MediaDescriptor(SiteIds.TikTok, _pageUrl, _contentId, MediaContentType.Album,
                 null, Best(_audios), _images.OrderBy(i => i.Index).ToArray(), _context, 0.9, _caption)
             { SessionId = _sessionId };
@@ -309,6 +328,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 .FirstOrDefault();
             if (best is not null)
             {
+                winningMethod = ProbeMethods.YtDlp;
                 return new MediaDescriptor(SiteIds.TikTok, _pageUrl, _contentId, MediaContentType.Video,
                     best.Tracks.FirstOrDefault(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined),
                     best.Tracks.FirstOrDefault(t => t.Kind == MediaTrackKind.Audio),
@@ -323,6 +343,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         var video = Best(_videos);
         if (video is null) return null;
         var audio = video.Kind == MediaTrackKind.Combined ? null : Best(_audios);
+        winningMethod = ProbeMethods.ClassifyTrack(video.Evidence, video.BrowserObserved);
         return new MediaDescriptor(SiteIds.TikTok, _pageUrl, _contentId, MediaContentType.Video,
             video, audio, [], _context, video.BrowserObserved ? 0.95 : 0.75, _caption)
         { SessionId = _sessionId };

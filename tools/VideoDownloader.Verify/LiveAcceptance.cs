@@ -20,10 +20,15 @@ public partial class MainWindow
         if(urls.Length==0) throw new ArgumentException("Authorized URLs required");
         await RunAsync([urls[0]]);
         var pipeline=_services!.GetRequiredService<IMediaDetectionPipeline>();
+        var probeStats=_services!.GetRequiredService<IProbeMethodStats>();
         var runId=DateTime.Now.ToString("yyyyMMdd-HHmmss")+"-"+Guid.NewGuid().ToString("N")[..8];
         var rootReportDir=Path.GetFullPath(Path.Combine(FindPublishRoot(),"..","..","artifacts","live-acceptance"));
         var reportDir=Path.Combine(rootReportDir,"runs",runId);
         Directory.CreateDirectory(reportDir);
+        var docsRoot=Path.GetFullPath(Path.Combine(FindPublishRoot(),"..","..","DOCS"));
+        var probeStatsDoc=Path.Combine(docsRoot,"probe-method-stats.md");
+        var probeStatsRounds=Path.Combine(docsRoot,"probe-method-stats-rounds");
+        Directory.CreateDirectory(docsRoot);
         var networkReceiver=WebView.CoreWebView2.GetDevToolsProtocolEventReceiver("Network.responseReceived");
         void TraceManifest(object? sender,CoreWebView2DevToolsProtocolEventReceivedEventArgs e)
         {
@@ -61,8 +66,14 @@ public partial class MainWindow
                 await EnsureDocumentNavigatedAsync(pipeline,address);
                 using var stepProbe=StartHangHeartbeat(pipeline,address);
                 ProbeLive("post-nav",address,pipeline);
+                var exclusiveHost=uri.Host.Contains("youtube.com",StringComparison.OrdinalIgnoreCase)
+                    ||uri.Host.Contains("youtu.be",StringComparison.OrdinalIgnoreCase)
+                    ||uri.Host.Contains("bilibili.com",StringComparison.OrdinalIgnoreCase)
+                    ||uri.Host.Contains("b23.tv",StringComparison.OrdinalIgnoreCase)
+                    ||uri.Host.Contains("tiktok.com",StringComparison.OrdinalIgnoreCase);
                 // Generic MacCMS pages often show a notice modal that blocks the player iframe.
-                if(!feed)
+                // Exclusive detectors: skip scroll/play warmup — that is invalid probing and burns the 2min discovery budget.
+                if(!feed && !exclusiveHost)
                 {
                     ProbeLive("warmup.modal.begin",address,pipeline);
                     await ExecScriptProbedAsync("warmup.modal","""
@@ -88,6 +99,8 @@ public partial class MainWindow
                     }
                     ProbeLive("warmup.done",address,pipeline);
                 }
+                else if(!feed && exclusiveHost)
+                    Log($"LIVE skip generic warmup for exclusive host {uri.Host} (invalid probe avoidance)");
                 if(feed && uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase))
                 {
                     await Task.Delay(2500);
@@ -121,48 +134,108 @@ public partial class MainWindow
                     var switches=0;
                     void Switched(object? sender,VideoDownloader.Infrastructure.Browser.MediaSessionChangedEventArgs e)=>switches++;
                     _mainVm.SelectedTab.Host.MediaSessionChanged+=Switched;
-                    // Hard cap 2 minutes per step — no silent wait for IsCompleted/download.
-                    var deadline=DateTime.UtcNow.AddSeconds(120);
+                    // Hard discovery budget: video address must appear within 120s or the step fails.
+                    var discoveryBudget=TimeSpan.FromSeconds(120);
+                    var discoveryStarted=DateTime.UtcNow;
+                    var discoveryDeadline=discoveryStarted.Add(discoveryBudget);
+                    DateTime? discoveredAt=null;
                     var lastProgressLog=DateTime.UtcNow;
+                    var emptyCompleteHits=0;
+                    var wastedPageProbes=0;
+                    var statusFailHits=0;
+                    var exclusiveSignalHits=0;
+                    var sawCompletedWithoutMedia=false;
+                    var lastStatusSeen="";
+                    var wasEmptyComplete=false;
                     ProbeLive($"settle#{step+1}.enter",address,pipeline);
-                    while(DateTime.UtcNow<deadline)
+                    while(true)
                     {
                         await TryStartPlaybackProbedAsync($"settle#{step+1}.play");
                         var changed=step==0 || pipeline.SessionId!=previousSession;
                         var detected=_mainVm.SelectedDetectedVideo?.Video;
                         var hasMedia=detected?.Variants.Count>0;
+                        if(hasMedia && discoveredAt is null)
+                        {
+                            discoveredAt=DateTime.UtcNow;
+                            Log($"LIVE discovered {uri.Host} #{step+1} in {(discoveredAt.Value-discoveryStarted).TotalSeconds:0.0}s variants={detected!.Variants.Count}");
+                        }
+                        var status=_mainVm.StatusMessage??"";
+                        if(!string.Equals(status,lastStatusSeen,StringComparison.Ordinal))
+                        {
+                            lastStatusSeen=status;
+                            if(status.Contains("Failed",StringComparison.OrdinalIgnoreCase)
+                               ||status.Contains("失败",StringComparison.OrdinalIgnoreCase))
+                                statusFailHits++;
+                            if(status.Contains("exclusive",StringComparison.OrdinalIgnoreCase)
+                               ||status.Contains("yt-dlp",StringComparison.OrdinalIgnoreCase)
+                               ||status.Contains("external",StringComparison.OrdinalIgnoreCase))
+                                exclusiveSignalHits++;
+                        }
+                        if(pipeline.IsCompleted && !hasMedia)
+                        {
+                            if(!wasEmptyComplete)
+                            {
+                                emptyCompleteHits++;
+                                sawCompletedWithoutMedia=true;
+                            }
+                            wasEmptyComplete=true;
+                        }
+                        else wasEmptyComplete=false;
                         // Douyin signed playAddr expires while waiting — seal as soon as we have media.
                         // Prefer zjcdn when already present, but do not burn the URL waiting for it.
                         var hasZjcdn=detected?.Variants.Any(v=>v.SourceUrl.Host.Contains("zjcdn",StringComparison.OrdinalIgnoreCase))==true;
                         var isTikTokFeed=feed && uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase);
                         if(changed && hasMedia &&
-                           (pipeline.IsCompleted || DateTime.UtcNow>deadline-TimeSpan.FromSeconds(20)))
+                           (pipeline.IsCompleted || DateTime.UtcNow>discoveryDeadline-TimeSpan.FromSeconds(20)))
                             break;
                         // TikTok feed: never seal on completed-without-media — wait for CDN/yt-dlp.
                         if(!isTikTokFeed &&
                            changed && pipeline.IsCompleted && !string.IsNullOrWhiteSpace(_mainVm.SelectedTab.Host.CurrentMediaSessionKey) &&
-                           (hasMedia || DateTime.UtcNow>deadline-TimeSpan.FromSeconds(8))) break;
+                           hasMedia) break;
                         if(changed && hasMedia && hasZjcdn && pipeline.IsCompleted)
                             break;
                         if(isTikTokFeed && changed && !hasMedia && pipeline.IsCompleted &&
                            (DateTime.UtcNow-lastProgressLog).TotalSeconds>=10)
                         {
-                            // Failed seal with identity only — force another page pass.
+                            // Failed seal with identity only — force another page pass (counted as potentially wasted).
+                            wastedPageProbes++;
                             try { await _mainVm.SelectedTab!.Host.ProbeCurrentPageAsync(default); } catch { }
+                            Log($"LIVE invalid-probe page_reprobe {uri.Host} #{step+1}: completed-without-media (probe#{wastedPageProbes})");
+                        }
+                        if(discoveredAt is null && DateTime.UtcNow>=discoveryDeadline)
+                        {
+                            Log($"LIVE FAIL discovery_timeout {uri.Host} #{step+1}: no media within {discoveryBudget.TotalSeconds:0}s emptyComplete={emptyCompleteHits} wastedProbes={wastedPageProbes}");
+                            break;
+                        }
+                        // After first media, allow a short post-discover seal window inside the same 120s budget.
+                        if(discoveredAt is not null && DateTime.UtcNow>=discoveryDeadline)
+                        {
+                            Log($"LIVE post-discover budget end {uri.Host} #{step+1}: sealing with media");
+                            break;
                         }
                         if((DateTime.UtcNow-lastProgressLog).TotalSeconds>=15)
                         {
-                            Log($"LIVE wait {uri.Host} #{step+1}: hasMedia={hasMedia} zjcdn={hasZjcdn} completed={pipeline.IsCompleted} session={pipeline.SessionId:N} elapsed={(DateTime.UtcNow-(deadline-TimeSpan.FromSeconds(120))).TotalSeconds:F0}s");
+                            Log($"LIVE wait {uri.Host} #{step+1}: hasMedia={hasMedia} zjcdn={hasZjcdn} completed={pipeline.IsCompleted} session={pipeline.SessionId:N} elapsed={(DateTime.UtcNow-discoveryStarted).TotalSeconds:F0}s");
                             ProbeLive($"settle#{step+1}.wait",address,pipeline,$"hasMedia={hasMedia} zjcdn={hasZjcdn} completed={pipeline.IsCompleted}");
                             lastProgressLog=DateTime.UtcNow;
                         }
                         await Task.Delay(1500);
                     }
                     ProbeLive($"settle#{step+1}.exit",address,pipeline);
-                    if(DateTime.UtcNow>=deadline)
-                        Log($"LIVE watchdog {uri.Host} #{step+1}: 120s step budget exhausted; proceeding with whatever was detected");
-                    var video=_mainVm.SelectedDetectedVideo?.Video;
-                    var completed=pipeline.IsCompleted;
+                    var discoveryMs=(int)((discoveredAt??DateTime.UtcNow)-discoveryStarted).TotalMilliseconds;
+                    var discoveryTimedOut=discoveredAt is null;
+                    var discoveryOk=!discoveryTimedOut && discoveryMs<=(int)discoveryBudget.TotalMilliseconds;
+                    var invalidProbes=new List<string>();
+                    if(discoveryTimedOut) invalidProbes.Add("discovery_timeout");
+                    if(sawCompletedWithoutMedia||emptyCompleteHits>0) invalidProbes.Add($"empty_complete_x{Math.Max(1,emptyCompleteHits)}");
+                    if(wastedPageProbes>0) invalidProbes.Add($"wasted_page_probe_x{wastedPageProbes}");
+                    if(exclusiveSignalHits>0 && discoveryTimedOut) invalidProbes.Add($"exclusive_or_external_signal_x{exclusiveSignalHits}");
+                    if(statusFailHits>0 && discoveryTimedOut) invalidProbes.Add($"status_failed_x{statusFailHits}");
+                    if(switches>12) invalidProbes.Add($"switch_thrash_x{switches}");
+                    if(invalidProbes.Count>0)
+                        Log($"LIVE invalid-probes {uri.Host} #{step+1}: {string.Join(",", invalidProbes)} discoveryMs={discoveryMs}");
+                    var video=discoveryTimedOut ? null : _mainVm.SelectedDetectedVideo?.Video;
+                    var completed=pipeline.IsCompleted && !discoveryTimedOut;
                     var identity=_mainVm.SelectedTab.Host.CurrentMediaSessionKey;
                     var session=pipeline.SessionId;
                     var finalPage=_mainVm.SelectedTab.Host.CurrentPageUrl?.AbsoluteUri ?? address;
@@ -464,16 +537,24 @@ public partial class MainWindow
                             .Select(v=>(v.Height,v.Container,v.VideoCodec)).Distinct().Count()??0);
                     var requiresLadder=video?.SiteId is SiteIds.YouTube or SiteIds.Bilibili;
                     var formatsOk=requiresLadder ? formatCount>1 : formatCount>0 || preferred?.Tracks.Any(t=>t.Kind==MediaTrackKind.Image)==true;
-                    var pass=completed && sampleOk && stable && switched && captionOk && uniqueIdentity && cardCountOk && noDuplicateAudio && metadataOk && formatsOk;
+                    var siteId=video?.SiteId
+                        ?? (uri.Host.Contains("youtube",StringComparison.OrdinalIgnoreCase)||uri.Host.Contains("youtu.be",StringComparison.OrdinalIgnoreCase) ? SiteIds.YouTube
+                        : uri.Host.Contains("bilibili",StringComparison.OrdinalIgnoreCase)||uri.Host.Contains("b23.tv",StringComparison.OrdinalIgnoreCase) ? SiteIds.Bilibili
+                        : uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase) ? SiteIds.TikTok
+                        : uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase) ? SiteIds.Douyin
+                        : SiteIds.Generic);
+                    var winningMethod=probeStats.LastWinningMethod(siteId)
+                        ?? (video is null ? null : InferWinningMethod(video));
+                    var pass=discoveryOk && completed && sampleOk && stable && switched && captionOk && uniqueIdentity && cardCountOk && noDuplicateAudio && metadataOk && formatsOk;
                     if(!pass)
-                        Log($"LIVE gate {uri.Host} #{step+1}: completed={completed} sampleOk={sampleOk} stable={stable} switched={switched} caption={captionOk} unique={uniqueIdentity} cards={cardCount}/{cardCountOk} noDupAudio={noDuplicateAudio} metadata={metadataOk} formats={formatCount}/{formatsOk}");
+                        Log($"LIVE gate {uri.Host} #{step+1}: discoveryOk={discoveryOk}/{discoveryMs}ms completed={completed} sampleOk={sampleOk} stable={stable} switched={switched} caption={captionOk} unique={uniqueIdentity} cards={cardCount}/{cardCountOk} noDupAudio={noDuplicateAudio} metadata={metadataOk} formats={formatCount}/{formatsOk} method={winningMethod} invalid=[{string.Join(",", invalidProbes)}]");
                     var diagnostic=pass ? null : await WebView.CoreWebView2.ExecuteScriptAsync("(()=>{let e=[...document.querySelectorAll('video')].find(e=>{let r=e.getBoundingClientRect();return r.bottom>0&&r.top<innerHeight;});const rows=[];for(let i=0;e&&i<14;i++,e=e.parentElement){const k=Object.keys(e).find(k=>k.startsWith('__reactProps$'));const p=k?e[k]:{};rows.push({tag:e.tagName,attrs:[...e.attributes].map(a=>[a.name,a.value]),props:Object.keys(p||{}),itemKeys:Object.keys(p?.item||p?.itemInfo||p?.data||{}),src:e.currentSrc});}return JSON.stringify(rows);})()");
                     allPassed &= pass;
                     _mainVm.SelectedTab.Host.MediaSessionChanged-=Switched;
                     await using(var image=File.Create(Path.Combine(reportDir,$"{ordinal:00}.png")))
                         await WebView.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png,image);
                     var record=new {
-                        runId,ordinal,address,finalPage,step=step+1,pass,completed,stable,switched,switches,captionOk,uniqueIdentity,
+                        runId,ordinal,address,finalPage,step=step+1,pass,siteId,winningMethod,discoveryOk,discoveryMs,discoveryTimedOut,invalidProbes,completed,stable,switched,switches,captionOk,uniqueIdentity,
                         identity,session,cardCount,cardCountOk,noDuplicateAudio,metadataOk,formatCount,formatsOk,title=video?.DisplayTitle,captionSource=video is null?null:"player-or-probe",
                         heights=video?.Variants.Select(v=>v.Height).Distinct().ToArray(),
                         variants=video?.Variants.Select(v=>new{v.Height,v.VariantId,v.Container,tracks=v.Tracks.Select(t=>new{t.Kind,t.TrackId,t.SourceUrl})}),
@@ -482,7 +563,7 @@ public partial class MainWindow
                         validationError=(pipeline as UnifiedMediaPipeline)?.LastValidationError,dom=snapshot,diagnostic};
                     records.Add(record);
                     await WriteLiveEvidenceAsync(rootReportDir,reportDir,runId,expectedCount,records,runComplete:false,allPassed);
-                    Log($"LIVE {(pass?"PASS":"FAIL")} {uri.Host} #{step+1}: completed={completed} stable={stable} switched={switched}/{switches} caption={captionOk} unique={uniqueIdentity} {video?.DisplayTitle}; {string.Join("; ",samples)}");
+                    Log($"LIVE {(pass?"PASS":"FAIL")} {uri.Host} #{step+1}: discovery={discoveryMs}ms completed={completed} stable={stable} switched={switched}/{switches} caption={captionOk} unique={uniqueIdentity} {video?.DisplayTitle}; {string.Join("; ",samples)}");
                 }
 
                 if(uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase))
@@ -518,7 +599,8 @@ public partial class MainWindow
                 Log($"LIVE FAIL incomplete records: expected={expectedCount} actual={records.Count}");
             }
             await WriteLiveEvidenceAsync(rootReportDir,reportDir,runId,expectedCount,records,runComplete:true,allPassed);
-            Log($"LIVE SUMMARY runComplete=true expected={expectedCount} actual={records.Count} allPassed={allPassed}");
+            CommitProbeMethodStatsRound(probeStats,probeStatsDoc,probeStatsRounds,runId,records);
+            Log($"LIVE SUMMARY runComplete=true expected={expectedCount} actual={records.Count} allPassed={allPassed}; probeStatsDoc={probeStatsDoc}");
             return allPassed;
         }
         finally {networkReceiver.DevToolsProtocolEventReceived-=TraceManifest;if(_mainVm is not null) await _mainVm.DisposeHostsAsync();}
@@ -688,6 +770,46 @@ public partial class MainWindow
         await File.WriteAllTextAsync(Path.Combine(reportDir,"results.json"),json);
         await File.WriteAllTextAsync(Path.Combine(rootReportDir,"results.json"),json);
         await File.WriteAllTextAsync(Path.Combine(rootReportDir,"latest.txt"),runId+Environment.NewLine);
+    }
+
+    private void CommitProbeMethodStatsRound(
+        IProbeMethodStats probeStats,string markdownDoc,string historyDir,string runId,List<object> records)
+    {
+        var entries=new List<ProbeMethodRoundEntry>();
+        foreach(var record in records)
+        {
+            using var doc=JsonDocument.Parse(JsonSerializer.Serialize(record));
+            var root=doc.RootElement;
+            string? Get(string name)=>root.TryGetProperty(name,out var p) && p.ValueKind!=JsonValueKind.Null ? p.ToString() : null;
+            bool Pass()=>root.TryGetProperty("pass",out var p) && p.ValueKind==JsonValueKind.True;
+            int? DiscoveryMs()=>root.TryGetProperty("discoveryMs",out var p) && p.TryGetInt32(out var ms) ? ms : null;
+            IReadOnlyList<string>? Invalid()
+            {
+                if(!root.TryGetProperty("invalidProbes",out var arr) || arr.ValueKind!=JsonValueKind.Array)
+                    return null;
+                return arr.EnumerateArray().Select(x=>x.GetString()??"").Where(x=>x.Length>0).ToArray();
+            }
+            entries.Add(new ProbeMethodRoundEntry(
+                Get("siteId")??SiteIds.Generic,
+                Get("address"),
+                Get("winningMethod"),
+                Pass(),
+                DiscoveryMs(),
+                Invalid()));
+        }
+        probeStats.CommitRound(runId,entries,markdownDoc,historyDir);
+        Log($"LIVE probe-method-stats committed → {markdownDoc}");
+    }
+
+    private static string InferWinningMethod(DetectedVideo video)
+    {
+        if(video.Variants.Any(v=>string.Equals(v.Container,"album",StringComparison.OrdinalIgnoreCase)||v.Tracks.Any(t=>t.Kind==MediaTrackKind.Image)))
+            return ProbeMethods.AlbumImages;
+        var track=video.Variants.SelectMany(v=>v.Tracks)
+            .OrderByDescending(t=>t.BrowserObserved)
+            .ThenByDescending(t=>t.ContentLength??0)
+            .FirstOrDefault();
+        return track is null ? ProbeMethods.NetworkCdn : ProbeMethods.ClassifyTrack(track.Evidence,track.BrowserObserved);
     }
 
     private async Task<(bool Ok,string Note)> ReadMediaSampleAsync(

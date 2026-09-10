@@ -17,6 +17,7 @@ namespace VideoDownloader.Infrastructure.Detection.Sites.Douyin;
 public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 {
     private readonly ILogger<DouyinMediaDetector> _logger;
+    private readonly IProbeMethodStats _probeStats;
     private readonly DouyinDetectionSession _session = new();
     private readonly object _gate = new();
     private bool _failed;
@@ -24,9 +25,10 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
     /// <summary>True after a matching page observation sealed the current aweme (not merely page URL id).</summary>
     private bool _observationSealed;
 
-    public DouyinMediaDetector(ILogger<DouyinMediaDetector> logger)
+    public DouyinMediaDetector(ILogger<DouyinMediaDetector> logger, IProbeMethodStats probeStats)
     {
         _logger = logger;
+        _probeStats = probeStats;
     }
 
     public string Name => "DouyinMediaDetector";
@@ -405,6 +407,12 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                     _session.SessionId, _failureReason,
                     _session.AlbumImages.Count, _session.ExpectedAlbumImageCount,
                     _session.VideoCandidates.Count);
+                if (_session.CurrentMode == DouyinContentMode.Album)
+                    _probeStats.Record(SiteIds.Douyin, ProbeMethods.AlbumImages, false);
+                else if (hasMseOnly)
+                    _probeStats.Record(SiteIds.Douyin, ProbeMethods.NetworkCdn, false);
+                else
+                    _probeStats.Record(SiteIds.Douyin, ProbeMethods.DomObservation, false);
                 return Task.CompletedTask;
             }
 
@@ -412,13 +420,19 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             _failureReason = null;
             if (descriptor.MediaId is { Length: > 0 } mediaId && descriptor.Video is not null)
                 RememberProgressiveOwner(descriptor.Video.SourceUrl, mediaId);
+            var win = descriptor.ContentType == MediaContentType.Album
+                ? ProbeMethods.AlbumImages
+                : descriptor.Video is not null
+                    ? ProbeMethods.ClassifyTrack(descriptor.Video.Evidence, descriptor.Video.BrowserObserved)
+                    : ProbeMethods.NetworkCdn;
+            _probeStats.Record(SiteIds.Douyin, win, true);
             _logger.LogInformation(
-                "[DouyinSelect] session={Session} selected={Host}{Path} kind={Kind} formats={Formats} reason=progressive_muxed owner={Owner}",
+                "[DouyinSelect] session={Session} selected={Host}{Path} kind={Kind} formats={Formats} method={Method} reason=progressive_muxed owner={Owner}",
                 _session.SessionId,
                 descriptor.Video?.SourceUrl.Host,
                 TruncatePath(descriptor.Video?.SourceUrl.AbsolutePath ?? ""),
                 descriptor.Video?.Kind,
-                descriptor.Formats.Count, descriptor.MediaId);
+                descriptor.Formats.Count, win, descriptor.MediaId);
         }
 
         // Drop result if a newer BeginSession already replaced this run.

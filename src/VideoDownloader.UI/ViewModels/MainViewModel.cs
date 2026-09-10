@@ -1040,11 +1040,23 @@ public sealed partial class MainViewModel : ObservableObject
                 pageUrl.Host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase);
             var isYtDlpExclusive = isExclusiveHost &&
                                    !pageUrl.Host.Contains("douyin", StringComparison.OrdinalIgnoreCase);
+            var siteId = isYouTubeWatch || pageUrl.Host.Contains("youtube", StringComparison.OrdinalIgnoreCase)
+                ? SiteIds.YouTube
+                : pageUrl.Host.Contains("bilibili", StringComparison.OrdinalIgnoreCase) || pageUrl.Host.Contains("b23.tv", StringComparison.OrdinalIgnoreCase)
+                    ? SiteIds.Bilibili
+                    : pageUrl.Host.Contains("tiktok", StringComparison.OrdinalIgnoreCase)
+                        ? SiteIds.TikTok
+                        : pageUrl.Host.Contains("douyin", StringComparison.OrdinalIgnoreCase)
+                            ? SiteIds.Douyin
+                            : SiteIds.Generic;
+            var probeStats = _services.GetService<IProbeMethodStats>();
+            var preferYtdlpFirst = probeStats?.PreferYtdlpFirst(siteId) == true
+                                   || isYouTubeWatch; // YouTube watch default until stats say otherwise
 
-            // YouTube watch: skip grace probes (they launched yt-dlp without cookies and burned 20s+).
-            // Go straight to cookied page-pass.
-            if (isYouTubeWatch)
+            // Highest-probability schedule first: yt-dlp-first vs network/grace-first.
+            if (preferYtdlpFirst && isYtDlpExclusive)
             {
+                HangProbe.Mark("vm.schedule", $"{siteId} {ProbeMethods.ScheduleYtdlpFirst}");
                 await Task.Delay(TimeSpan.FromMilliseconds(200), token);
                 if (generation != _pageGeneration)
                     return;
@@ -1087,6 +1099,11 @@ public sealed partial class MainViewModel : ObservableObject
                 HangProbe.Mark("vm.session.end", $"videos={DetectedVideos.Count}");
                 return;
             }
+
+            if (isYtDlpExclusive)
+                HangProbe.Mark("vm.schedule", $"{siteId} {ProbeMethods.ScheduleNetworkFirst}");
+
+            // When stats prefer network-first (or non-yt-dlp exclusive), run grace then page-pass.
 
             // REDUNDANT(pending-delete after confirm): site-agnostic settle paid by exclusive hosts.
             // await Task.Delay(isDouyinNote ? TimeSpan.FromSeconds(5) : TimeSpan.FromSeconds(3), token);

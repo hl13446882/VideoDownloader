@@ -58,6 +58,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IExternalSiteResolver>(sp => sp.GetRequiredService<VideoDownloader.Infrastructure.Detection.Sites.Generic.GenericYtDlpExtractor>());
         services.AddSingleton<ISiteMediaAdapter, VideoDownloader.Infrastructure.Sites.MediaAdapters.GenericMediaAdapter>();
         // Douyin/TikTok/YouTube/Bilibili use exclusive detectors — do not register MediaAdapters.
+        services.AddSingleton<IProbeMethodStats, VideoDownloader.Infrastructure.Detection.ProbeMethodStatsStore>();
         services.AddSingleton<ICandidateDecisionPolicy, CandidateDecisionPolicy>();
         services.AddSingleton<ISiteMediaAdapterResolver, SiteMediaAdapterResolver>();
         services.AddSingleton<ISiteDetectionRouter, SiteDetectionRouter>();

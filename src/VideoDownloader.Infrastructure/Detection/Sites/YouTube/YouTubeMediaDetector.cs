@@ -11,6 +11,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
 {
     private readonly ILogger<YouTubeMediaDetector> _logger;
     private readonly YouTubeYtDlpExtractor _ytdlp;
+    private readonly IProbeMethodStats _probeStats;
     private readonly object _gate = new();
     private Guid _sessionId;
     private Uri? _pageUrl;
@@ -25,10 +26,12 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
 
     public YouTubeMediaDetector(
         ILogger<YouTubeMediaDetector> logger,
-        YouTubeYtDlpExtractor ytdlp)
+        YouTubeYtDlpExtractor ytdlp,
+        IProbeMethodStats probeStats)
     {
         _logger = logger;
         _ytdlp = ytdlp;
+        _probeStats = probeStats;
     }
 
     public string Name => "YouTubeMediaDetector";
@@ -208,26 +211,36 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
     public Task CompleteAsync(CancellationToken ct)
     {
         MediaDescriptor? d;
+        string? winMethod = null;
         lock (_gate)
         {
-            d = Build();
+            d = Build(out winMethod);
             if (d is null)
             {
                 _failed = true;
                 _failureReason = "youtube_no_media";
                 _logger.LogWarning("YouTubeMediaDetector Failed reason={Reason} (no Generic fallback)", _failureReason);
+                if (_externalAttempted)
+                    _probeStats.Record(SiteIds.YouTube, ProbeMethods.YtDlp, false);
+                if (_tracks.Count > 0)
+                    _probeStats.Record(SiteIds.YouTube, ProbeMethods.NetworkCdn, false);
                 return Task.CompletedTask;
             }
 
             _failed = false;
             _failureReason = null;
+            if (!string.IsNullOrWhiteSpace(winMethod))
+                _probeStats.Record(SiteIds.YouTube, winMethod!, true);
         }
         DescriptorsReady?.Invoke(this, [d]);
         return Task.CompletedTask;
     }
 
-    private MediaDescriptor? Build()
+    private MediaDescriptor? Build() => Build(out _);
+
+    private MediaDescriptor? Build(out string? winningMethod)
     {
+        winningMethod = null;
         if (_pageUrl is null) return null;
 
         if (_formats.Count > 0)
@@ -237,6 +250,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
                 .OrderByDescending(v => v.Height ?? 0)
                 .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
                 .FirstOrDefault();
+            winningMethod = ProbeMethods.YtDlp;
             return new MediaDescriptor(SiteIds.YouTube, _pageUrl, _contentId, MediaContentType.Video,
                 best?.Tracks.FirstOrDefault(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined),
                 best?.Tracks.FirstOrDefault(t => t.Kind == MediaTrackKind.Audio),
@@ -258,8 +272,12 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
             .FirstOrDefault();
         if (video is null && audio is null) return null;
         if (video is null)
+        {
+            winningMethod = ProbeMethods.ClassifyTrack(audio!.Evidence, audio.BrowserObserved);
             return new MediaDescriptor(SiteIds.YouTube, _pageUrl, _contentId, MediaContentType.Audio,
                 null, audio, [], _context, 0.7, _caption) { SessionId = _sessionId };
+        }
+        winningMethod = ProbeMethods.ClassifyTrack(video.Evidence, video.BrowserObserved);
         return new MediaDescriptor(SiteIds.YouTube, _pageUrl, _contentId, MediaContentType.Video,
             video,
             video.Kind == MediaTrackKind.Combined ? null : audio,
