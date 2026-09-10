@@ -45,11 +45,7 @@ public partial class MainWindow
         var expectedCount=urls.Sum(address=>{
             var uri=new Uri(address);
             if(uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase)) return 6;
-            if(uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase) &&
-               (uri.AbsolutePath is "/" or "" ||
-                uri.AbsolutePath.Equals("/jingxuan", StringComparison.OrdinalIgnoreCase) ||
-                uri.AbsolutePath.Equals("/recommend", StringComparison.OrdinalIgnoreCase)))
-                return 4;
+            if(IsDouyinFeedRoot(uri)) return 4;
             return 1;
         });
         try
@@ -58,10 +54,7 @@ public partial class MainWindow
             {
                 var uri=new Uri(address);
                 var feed=uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase)
-                    || (uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase) &&
-                        (uri.AbsolutePath is "/" or "" ||
-                         uri.AbsolutePath.Equals("/jingxuan", StringComparison.OrdinalIgnoreCase) ||
-                         uri.AbsolutePath.Equals("/recommend", StringComparison.OrdinalIgnoreCase)));
+                    || IsDouyinFeedRoot(uri);
                 var feedSteps=uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase) ? 6
                     : feed ? 4 : 1;
                 var siteRecordStart=records.Count;
@@ -623,6 +616,29 @@ public partial class MainWindow
             HangProbe.Mark("play.fail",label+" "+ex.GetType().Name);
             Log($"PROBE play.fail {label}: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Douyin feed roots need ArrowDown multi-step proof. A jingxuan/recommend URL that already
+    /// carries modal_id/aweme_id is a single detail target — do not treat it as a scroll feed.
+    /// </summary>
+    private static bool IsDouyinFeedRoot(Uri uri)
+    {
+        if(!uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase))
+            return false;
+        if(uri.AbsolutePath is not ("/" or "") &&
+           !uri.AbsolutePath.Equals("/jingxuan", StringComparison.OrdinalIgnoreCase) &&
+           !uri.AbsolutePath.Equals("/recommend", StringComparison.OrdinalIgnoreCase))
+            return false;
+        foreach(var part in uri.Query.TrimStart('?').Split('&',StringSplitOptions.RemoveEmptyEntries))
+        {
+            var i=part.IndexOf('=');
+            var key=i<0?part:part[..i];
+            var value=i<0?"":Uri.UnescapeDataString(part[(i+1)..]);
+            if((key is "modal_id" or "aweme_id") && !string.IsNullOrWhiteSpace(value))
+                return false;
+        }
+        return true;
     }
 
     private static bool IsSameAcceptanceDocument(string? current,string expected)
