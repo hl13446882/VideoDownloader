@@ -1,6 +1,6 @@
 namespace VideoDownloader.Infrastructure.Browser;
 
-/// <summary>TikTok-only page observation. Independent of Douyin album helpers.</summary>
+/// <summary>TikTok-only page observation. Mirrors Douyin feed strategies without sharing Douyin code.</summary>
 internal static class TikTokObservationScript
 {
     internal const string Body = """
@@ -23,6 +23,33 @@ internal static class TikTokObservationScript
             players.sort((a,b)=>Number(!b.paused)-Number(!a.paused)||visible(b)-visible(a));
             return players[0];
           };
+          const isStrongPlayUrl=v=>{
+            if(typeof v!=='string'||!/^https?:/i.test(v)) return false;
+            if(/\.(jpg|jpeg|png|webp|gif)([?#]|$)/i.test(v)) return false;
+            // Prefer durable CDN; still keep webapp-prime as last resort.
+            return /tiktokcdn|byteoversea|muscdn|tiktokv\.com|\/video\/tos\//i.test(v);
+          };
+          const pushPlay=(urls,v)=>{
+            if(typeof v==='string' && /^https?:/i.test(v) && !/\.(jpg|jpeg|png|webp|gif)([?#]|$)/i.test(v))
+              urls.push(v);
+            else if(v&&typeof v==='object'){
+              for(const k of ['urlList','url_list','playAddr','play_addr','downloadAddr','download_addr','playApi','play_api','url','uri']){
+                const c=v[k];
+                if(Array.isArray(c)) c.forEach(x=>pushPlay(urls,x));
+                else pushPlay(urls,c);
+              }
+            }
+          };
+          const collectPlayUrls=record=>{
+            const urls=[];
+            if(!record) return urls;
+            pushPlay(urls, record.video);
+            pushPlay(urls, record.video?.playAddr||record.video?.play_addr);
+            pushPlay(urls, record.video?.downloadAddr||record.video?.download_addr);
+            const rates=record.video?.bitrateInfo||record.video?.bit_rate||record.bit_rate||record.bitrateInfo;
+            if(Array.isArray(rates)) rates.forEach(r=>pushPlay(urls,r));
+            return [...new Set(urls)];
+          };
           const collectTikTokImages = record => {
             const urls=[];
             const push=v=>{
@@ -44,26 +71,44 @@ internal static class TikTokObservationScript
             }
             return [...new Set(urls)];
           };
-          const observeTikTokAlbum = () => {
-            const id=(location.pathname.match(/\/video\/(\d{10,})/)||[])[1];
-            if(!id) return null;
+          const findItemRecordById=expectedId=>{
+            if(!expectedId) return null;
             const roots=[];
             const push=v=>{if(v&&typeof v==='object')roots.push(v);};
             try{ const el=document.getElementById('SIGI_STATE')||document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__'); if(el?.textContent) push(JSON.parse(el.textContent)); }catch{}
             for(const key of ['SIGI_STATE','__UNIVERSAL_DATA_FOR_REHYDRATION__','__NEXT_DATA__']){ try{push(window[key]);}catch{} }
-            const seen=new WeakSet(); let budget=900;
+            const seen=new WeakSet(); let budget=1200;
             const find=(value,depth)=>{
-              if(!value||typeof value!=='object'||value instanceof Node||seen.has(value)||depth>12||--budget<0) return null;
+              if(!value||typeof value!=='object'||value instanceof Node||seen.has(value)||depth>14||--budget<0) return null;
               seen.add(value);
-              const hasImages=!!(value.images||value.imagePost||value.image_post_info||value.image_list);
               const vid=String(value.id||value.itemId||value.videoId||value.aweme_id||'');
-              if(hasImages && vid===id) return value;
-              if(Array.isArray(value)){ for(const c of value.slice(0,40)){const r=find(c,depth+1); if(r) return r;} }
+              const hasVideo=!!(value.video||value.playAddr||value.play_addr||value.bitrateInfo||value.bit_rate);
+              if(hasVideo && vid===expectedId) return value;
+              if(Array.isArray(value)){ for(const c of value.slice(0,48)){const r=find(c,depth+1); if(r) return r;} }
               else { for(const c of Object.values(value)){const r=find(c,depth+1); if(r) return r;} }
               return null;
             };
-            let record=null;
-            for(const root of roots){ record=find(root,0); if(record) break; }
+            for(const root of roots){ const r=find(root,0); if(r) return r; }
+            return null;
+          };
+          const cardCaption=active=>{
+            const card=active?.closest?.('[data-e2e="recommend-list-item-container"],[data-e2e="feed-video"],article,section');
+            const selectors=[
+              '[data-e2e="browse-video-desc"]','[data-e2e="video-desc"]','[data-e2e="new-desc-span"]',
+              '[data-e2e="video-desc-span"]','[data-e2e="browse-video-desc-new"]','[data-e2e="video-meta-caption"]',
+              '[data-e2e="detail-desc"]','h1','[class*="Desc"]','[class*="desc"]'
+            ];
+            for(const sel of selectors){
+              const el=(card||document).querySelector(sel);
+              const text=(el?.getAttribute?.('title')||el?.textContent||'').trim().replace(/(?:展开|收起|See more|See less)\s*$/i,'').trim();
+              if(text && text.length>=2 && text!=='视频' && !/^TikTok/i.test(text)) return text.slice(0,240);
+            }
+            return '';
+          };
+          const observeTikTokAlbum = () => {
+            const id=(location.pathname.match(/\/video\/(\d{10,})/)||[])[1];
+            if(!id) return null;
+            const record=findItemRecordById(id);
             if(!record) return null;
             const images=collectTikTokImages(record);
             if(images.length<1) return null;
@@ -84,13 +129,14 @@ internal static class TikTokObservationScript
             const active = activePlayer();
             if (!active) return null;
             let explicit='', caption='';
-            for (let scope=active,i=0; scope && i<8; i++, scope=scope.parentElement) {
+            for (let scope=active,i=0; scope && i<12; i++, scope=scope.parentElement) {
               const value = scope.getAttribute('data-e2e-vid') || scope.getAttribute('data-video-id');
               if (value && !explicit) explicit = 'content:' + value;
               const wrap = (scope.id||'').match(/^xgwrapper-\d+-(\d{10,})$/);
               if(wrap && !explicit) explicit = 'content:'+wrap[1];
-              const desc = scope.querySelector('[data-e2e="browse-video-desc"],[data-e2e="video-desc"],[data-e2e="new-desc-span"]');
-              if (desc && !caption) caption = (desc.textContent||'').trim();
+              const desc = scope.querySelector('[data-e2e="browse-video-desc"],[data-e2e="video-desc"],[data-e2e="new-desc-span"],[data-e2e="video-desc-span"],[data-e2e="browse-video-desc-new"]');
+              if (desc && !caption) caption = (desc.getAttribute('title')||desc.textContent||'').trim();
+              if (explicit && caption) break;
             }
             const pathId=(location.pathname.match(/\/video\/(\d{10,})/)||[])[1];
             if(pathId && !explicit) explicit='content:'+pathId;
@@ -99,9 +145,25 @@ internal static class TikTokObservationScript
               if(wrapId) explicit='content:'+wrapId;
             }
             if(!explicit) return null;
+            const id=explicit.replace(/^content:/,'');
+            const record=findItemRecordById(id);
+            if(record){
+              const fromData=String(record.desc||record.description||record.title||'').trim();
+              if(fromData) caption=fromData;
+            }
+            if(!caption) caption=cardCaption(active);
+            caption=(caption||'').replace(/(?:展开|收起|See more|See less)\s*$/i,'').trim();
+            const media=[...new Set([
+              ...collectPlayUrls(record),
+              active.currentSrc, active.src,
+              ...[...active.querySelectorAll('source')].map(e=>e.src)
+            ].filter(u=>/^https?:/i.test(u||'')))];
+            // Prefer durable CDN URLs ahead of blob/webapp-prime crumbs.
+            media.sort((a,b)=>Number(isStrongPlayUrl(b))-Number(isStrongPlayUrl(a))
+              -Number(/webapp-prime/i.test(b))+Number(/webapp-prime/i.test(a)));
             const durationSec=(Number.isFinite(active.duration)&&active.duration>0)?active.duration:null;
             return { type:'vd-video-identity', identity: location.host+':'+explicit, caption, href:location.href,
-              media:[...new Set([active.currentSrc,active.src].filter(u=>/^https?:/i.test(u||'')))], durationSec };
+              media, durationSec };
           };
           window.__vdProbe=()=>{
             const observation=window.__vdObserve(); if(!observation) return null;
@@ -110,6 +172,12 @@ internal static class TikTokObservationScript
               if(album?.images?.length){ observation.images=album.images; observation.album=true;
                 for(const u of album.media||[]) observation.media.push(u); }
             }
+            if(!observation.caption){
+              const id=(observation.identity||'').match(/(\d{10,})/)?.[1];
+              const record=findItemRecordById(id);
+              if(record) observation.caption=String(record.desc||record.description||record.title||'').trim();
+            }
+            if(!observation.caption) observation.caption=cardCaption(activePlayer());
             observation.media=[...new Set(observation.media||[])];
             return observation;
           };

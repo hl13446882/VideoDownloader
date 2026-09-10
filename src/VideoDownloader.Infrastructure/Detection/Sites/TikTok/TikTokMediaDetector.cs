@@ -188,7 +188,13 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
             if (root.TryGetProperty("caption", out var c) && c.ValueKind == JsonValueKind.String)
-                _caption = c.GetString()?.Trim() ?? _caption;
+            {
+                var text = c.GetString()?.Trim();
+                if (!string.IsNullOrWhiteSpace(text) &&
+                    text is not "视频" &&
+                    (string.IsNullOrWhiteSpace(_caption) || _caption is "视频" || text.Length > _caption.Length))
+                    _caption = text;
+            }
             if (root.TryGetProperty("album", out var a) && a.ValueKind is JsonValueKind.True)
                 _album = true;
             if (root.TryGetProperty("images", out var images) && images.ValueKind == JsonValueKind.Array)
@@ -262,8 +268,43 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         list.Add(track);
     }
 
-    private static MediaTrack? Best(IEnumerable<MediaTrack> tracks) =>
-        tracks.OrderByDescending(t => t.BrowserObserved).ThenByDescending(t => t.ContentLength ?? 0).FirstOrDefault();
+    private static MediaTrack? Best(IEnumerable<MediaTrack> tracks)
+    {
+        var list = tracks.ToList();
+        if (list.Count == 0) return null;
+        // Douyin-like: when a durable CDN exists, never default to fragile webapp-prime.
+        var durable = list
+            .Where(t => !t.SourceUrl.Host.Contains("webapp-prime", StringComparison.OrdinalIgnoreCase) &&
+                        !t.SourceUrl.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (durable.Count > 0)
+            list = durable;
+        var sized = list.Where(t => t.ContentLength is >= MediaResourceSizeFilter.MinProgressiveVideoBytes).ToList();
+        if (sized.Count > 0)
+            list = sized;
+        return list.OrderByDescending(ScoreTrack).FirstOrDefault();
+    }
+
+    private static int ScoreTrack(MediaTrack t)
+    {
+        var score = 0;
+        var host = t.SourceUrl.Host;
+        if (host.Contains("tiktokcdn", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("byteoversea", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("muscdn", StringComparison.OrdinalIgnoreCase))
+            score += 1000;
+        if (host.Contains("webapp-prime", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("web-prime", StringComparison.OrdinalIgnoreCase))
+            score -= 900;
+        if (t.BrowserObserved) score += 500;
+        if (t.Kind == MediaTrackKind.Combined) score += 800;
+        if (t.ContentLength is >= MediaResourceSizeFilter.MinProgressiveVideoBytes) score += 200;
+        if (t.ContentLength is >= 1L * 1024 * 1024) score += 50;
+        if (t.Evidence == MediaEvidence.DomObserved && t.ContentLength is null) score -= 80;
+        if (t.Evidence == MediaEvidence.BrowserObserved) score += 100;
+        score += (int)Math.Min(t.ContentLength ?? 0, int.MaxValue) / (1024 * 1024);
+        return score;
+    }
 
     private static RequestContext Enrich(
         RequestContext ctx,

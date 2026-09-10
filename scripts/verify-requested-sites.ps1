@@ -5,12 +5,10 @@ if(-not $SkipBuild){
     dotnet build (Join-Path $root 'tools\VideoDownloader.Verify') -c Release --verbosity quiet
     if($LASTEXITCODE -ne 0){throw 'Verifier build failed'}
 }
-# YouTube + TikTok(feed≥6 / ≥5 pass) + Bilibili + AES clear-key + multi-video generic.
+# TikTok(feed≥6 / ≥5 pass) + Bilibili + AES clear-key + multi-video generic.
+# YouTube skipped: user judged PASS on 2026-09-10 (see DOCS/live-acceptance-handoff-20260910.md).
 # Each download proof must be >20MiB (see DownloadAcceptance).
 $urls=@(
-    'https://www.youtube.com/watch?v=oe9rK1jzNbA&list=RDoe9rK1jzNbA&start_radio=1',
-    'https://www.youtube.com/watch?v=Y_tPE3o5NWk&list=RDY_tPE3o5NWk&start_radio=1',
-    'https://www.youtube.com/watch?v=rKrq5V3GJWI&list=RDrKrq5V3GJWI&start_radio=1',
     'https://www.tiktok.com/',
     'https://www.bilibili.com/video/BV1xMtw6XEAu',
     'https://www.bilibili.com/video/BV1CXWuz3E7V/',

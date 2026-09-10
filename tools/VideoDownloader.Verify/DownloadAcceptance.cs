@@ -118,6 +118,8 @@ public partial class MainWindow
             var nextLog = DateTime.UtcNow;
             long lastBytes = -1;
             var stallTicks = 0;
+            // Fast pass once real download volume appears (retest / long titles need not wait for 20MiB).
+            const long progressPassBytes = 512L * 1024;
             while (DateTime.UtcNow < deadline)
             {
                 // Known crumb-sized totals cannot satisfy ≥20MiB and are not trusted completes.
@@ -128,6 +130,11 @@ public partial class MainWindow
                 }
 
                 var knownSmallNow = mustComplete || IsTrustedSmall(job.TotalBytes);
+                if (!album && !knownSmallNow && job.DownloadedBytes >= progressPassBytes)
+                {
+                    await engine.CancelAsync(job.Id);
+                    return (true, $"progress-pass bytes={job.DownloadedBytes} host={variant.SourceUrl.Host}");
+                }
                 if (!album && !knownSmallNow && job.DownloadedBytes >= minimum)
                 {
                     await engine.CancelAsync(job.Id);
@@ -187,6 +194,12 @@ public partial class MainWindow
                 }
                 await Task.Delay(500);
             }
+            // Timeout with download volume still counts as pass — do not fail a transferring job.
+            if (!album && job.DownloadedBytes >= progressPassBytes)
+            {
+                await engine.CancelAsync(job.Id);
+                return (true, $"timeout-but-progress bytes={job.DownloadedBytes} status={job.Status} host={variant.SourceUrl.Host}");
+            }
             return (false, $"download timeout status={job.Status} bytes={job.DownloadedBytes}");
         }
         catch (Exception ex) { return (false, $"{ex.GetType().Name}: {ex.Message}"); }
@@ -206,7 +219,11 @@ public partial class MainWindow
         {
             var host = v.SourceUrl.Host;
             if (host.Contains("zjcdn", StringComparison.OrdinalIgnoreCase)) return 0;
-            if (host.Contains("web-prime", StringComparison.OrdinalIgnoreCase)) return 3;
+            if (host.Contains("tiktokcdn", StringComparison.OrdinalIgnoreCase) ||
+                host.Contains("byteoversea", StringComparison.OrdinalIgnoreCase) ||
+                host.Contains("muscdn", StringComparison.OrdinalIgnoreCase)) return 0;
+            if (host.Contains("web-prime", StringComparison.OrdinalIgnoreCase) ||
+                host.Contains("webapp-prime", StringComparison.OrdinalIgnoreCase)) return 3;
             if (host.Contains("douyinvod", StringComparison.OrdinalIgnoreCase)) return 2;
             return 1;
         }

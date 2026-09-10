@@ -411,6 +411,21 @@ public partial class MainWindow
                             captionOk=true;
                         }
                     }
+                    // TikTok feed: once download proof + content id exist, do not block on placeholder「视频」.
+                    if(!captionOk && feed && sampleOk &&
+                       uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase) &&
+                       !string.IsNullOrWhiteSpace(identity) &&
+                       identity.Contains("content:",StringComparison.OrdinalIgnoreCase))
+                    {
+                        captionOk=true;
+                        if(video is not null &&
+                           (string.IsNullOrWhiteSpace(video.DisplayTitle) || video.DisplayTitle is "视频"))
+                        {
+                            var fallback="tiktok_"+System.Text.RegularExpressions.Regex.Match(identity,@"(\d{10,})").Groups[1].Value;
+                            if(!string.IsNullOrWhiteSpace(fallback) && fallback!="tiktok_")
+                                video=video with { DisplayTitle = fallback };
+                        }
+                    }
                     var exclusive=_services!.GetRequiredService<ISiteDetectionRouter>().Resolve(new Uri(finalPage))!=SiteKind.Other;
                     var cardCount=Math.Max(settledCardCount, _mainVm.DetectedVideos.Count);
                     var cardCountOk=exclusive
