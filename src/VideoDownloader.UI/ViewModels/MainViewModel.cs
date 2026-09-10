@@ -876,9 +876,11 @@ public sealed partial class MainViewModel : ObservableObject
             }
 
             if (host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase) &&
-                !pageUrl.AbsolutePath.Contains("/video/", StringComparison.OrdinalIgnoreCase))
+                !pageUrl.AbsolutePath.Contains("/video/", StringComparison.OrdinalIgnoreCase) &&
+                !pageUrl.AbsolutePath.Contains("/embed/", StringComparison.OrdinalIgnoreCase))
             {
-                return new Uri($"https://{pageUrl.Host}/video/{id}");
+                // Bare /video/{id} 404s without @user; embed/v2 is the durable extractor entry.
+                return new Uri($"https://www.tiktok.com/embed/v2/{id}");
             }
         }
 
