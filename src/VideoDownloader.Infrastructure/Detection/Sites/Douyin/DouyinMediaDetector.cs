@@ -324,9 +324,10 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             ApplyObservationJson(pageScriptJson);
 
             _logger.LogInformation(
-                "Douyin observation contentId={Id} mode={Mode} videos={Videos} audios={Audios} images={Images}",
+                "Douyin observation contentId={Id} mode={Mode} videos={Videos} audios={Audios} images={Images}/{Expected}",
                 _session.CurrentContentId, _session.CurrentMode,
-                _session.VideoCandidates.Count, _session.AudioCandidates.Count, _session.AlbumImages.Count);
+                _session.VideoCandidates.Count, _session.AudioCandidates.Count,
+                _session.AlbumImages.Count, _session.ExpectedAlbumImageCount);
         }
 
         return Task.CompletedTask;
@@ -350,13 +351,19 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                                  _session.VideoCandidates.Any(t =>
                                      t.IsMseTrack || DouyinPlayEvidence.IsMseVideoPath(t.SourceUrl));
                 _failureReason = _session.CurrentMode == DouyinContentMode.Album
-                    ? "douyin_album_no_images"
+                    ? (_session.ExpectedAlbumImageCount is int need &&
+                       need > 0 &&
+                       _session.AlbumImages.Count < need
+                        ? $"douyin_album_incomplete:{_session.AlbumImages.Count}/{need}"
+                        : "douyin_album_no_images")
                     : hasMseOnly
                         ? "douyin_mse_only"
                         : "douyin_no_media";
                 _logger.LogWarning(
-                    "[DouyinSelect] session={Session} selected=none reason={Reason} candidates={Count} (no Generic fallback)",
-                    _session.SessionId, _failureReason, _session.VideoCandidates.Count);
+                    "[DouyinSelect] session={Session} selected=none reason={Reason} images={Images}/{Expected} candidates={Count} (no Generic fallback)",
+                    _session.SessionId, _failureReason,
+                    _session.AlbumImages.Count, _session.ExpectedAlbumImageCount,
+                    _session.VideoCandidates.Count);
                 return Task.CompletedTask;
             }
 
@@ -394,6 +401,18 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         {
             if (_session.AlbumImages.Count == 0)
                 return null;
+            // Wait until observed slot count is filled — partial albums must not seal.
+            if (_session.ExpectedAlbumImageCount is int expected &&
+                expected > 0 &&
+                _session.AlbumImages.Count < expected)
+            {
+                _logger.LogInformation(
+                    "Douyin album incomplete images={Have}/{Need}; defer seal",
+                    _session.AlbumImages.Count,
+                    expected);
+                return null;
+            }
+
             var audio = SelectBest(_session.AudioCandidates);
             return new MediaDescriptor(
                 SiteIds.Douyin,
@@ -577,6 +596,16 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                         _session.Context));
                 }
 
+                if (root.TryGetProperty("imageCount", out var countEl) &&
+                    countEl.ValueKind == JsonValueKind.Number &&
+                    countEl.TryGetInt32(out var declared) &&
+                    declared > 0)
+                {
+                    _session.ExpectedAlbumImageCount = Math.Max(
+                        _session.ExpectedAlbumImageCount ?? 0,
+                        declared);
+                }
+
                 if (list.Count > 0)
                 {
                     if (_session.CurrentMode != DouyinContentMode.Album)
@@ -585,6 +614,9 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                     // Deduplicate by host+path (ignore query noise) keeping first index order.
                     foreach (var img in list.DistinctBy(i => i.Url.GetLeftPart(UriPartial.Path), StringComparer.OrdinalIgnoreCase))
                         _session.AlbumImages.Add(img with { Index = _session.AlbumImages.Count });
+                    _session.ExpectedAlbumImageCount = Math.Max(
+                        _session.ExpectedAlbumImageCount ?? 0,
+                        _session.AlbumImages.Count);
                 }
             }
 

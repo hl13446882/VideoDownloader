@@ -149,6 +149,22 @@ internal static class DouyinObservationScript
             }
             return [...new Set(urls)];
           };
+          // Declared album slot count from aweme record (may exceed resolvable URL count briefly).
+          const countDouyinAlbumSlots = record => {
+            let n=0;
+            for(const key of ['images','image_list','imageList','image_infos','photos']){
+              const block=record?.[key];
+              if(Array.isArray(block)) n=Math.max(n, block.length);
+              else if(Array.isArray(block?.images)) n=Math.max(n, block.images.length);
+              else if(Array.isArray(block?.image_list)) n=Math.max(n, block.image_list.length);
+            }
+            const post=record?.image_post_info||record?.imagePost;
+            if(Array.isArray(post?.images)) n=Math.max(n, post.images.length);
+            if(typeof post?.image_count==='number') n=Math.max(n, post.image_count|0);
+            if(typeof record?.image_count==='number') n=Math.max(n, record.image_count|0);
+            if(typeof record?.imageCount==='number') n=Math.max(n, record.imageCount|0);
+            return n;
+          };
           const collectDouyinPlayUrls = record => {
             const urls=[];
             const push=v=>{
@@ -269,7 +285,8 @@ internal static class DouyinObservationScript
                 || document.title || '').trim().replace(/\s*[_|].*抖音.*$/u,'').trim();
               const media=[]; if(audio) media.push(audio.currentSrc||audio.src);
               return { type:'vd-video-identity', identity: id ? (location.host+':content:'+id) : pageKey(location.href),
-                caption, href:location.href, media, images:imgs.map(e=>e.currentSrc||e.src), album:true };
+                caption, href:location.href, media, images:imgs.map(e=>e.currentSrc||e.src),
+                imageCount: imgs.length, album:true };
             }
             const images=collectDouyinImages(record);
             if(images.length<1) return null;
@@ -286,8 +303,9 @@ internal static class DouyinObservationScript
             pushAudio(music.play_url||music.playUrl||music);
             const id=String(record.aweme_id||record.itemId||record.videoId||record.id||expectedId||'');
             const caption=String(record.desc||record.description||record.title||'').trim();
+            const imageCount=Math.max(countDouyinAlbumSlots(record), images.length);
             return { type:'vd-video-identity', identity: id ? (location.host+':content:'+id) : pageKey(location.href),
-              caption, href:location.href, media:[...new Set(audioUrls)], images, album:true };
+              caption, href:location.href, media:[...new Set(audioUrls)], images, imageCount, album:true };
           };
           window.__vdObserve = () => {
             const album = observeDouyinAlbum();

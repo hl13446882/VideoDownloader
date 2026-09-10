@@ -8,6 +8,8 @@ public static class MediaResourceSizeFilter
     public const long MinStrongMimeBytes = 1024;
     /// <summary>Floor for a credible progressive Douyin/TikTok VOD object (rejects ~200KB crumbs).</summary>
     public const long MinProgressiveVideoBytes = 512 * 1024;
+    /// <summary>Generic multi-video pages: objects below 2 MiB are teaser/junk, not downloadable cards.</summary>
+    public const long MinGenericVideoBytes = 2L * 1024 * 1024;
 
     public static bool ShouldExcludeFromDisplay(MediaResource resource, CandidateKind kind)
     {
@@ -46,9 +48,45 @@ public static class MediaResourceSizeFilter
         return total < MinDisplayBytes;
     }
 
+    /// <summary>
+    /// Generic-site progressive/combined video under 2 MiB is invalid (covers multi-video teaser crumbs).
+    /// HLS/DASH manifests and albums are kept.
+    /// </summary>
+    public static bool ShouldExcludeGenericVideoVariant(MediaVariant variant)
+    {
+        if (variant.Tracks.Any(t => t.Kind == MediaTrackKind.Image))
+            return false;
+        if (string.Equals(variant.Container, "hls", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(variant.Container, "dash", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(variant.Container, "album", StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (variant.Tracks.Any(t =>
+                t.SourceUrl.AbsolutePath.Contains(".m3u8", StringComparison.OrdinalIgnoreCase) ||
+                t.SourceUrl.AbsolutePath.Contains(".mpd", StringComparison.OrdinalIgnoreCase)))
+            return false;
+
+        if (variant.TotalContentLength is > 0 and < MinGenericVideoBytes)
+            return true;
+
+        return variant.Tracks.Any(t =>
+            t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined &&
+            t.ContentLength is > 0 and < MinGenericVideoBytes);
+    }
+
     public static DetectedVideo FilterForDisplay(DetectedVideo video)
     {
         var variants = video.Variants.Where(v => !ShouldExcludeVariant(v)).ToList();
+        if (variants.Count == 0)
+            return video with { Variants = [] };
+
+        return video with { Variants = variants };
+    }
+
+    public static DetectedVideo FilterGenericVideos(DetectedVideo video)
+    {
+        var variants = video.Variants
+            .Where(v => !ShouldExcludeVariant(v) && !ShouldExcludeGenericVideoVariant(v))
+            .ToList();
         if (variants.Count == 0)
             return video with { Variants = [] };
 

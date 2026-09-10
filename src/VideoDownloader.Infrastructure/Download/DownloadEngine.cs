@@ -684,11 +684,16 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                     var images = tracks
                         .Where(t => t.Kind == MediaTrackKind.Image)
                         .Select(LocalPathOf)
-                        .Where(File.Exists)
+                        .Where(p => File.Exists(p) && new FileInfo(p).Length >= 8 * 1024)
                         .ToArray();
                     var audio = tracks.FirstOrDefault(t => t.Kind == MediaTrackKind.Audio);
+                    var expectedImages = job.Variant.Tracks.Count(t => t.Kind == MediaTrackKind.Image);
                     if (images.Length == 0 || audio is null)
                         throw new DownloadException(ErrorCodes.FfmpegFailed, "Album download requires images and audio.");
+                    if (expectedImages > 0 && images.Length < expectedImages)
+                        throw new DownloadException(
+                            ErrorCodes.IncompleteDownload,
+                            $"Album incomplete: downloaded {images.Length} of {expectedImages} images.");
                     var staging = Path.Combine(tempDir, "album" + Path.GetExtension(job.TargetPath));
                     await _ffmpegAdapter.RunAlbumSlideshowAsync(images, LocalPathOf(audio), staging, ct);
                     EnforceFinalDemoLimit(staging);

@@ -299,6 +299,19 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             return Task.CompletedTask;
         }
 
+        // Generic multi-video: known progressive objects under 2 MiB are invalid teasers.
+        var inferredKind = InferKindFromMime(e.MimeType, e.Url);
+        if (inferredKind is MediaTrackKind.Video or MediaTrackKind.Combined &&
+            effectiveLength is > 0 and < MediaResourceSizeFilter.MinGenericVideoBytes &&
+            !e.Url.AbsolutePath.Contains(".m3u8", StringComparison.OrdinalIgnoreCase) &&
+            !e.Url.AbsolutePath.Contains(".mpd", StringComparison.OrdinalIgnoreCase))
+        {
+            RecordDecision(new("network", "video", MediaOwnership.ForPage(page, _observedIdentity),
+                "rejected", "generic_under_2mib", e.Url.Host,
+                $"length={effectiveLength}"));
+            return Task.CompletedTask;
+        }
+
         // Segments thrash the 3 ffprobe slots unless a site StrongAccept / browser play overrides.
         var allowSegment = browserPlay ||
                            finalDecision.Kind == NetworkCandidateDecisionKind.StrongAccept ||
@@ -1220,7 +1233,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                         continue;
                     }
 
-                    var filtered = MediaResourceSizeFilter.FilterForDisplay(video);
+                    var filtered = MediaResourceSizeFilter.FilterGenericVideos(video);
                     if (filtered.Variants.Count == 0)
                     {
                         RecordDecision(new("external", "video", owner, "rejected", "size_filter", target.Host));
@@ -1602,7 +1615,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                     .ThenByDescending(v => v.Height ?? 0).ToArray();
                 return ordered[0] with { Alternatives = ordered.Skip(1).Take(4).ToArray() };
             })
-            .Where(v => !MediaResourceSizeFilter.ShouldExcludeVariant(v))
+            .Where(v => !MediaResourceSizeFilter.ShouldExcludeVariant(v) &&
+                        !MediaResourceSizeFilter.ShouldExcludeGenericVideoVariant(v))
             .OrderByDescending(v => v.Tracks.Any(t => t.BrowserObserved))
             .ThenBy(v => v.Tracks.Any(t =>
                 IsInsufficientByteDanceDownloadObject(t.SourceUrl, t.ContentLength)) ? 1 : 0)
@@ -1819,9 +1833,9 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
     private static DetectedVideo? MergeVideos(DetectedVideo? local, DetectedVideo? external)
     {
         if (local is null)
-            return external is null ? null : MediaResourceSizeFilter.FilterForDisplay(external);
+            return external is null ? null : MediaResourceSizeFilter.FilterGenericVideos(external);
         if (external is null)
-            return local.Variants.Count == 0 ? null : local;
+            return local.Variants.Count == 0 ? null : MediaResourceSizeFilter.FilterGenericVideos(local);
 
         var map = new Dictionary<string, MediaVariant>(StringComparer.OrdinalIgnoreCase);
         foreach (var v in local.Variants)
@@ -1844,7 +1858,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             Availability = ComputeAvailability(map.Values, local.Availability, external.Availability),
             Metadata = MergeMetadata(local.Metadata, external.Metadata)
         };
-        return MediaResourceSizeFilter.FilterForDisplay(merged);
+        return MediaResourceSizeFilter.FilterGenericVideos(merged);
     }
 
     private static string? PreferPartialHint(string? local, string? external, IEnumerable<MediaVariant> variants)
