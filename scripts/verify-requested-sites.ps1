@@ -6,14 +6,14 @@ if(-not $SkipBuild){
     if($LASTEXITCODE -ne 0){throw 'Verifier build failed'}
 }
 # Full campaign after yt-dlp physical isolation + singleton/single-entry detectors.
-# Sites: YouTube x3, Douyin (feed+jingxuan+short), TikTok feed (>=5/6), Bilibili x3,
+# Sites: YouTube x3, Douyin (recommend×10 + jingxuan×10 + short×1), TikTok feed (>=5/6), Bilibili x3,
 # Generic AES clear-key + multi-video. Each download proof must be >20MiB (see DownloadAcceptance).
 $urls=@(
     'https://www.youtube.com/watch?v=oe9rK1jzNbA&list=RDoe9rK1jzNbA&start_radio=1',
     'https://www.youtube.com/watch?v=Y_tPE3o5NWk&list=RDY_tPE3o5NWk&start_radio=1',
     'https://www.youtube.com/watch?v=rKrq5V3GJWI&list=RDrKrq5V3GJWI&start_radio=1',
     'https://www.douyin.com/?recommend=1',
-    'https://www.douyin.com/jingxuan?modal_id=7660503158577286451',
+    'https://www.douyin.com/jingxuan',
     'https://v.douyin.com/9cY9PQIM6HY/',
     'https://www.tiktok.com/',
     'https://www.bilibili.com/video/BV1xMtw6XEAu',

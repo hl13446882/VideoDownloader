@@ -50,7 +50,7 @@ public partial class MainWindow
         var expectedCount=urls.Sum(address=>{
             var uri=new Uri(address);
             if(uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase)) return 6;
-            if(IsDouyinFeedRoot(uri)) return 4;
+            if(IsDouyinScrollFeed(uri)) return 10;
             return 1;
         });
         try
@@ -59,9 +59,10 @@ public partial class MainWindow
             {
                 var uri=new Uri(address);
                 var feed=uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase)
-                    || IsDouyinFeedRoot(uri);
+                    || IsDouyinScrollFeed(uri);
                 var feedSteps=uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase) ? 6
-                    : feed ? 4 : 1;
+                    : IsDouyinScrollFeed(uri) ? 10
+                    : 1;
                 var siteRecordStart=records.Count;
                 await EnsureDocumentNavigatedAsync(pipeline,address);
                 using var stepProbe=StartHangHeartbeat(pipeline,address);
@@ -101,12 +102,16 @@ public partial class MainWindow
                 }
                 else if(!feed && exclusiveHost)
                     Log($"LIVE skip generic warmup for exclusive host {uri.Host} (invalid probe avoidance)");
-                if(feed && uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase))
+                if(feed && uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase)
+                   && !uri.AbsolutePath.Equals("/jingxuan",StringComparison.OrdinalIgnoreCase))
                 {
+                    // 推荐流：点「推荐」确保落在推荐 feed；精选流不要点，否则会跳走。
                     await Task.Delay(2500);
                     Log("Recommendation navigation="+await WebView.CoreWebView2.ExecuteScriptAsync("(()=>{const a=[...document.querySelectorAll('a,button,[role=link]')].find(e=>e.textContent.trim()==='推荐');if(a){a.click();return 'clicked 推荐';}return location.href;})()"));
                     await Task.Delay(2500);
                 }
+                else if(feed && uri.AbsolutePath.Equals("/jingxuan",StringComparison.OrdinalIgnoreCase))
+                    Log("LIVE Douyin jingxuan feed: ArrowDown×10 (no 推荐 click)");
                 if(feed && uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase)) await SkipNonVideoPostsAsync();
                 for(var step=0;step<feedSteps;step++)
                 {
@@ -701,26 +706,29 @@ public partial class MainWindow
     }
 
     /// <summary>
-    /// Douyin feed roots need ArrowDown multi-step proof. A jingxuan/recommend URL that already
-    /// carries modal_id/aweme_id is a single detail target — do not treat it as a scroll feed.
+    /// Douyin 精选 / 推荐：统一用 ArrowDown 滚动刷新，每条地址验收 10 个作品。
+    /// 即使 URL 带 modal_id，仍按滚动 feed 处理（向下切到下一条）。
     /// </summary>
-    private static bool IsDouyinFeedRoot(Uri uri)
+    private static bool IsDouyinScrollFeed(Uri uri)
     {
         if(!uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase))
             return false;
-        if(uri.AbsolutePath is not ("/" or "") &&
-           !uri.AbsolutePath.Equals("/jingxuan", StringComparison.OrdinalIgnoreCase) &&
-           !uri.AbsolutePath.Equals("/recommend", StringComparison.OrdinalIgnoreCase))
-            return false;
-        foreach(var part in uri.Query.TrimStart('?').Split('&',StringSplitOptions.RemoveEmptyEntries))
+        if(uri.AbsolutePath.Equals("/jingxuan",StringComparison.OrdinalIgnoreCase) ||
+           uri.AbsolutePath.Equals("/recommend",StringComparison.OrdinalIgnoreCase))
+            return true;
+        if(uri.AbsolutePath is "/" or "")
         {
-            var i=part.IndexOf('=');
-            var key=i<0?part:part[..i];
-            var value=i<0?"":Uri.UnescapeDataString(part[(i+1)..]);
-            if((key is "modal_id" or "aweme_id") && !string.IsNullOrWhiteSpace(value))
-                return false;
+            // /?recommend=1 或首页推荐流
+            foreach(var part in uri.Query.TrimStart('?').Split('&',StringSplitOptions.RemoveEmptyEntries))
+            {
+                var i=part.IndexOf('=');
+                var key=i<0?part:part[..i];
+                if(key is "recommend") return true;
+            }
+            // bare www.douyin.com/ — treat as recommend feed
+            return true;
         }
-        return true;
+        return false;
     }
 
     private static bool IsSameAcceptanceDocument(string? current,string expected)
