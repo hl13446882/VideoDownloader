@@ -1061,46 +1061,92 @@ public sealed partial class MainViewModel : ObservableObject
             if (preferYtdlpFirst && isYtDlpExclusive)
             {
                 HangProbe.Mark("vm.schedule", $"{siteId} {ProbeMethods.ScheduleYtdlpFirst}");
-                await Task.Delay(TimeSpan.FromMilliseconds(200), token);
-                if (generation != _pageGeneration)
-                    return;
-                await Application.Current.Dispatcher.InvokeAsync(() => SetStatusKey("status.probeRunning"));
-                HangProbe.Mark("vm.pagePass.begin", pageUrl.AbsoluteUri);
-                await RunPagePassAsync(pageUrl, pageTitle, token, generation, runExternal: true);
-                HangProbe.Mark("vm.pagePass.end", $"videos={DetectedVideos.Count}");
-
-                for (var late = 0; late < 2; late++)
+                var ytdlpRounds = siteId == SiteIds.YouTube ? 2 : 1;
+                for (var round = 1; round <= ytdlpRounds; round++)
                 {
-                    var have = false;
-                    await Application.Current.Dispatcher.InvokeAsync(() => have = DetectedVideos.Count > 0);
-                    if (have || generation != _pageGeneration || token.IsCancellationRequested)
-                        break;
-                    HangProbe.Mark("vm.lateRetry.begin", $"i={late}");
-                    await Task.Delay(TimeSpan.FromMilliseconds(800), token);
                     if (generation != _pageGeneration || token.IsCancellationRequested)
-                        break;
-                    await RunPagePassAsync(pageUrl, pageTitle, token, generation, runExternal: false);
-                    HangProbe.Mark("vm.lateRetry.end", $"i={late} videos={DetectedVideos.Count}");
-                }
-
-                await Application.Current.Dispatcher.InvokeAsync(() =>
-                {
-                    if (generation != _pageGeneration)
                         return;
-                    if (DetectedVideos.Count > 0)
+
+                    if (round > 1)
                     {
-                        SetStatusKey("status.probeDone", DetectedVideos.Count);
+                        HangProbe.Mark("vm.youtube.retryRound", $"round={round}");
+                        await Application.Current.Dispatcher.InvokeAsync(() => SetStatusKey("status.probeRunning"));
+                        if (_pipeline is RoutedMediaDetectionPipeline routedRetry)
+                            routedRetry.Reenter(pageUrl);
+                        await Task.Delay(TimeSpan.FromSeconds(1.2), token);
+                        if (generation != _pageGeneration || token.IsCancellationRequested)
+                            return;
+                    }
+                    else
+                    {
+                        await Task.Delay(TimeSpan.FromMilliseconds(200), token);
+                        if (generation != _pageGeneration)
+                            return;
+                        await Application.Current.Dispatcher.InvokeAsync(() => SetStatusKey("status.probeRunning"));
+                    }
+
+                    HangProbe.Mark("vm.pagePass.begin", $"round={round} {pageUrl.AbsoluteUri}");
+                    await RunPagePassAsync(pageUrl, pageTitle, token, generation, runExternal: true);
+                    HangProbe.Mark("vm.pagePass.end", $"round={round} videos={DetectedVideos.Count}");
+
+                    for (var late = 0; late < 2; late++)
+                    {
+                        var have = false;
+                        await Application.Current.Dispatcher.InvokeAsync(() => have = DetectedVideos.Count > 0);
+                        if (have || generation != _pageGeneration || token.IsCancellationRequested)
+                            break;
+                        HangProbe.Mark("vm.lateRetry.begin", $"round={round} i={late}");
+                        await Task.Delay(TimeSpan.FromMilliseconds(siteId == SiteIds.YouTube ? 1200 : 800), token);
+                        if (generation != _pageGeneration || token.IsCancellationRequested)
+                            break;
+                        // YouTube: allow yt-dlp again on late pass (slot unlocked after cancel/empty).
+                        await RunPagePassAsync(
+                            pageUrl,
+                            pageTitle,
+                            token,
+                            generation,
+                            runExternal: siteId == SiteIds.YouTube);
+                        HangProbe.Mark("vm.lateRetry.end", $"round={round} i={late} videos={DetectedVideos.Count}");
+                    }
+
+                    var foundRound = false;
+                    await Application.Current.Dispatcher.InvokeAsync(() => foundRound = DetectedVideos.Count > 0);
+                    if (foundRound)
+                    {
+                        await Application.Current.Dispatcher.InvokeAsync(() =>
+                        {
+                            if (generation == _pageGeneration)
+                                SetStatusKey("status.probeDone", DetectedVideos.Count);
+                        });
+                        HangProbe.Mark("vm.session.end", $"round={round} videos={DetectedVideos.Count}");
                         return;
                     }
 
-                    var pipeline = _pipeline as VideoDownloader.Infrastructure.Detection.UnifiedMediaPipeline;
-                    var hint = pipeline?.LastValidationError ?? pipeline?.LastExternalError;
-                    if (string.IsNullOrWhiteSpace(hint))
-                        SetStatusKey("status.probeEmpty");
-                    else
-                        SetStatusKey("status.probeEmptyExt", hint);
-                });
-                HangProbe.Mark("vm.session.end", $"videos={DetectedVideos.Count}");
+                    // Round 1 empty: do not declare failure — start another full probe round.
+                    if (round < ytdlpRounds)
+                    {
+                        HangProbe.Mark("vm.youtube.retryRound.pending", "first-round-empty");
+                        continue;
+                    }
+
+                    await Application.Current.Dispatcher.InvokeAsync(() =>
+                    {
+                        if (generation != _pageGeneration)
+                            return;
+                        var pipeline = _pipeline as VideoDownloader.Infrastructure.Detection.UnifiedMediaPipeline;
+                        var hint = pipeline?.LastValidationError ?? pipeline?.LastExternalError;
+                        if (_pipeline is RoutedMediaDetectionPipeline routedHint &&
+                            !string.IsNullOrWhiteSpace(routedHint.ActiveExclusiveFailureReason))
+                            hint ??= routedHint.ActiveExclusiveFailureReason;
+                        if (string.IsNullOrWhiteSpace(hint))
+                            SetStatusKey("status.probeEmpty");
+                        else
+                            SetStatusKey("status.probeEmptyExt", hint);
+                    });
+                    HangProbe.Mark("vm.session.end", $"round={round} videos=0");
+                    return;
+                }
+
                 return;
             }
 
@@ -1230,6 +1276,35 @@ public sealed partial class MainViewModel : ObservableObject
                 {
                     HangProbe.Mark("vm.session.end", "douyin-detail-boost");
                     return;
+                }
+            }
+
+            // YouTube network-first: first empty must not declare failure — full second probe round.
+            if (siteId == SiteIds.YouTube && generation == _pageGeneration && !token.IsCancellationRequested)
+            {
+                var haveYt = false;
+                await Application.Current.Dispatcher.InvokeAsync(() => haveYt = DetectedVideos.Count > 0);
+                if (!haveYt)
+                {
+                    HangProbe.Mark("vm.youtube.retryRound", "network-first-round=2");
+                    await Application.Current.Dispatcher.InvokeAsync(() => SetStatusKey("status.probeRunning"));
+                    if (_pipeline is RoutedMediaDetectionPipeline routedYt)
+                        routedYt.Reenter(pageUrl);
+                    await Task.Delay(TimeSpan.FromSeconds(1.2), token);
+                    if (generation != _pageGeneration || token.IsCancellationRequested)
+                        return;
+                    await RunPagePassAsync(pageUrl, pageTitle, token, generation, runExternal: true);
+                    for (var late = 0; late < 2; late++)
+                    {
+                        var haveLate = false;
+                        await Application.Current.Dispatcher.InvokeAsync(() => haveLate = DetectedVideos.Count > 0);
+                        if (haveLate || generation != _pageGeneration || token.IsCancellationRequested)
+                            break;
+                        await Task.Delay(TimeSpan.FromMilliseconds(1200), token);
+                        if (generation != _pageGeneration || token.IsCancellationRequested)
+                            break;
+                        await RunPagePassAsync(pageUrl, pageTitle, token, generation, runExternal: true);
+                    }
                 }
             }
 

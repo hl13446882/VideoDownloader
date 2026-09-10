@@ -144,7 +144,6 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         if (string.IsNullOrWhiteSpace(contentId))
             return;
 
-        var hasCookies = enriched.Cookies.Count > 0;
         lock (_gate)
         {
             if (!_ytdlp.IsAvailable || _externalAttempted)
@@ -160,8 +159,8 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
             Diagnostics.HangProbe.Mark("youtube.ytdlp.end", $"count={videos.Count}");
             lock (_gate)
             {
-                // Empty resolve without cookies: unlock so forceCookies page-pass can retry once.
-                if (videos.Count == 0 && !hasCookies)
+                // Empty resolve: unlock so settle/late / second VM round can retry yt-dlp.
+                if (videos.Count == 0)
                     _externalAttempted = false;
 
                 foreach (var v in videos.Where(v =>
@@ -196,16 +195,20 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
                 }
             }
         }
+        catch (OperationCanceledException)
+        {
+            Diagnostics.HangProbe.Mark("youtube.ytdlp.cancel", resolveUrl.AbsoluteUri);
+            lock (_gate)
+                _externalAttempted = false;
+            throw;
+        }
         catch (Exception ex)
         {
             Diagnostics.HangProbe.Mark("youtube.ytdlp.fail", ex.GetType().Name + " " + ex.Message);
             _logger.LogInformation(ex, "YouTube exclusive yt-dlp resolve failed (no Generic fallback)");
             lock (_gate)
-            {
-                // Unlock only when we never had cookies — allow one cookied retry.
-                if (!hasCookies)
-                    _externalAttempted = false;
-            }
+                // Always unlock — cancelled SPA switches / transient yt-dlp errors must allow another round.
+                _externalAttempted = false;
         }
     }
 
