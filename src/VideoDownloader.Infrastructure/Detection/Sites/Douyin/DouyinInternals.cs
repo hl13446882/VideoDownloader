@@ -293,39 +293,39 @@ internal static class DouyinContentModeResolver
 {
     public static DouyinContentMode Resolve(string? pageScriptJson, Uri pageUrl)
     {
+        var onNote = pageUrl.AbsolutePath.Contains("/note/", StringComparison.OrdinalIgnoreCase);
         if (string.IsNullOrWhiteSpace(pageScriptJson))
-        {
-            if (pageUrl.AbsolutePath.Contains("/note/", StringComparison.OrdinalIgnoreCase))
-                return DouyinContentMode.Album;
-            return DouyinContentMode.Unknown;
-        }
+            return onNote ? DouyinContentMode.Album : DouyinContentMode.Unknown;
 
         try
         {
             using var doc = JsonDocument.Parse(pageScriptJson);
             var root = doc.RootElement;
-            if (root.TryGetProperty("album", out var album) &&
-                album.ValueKind is JsonValueKind.True or JsonValueKind.String)
+            var albumFlag = root.TryGetProperty("album", out var album) &&
+                            album.ValueKind is JsonValueKind.True or JsonValueKind.String;
+            var imageCount = root.TryGetProperty("images", out var images) &&
+                             images.ValueKind == JsonValueKind.Array
+                ? images.GetArrayLength()
+                : 0;
+            var hasMedia = root.TryGetProperty("media", out var media) &&
+                           media.ValueKind == JsonValueKind.Array &&
+                           media.GetArrayLength() > 0;
+
+            if (onNote)
                 return DouyinContentMode.Album;
-            if (root.TryGetProperty("images", out var images) &&
-                images.ValueKind == JsonValueKind.Array &&
-                images.GetArrayLength() > 0)
+
+            // Feed/jingxuan: require explicit album + multiple stills. Lone covers must not steal Video.
+            if (albumFlag && imageCount >= 2)
                 return DouyinContentMode.Album;
-            // Audio-only media[] on note/album pages must not flip mode to Video.
-            if (pageUrl.AbsolutePath.Contains("/note/", StringComparison.OrdinalIgnoreCase))
-                return DouyinContentMode.Album;
-            if (root.TryGetProperty("media", out var media) &&
-                media.ValueKind == JsonValueKind.Array &&
-                media.GetArrayLength() > 0)
+
+            if (hasMedia)
                 return DouyinContentMode.Video;
         }
         catch (JsonException)
         {
         }
 
-        if (pageUrl.AbsolutePath.Contains("/note/", StringComparison.OrdinalIgnoreCase))
-            return DouyinContentMode.Album;
-        return DouyinContentMode.Unknown;
+        return onNote ? DouyinContentMode.Album : DouyinContentMode.Unknown;
     }
 }
 

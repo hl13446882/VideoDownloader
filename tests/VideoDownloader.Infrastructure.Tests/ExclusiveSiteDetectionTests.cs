@@ -924,6 +924,32 @@ public class ExclusiveSiteDetectionTests
     }
 
     [Fact]
+    public async Task Douyin_Jingxuan_Video_Not_Stolen_By_Feed_Album_Images()
+    {
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var id = "7664990087042770926";
+        var page = new Uri("https://www.douyin.com/jingxuan?modal_id=" + id);
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "精选",
+            $$"""{"identity":"content:{{id}}","album":false,"caption":"精选","media":[]}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://v3-dy-o.zjcdn.com/video/tos/cn/tos-cn-ve-15/osp8CAjQaPi6OIFqAEAwikBgAAB/?mime_type=video_mp4") with
+        {
+            ResourceType = "Media", StatusCode = 206, ContentLength = 86_000_000, MimeType = "video/mp4"
+        }, CancellationToken.None);
+        await detector.ProcessPageObservationAsync(page, "精选",
+            $$"""{"identity":"content:{{id}}","album":true,"caption":"精选","media":["https://v3-dy-o.zjcdn.com/video/tos/cn/x.mp4"],"images":["https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/a.jpeg?biz_tag=aweme_images","https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/b.jpeg?biz_tag=aweme_images"],"imageCount":2,"declaredImageCount":29}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.NotNull(last);
+        Assert.Equal(MediaContentType.Video, last!.ContentType);
+        Assert.NotNull(last.Video);
+    }
+
+    [Fact]
     public void MediaVariantRanking_Prefers_Progressive_Over_Larger_Mse()
     {
         var progressive = MediaVariant.FromCombinedTrack(

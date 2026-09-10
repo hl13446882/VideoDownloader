@@ -167,8 +167,9 @@ internal static class DouyinObservationScript
             if(typeof record?.imageCount==='number') n=Math.max(n, record.imageCount|0);
             return n;
           };
-          // Page UI pager like "4/17" — denominator is the declared album size.
+          // Page UI pager like "4/17" — only trust on dedicated /note/ pages (feed has many false N/M).
           const readAlbumPagerTotal = () => {
+            if(!/\/note\//i.test(location.pathname)) return 0;
             let total=0;
             const consider = text => {
               if(!text) return;
@@ -180,13 +181,6 @@ internal static class DouyinObservationScript
             for(const el of document.querySelectorAll('span,div,p,li,em,i,label')){
               const t=(el.childNodes.length===1 ? (el.textContent||'') : '').trim();
               if(t.length>=3 && t.length<=8) consider(t);
-            }
-            if(!total){
-              const body=(document.body?.innerText||'').slice(0,8000);
-              for(const m of body.matchAll(/(\d{1,2})\s*\/\s*(\d{1,2})/g)){
-                const cur=+m[1], all=+m[2];
-                if(cur>=1 && all>=2 && all<=99 && cur<=all) total=Math.max(total, all);
-              }
             }
             return total;
           };
@@ -232,7 +226,8 @@ internal static class DouyinObservationScript
             window.__vdAlbumAdvance = { last:0, clicks:0 };
             setInterval(()=>{
               try{
-                if(!/\/note\//i.test(location.pathname) && !document.body?.innerText?.match(/\d+\s*\/\s*\d+/)) return;
+                // Only advance slides on dedicated note pages — never on jingxuan/feed.
+                if(!/\/note\//i.test(location.pathname)) return;
                 const now=Date.now();
                 if(now-(window.__vdAlbumAdvance.last||0)<280) return;
                 const pager=readAlbumPagerTotal();
@@ -361,10 +356,12 @@ internal static class DouyinObservationScript
             };
             for(const root of roots) walk(root,0);
             record=best;
-            const pagerTotal=readAlbumPagerTotal();
-            const domImages=collectDomAlbumImageUrls();
+            const onNote=/\/note\//i.test(location.pathname);
+            const pagerTotal=onNote ? readAlbumPagerTotal() : 0;
+            const domImages=onNote ? collectDomAlbumImageUrls() : [];
+            // Feed/jingxuan: never invent albums from DOM/pager chrome; require hydration image slots.
             if(!record){
-              if(!/\/note\//i.test(location.pathname) && pagerTotal<1 && domImages.length<1) return null;
+              if(!onNote) return null;
               const images=domImages;
               if(images.length<1) return null;
               const audio=[...document.querySelectorAll('audio,video')].find(e=>/^https?:/i.test(e.currentSrc||e.src||''));
@@ -372,14 +369,17 @@ internal static class DouyinObservationScript
               const caption=(document.querySelector('[data-e2e="browse-video-desc"],.desc')?.textContent
                 || document.title || '').trim().replace(/\s*[_|].*抖音.*$/u,'').trim();
               const media=[]; if(audio) media.push(audio.currentSrc||audio.src);
-              // declaredImageCount only when page/JSON states a total; else omit (seal by collected).
               const out={ type:'vd-video-identity', identity: id ? (location.host+':content:'+id) : pageKey(location.href),
                 caption, href:location.href, media, images, imageCount: images.length, album:true };
               if(pagerTotal>0) out.declaredImageCount=pagerTotal;
               return out;
             }
+            const slots=countDouyinAlbumSlots(record);
+            // Video covers sometimes look like image fields — need real multi-image slots or /note/.
+            if(!onNote && slots<2) return null;
             const images=[...new Set([...collectDouyinImages(record), ...domImages])];
             if(images.length<1) return null;
+            if(!onNote && images.length<2) return null;
             const music=record.music||{};
             const audioUrls=[];
             const pushAudio=v=>{
@@ -396,7 +396,6 @@ internal static class DouyinObservationScript
             const imageCount=images.length;
             // Only emit declared when page pager (e.g. 4/17) or JSON image_count states a total.
             // Do not treat collected URL length alone as declared — that seals "as many as we got".
-            const slots=countDouyinAlbumSlots(record);
             const declared=Math.max(pagerTotal,
               (typeof record?.image_count==='number' ? record.image_count|0 : 0),
               (typeof record?.imageCount==='number' ? record.imageCount|0 : 0),

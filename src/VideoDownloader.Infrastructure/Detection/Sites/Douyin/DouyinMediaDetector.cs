@@ -292,6 +292,20 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             if (mode == DouyinContentMode.Unknown && contentId is not null)
                 mode = DouyinContentMode.Video;
 
+            // Feed: never demote an already-accepted progressive video into a fake album.
+            var onNote = pageUrl.AbsolutePath.Contains("/note/", StringComparison.OrdinalIgnoreCase);
+            if (!onNote &&
+                mode == DouyinContentMode.Album &&
+                _session.CurrentMode == DouyinContentMode.Video &&
+                _session.VideoCandidates.Any(t =>
+                    !t.IsMseTrack && DouyinPlayEvidence.IsStrongVodHost(t.SourceUrl)))
+            {
+                _logger.LogInformation(
+                    "[DouyinOwnership] keep Video mode; reject feed album observation on {Id}",
+                    contentId ?? _session.CurrentContentId);
+                mode = DouyinContentMode.Video;
+            }
+
             var modeChanged = mode != DouyinContentMode.Unknown && mode != _session.CurrentMode;
             var idChanged = contentId is not null &&
                             !string.Equals(contentId, _session.CurrentContentId, StringComparison.Ordinal);
@@ -626,10 +640,14 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                         _session.Context));
                 }
 
+                var pageIsNote = _session.PageUrl?.AbsolutePath
+                    .Contains("/note/", StringComparison.OrdinalIgnoreCase) == true;
+
                 if (root.TryGetProperty("imageCount", out var countEl) &&
                     countEl.ValueKind == JsonValueKind.Number &&
                     countEl.TryGetInt32(out var collected) &&
-                    collected > 0)
+                    collected > 0 &&
+                    _session.CurrentMode == DouyinContentMode.Album)
                 {
                     // Collected URL count is only a floor when no page-declared total exists.
                     if (_session.DeclaredAlbumImageCount is null or <= 0)
@@ -640,7 +658,9 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                     }
                 }
 
-                if (root.TryGetProperty("declaredImageCount", out var declaredEl) &&
+                // Declared totals only from dedicated /note/ pages (feed N/M chrome is noise).
+                if (pageIsNote &&
+                    root.TryGetProperty("declaredImageCount", out var declaredEl) &&
                     declaredEl.ValueKind == JsonValueKind.Number &&
                     declaredEl.TryGetInt32(out var declared) &&
                     declared > 0)
@@ -648,7 +668,6 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                     _session.DeclaredAlbumImageCount = Math.Max(
                         _session.DeclaredAlbumImageCount ?? 0,
                         declared);
-                    // Page/JSON total wins: seal only when AlbumImages reaches this.
                     _session.ExpectedAlbumImageCount = Math.Max(
                         _session.ExpectedAlbumImageCount ?? 0,
                         _session.DeclaredAlbumImageCount.Value);
@@ -656,37 +675,60 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 
                 if (list.Count > 0)
                 {
-                    if (_session.CurrentMode != DouyinContentMode.Album)
-                        _session.SwitchContent(_session.CurrentContentId, DouyinContentMode.Album);
-
-                    // Merge: keep observation order, then append network-only URLs not in this payload.
-                    var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    var merged = new List<AlbumImageItem>();
-                    foreach (var img in list.DistinctBy(i => i.Url.GetLeftPart(UriPartial.Path), StringComparer.OrdinalIgnoreCase))
+                    // Feed covers must not flip an established Video session into Album.
+                    if (!pageIsNote &&
+                        _session.CurrentMode == DouyinContentMode.Video &&
+                        _session.VideoCandidates.Any(t =>
+                            !t.IsMseTrack && DouyinPlayEvidence.IsStrongVodHost(t.SourceUrl)))
                     {
-                        var key = img.Url.GetLeftPart(UriPartial.Path);
-                        if (!seen.Add(key)) continue;
-                        merged.Add(img with { Index = merged.Count });
+                        _logger.LogInformation(
+                            "[DouyinOwnership] ignore feed album images while Video progressive exists count={Count}",
+                            list.Count);
                     }
-
-                    foreach (var existing in _session.AlbumImages)
+                    else if (!pageIsNote && list.Count < 2)
                     {
-                        var key = existing.Url.GetLeftPart(UriPartial.Path);
-                        if (!seen.Add(key)) continue;
-                        merged.Add(existing with { Index = merged.Count });
-                    }
-
-                    _session.AlbumImages.Clear();
-                    if (_session.DeclaredAlbumImageCount is int want && want > 0)
-                    {
-                        _session.ExpectedAlbumImageCount = want;
-                        if (merged.Count > want)
-                            merged = merged.Take(want).Select((img, i) => img with { Index = i }).ToList();
+                        // Single cover on jingxuan is not an album.
                     }
                     else
-                        _session.ExpectedAlbumImageCount = merged.Count;
+                    {
+                        if (_session.CurrentMode != DouyinContentMode.Album)
+                            _session.SwitchContent(_session.CurrentContentId, DouyinContentMode.Album);
 
-                    _session.AlbumImages.AddRange(merged);
+                        // Merge: keep observation order, then append network-only URLs not in this payload.
+                        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        var merged = new List<AlbumImageItem>();
+                        foreach (var img in list.DistinctBy(i => i.Url.GetLeftPart(UriPartial.Path), StringComparer.OrdinalIgnoreCase))
+                        {
+                            var key = img.Url.GetLeftPart(UriPartial.Path);
+                            if (!seen.Add(key)) continue;
+                            merged.Add(img with { Index = merged.Count });
+                        }
+
+                        foreach (var existing in _session.AlbumImages)
+                        {
+                            var key = existing.Url.GetLeftPart(UriPartial.Path);
+                            if (!seen.Add(key)) continue;
+                            merged.Add(existing with { Index = merged.Count });
+                        }
+
+                        _session.AlbumImages.Clear();
+                        if (pageIsNote &&
+                            _session.DeclaredAlbumImageCount is int want &&
+                            want > 0)
+                        {
+                            _session.ExpectedAlbumImageCount = want;
+                            if (merged.Count > want)
+                                merged = merged.Take(want).Select((img, i) => img with { Index = i }).ToList();
+                        }
+                        else
+                        {
+                            // Feed albums: seal by collected count only.
+                            _session.DeclaredAlbumImageCount = null;
+                            _session.ExpectedAlbumImageCount = merged.Count;
+                        }
+
+                        _session.AlbumImages.AddRange(merged);
+                    }
                 }
             }
 
@@ -1089,8 +1131,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 
     private static bool IsLikelyAlbumImage(Uri url, string? mime)
     {
-        // Album stills: signed douyinpic/byteimg aweme-images. Reject site chrome on douyinstatic.
-        var full = url.AbsoluteUri;
+        // Album stills live on douyinpic/byteimg. Reject site chrome on douyinstatic.
         if (url.Host.Contains("douyinstatic", StringComparison.OrdinalIgnoreCase) &&
             !url.Host.Contains("douyinpic", StringComparison.OrdinalIgnoreCase) &&
             !url.Host.Contains("byteimg", StringComparison.OrdinalIgnoreCase))
@@ -1098,9 +1139,12 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         if (!url.Host.Contains("douyinpic", StringComparison.OrdinalIgnoreCase) &&
             !url.Host.Contains("byteimg", StringComparison.OrdinalIgnoreCase))
             return false;
-        return Regex.IsMatch(full, @"aweme-images|biz_tag=aweme_images|/tos-cn-i-", RegexOptions.IgnoreCase) ||
-               (mime?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) == true &&
-                Regex.IsMatch(url.AbsolutePath, @"\.(?:jpg|jpeg|png|webp)(?:$|\?)", RegexOptions.IgnoreCase));
+        var full = url.AbsoluteUri;
+        if (Regex.IsMatch(full, @"aweme-images|biz_tag=aweme_images|/tos-cn-i-", RegexOptions.IgnoreCase))
+            return true;
+        if (mime?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) == true)
+            return true;
+        return Regex.IsMatch(url.AbsolutePath, @"\.(?:jpg|jpeg|png|webp|heic|avif)(?:$|\?)", RegexOptions.IgnoreCase);
     }
 
     private static bool IsExcludedAlbumImage(Uri url)
