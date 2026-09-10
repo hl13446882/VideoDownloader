@@ -131,7 +131,9 @@ internal static class DouyinObservationScript
             const urls=[];
             const push=v=>{
               if(typeof v==='string' && /^https?:/i.test(v) &&
-                 (/\.(jpg|jpeg|png|webp)([?#]|$)/i.test(v) || /(?:byteimg|douyinpic).*\/(?:tos-|obj\/|image)/i.test(v)))
+                 /(?:byteimg|douyinpic)/i.test(v) &&
+                 /(?:aweme-images|biz_tag=aweme_images|\/tos-cn-i-|\/tos-|obj\/)/i.test(v) &&
+                 !/avatar|emoji|badge|logo|cover_thumb|thumbnail/i.test(v))
                 urls.push(v);
               else if(v&&typeof v==='object'){
                 for(const k of ['urlList','url_list','download_url_list','display_image','origin','url']){
@@ -192,8 +194,10 @@ internal static class DouyinObservationScript
             const urls=[];
             const push=v=>{
               if(typeof v!=='string' || !/^https?:/i.test(v)) return;
-              if(!/(?:byteimg|douyinpic)/i.test(v) && !/\.(jpg|jpeg|png|webp)([?#]|$)/i.test(v)) return;
-              if(/avatar|emoji|emoticon|badge|logo|\/aweme-avatar\//i.test(v)) return;
+              // Note album stills are signed douyinpic/byteimg aweme-images — not site chrome on douyinstatic.
+              if(!/(?:byteimg|douyinpic)/i.test(v)) return;
+              if(!/(?:aweme-images|biz_tag=aweme_images|\/tos-cn-i-)/i.test(v)) return;
+              if(/avatar|emoji|emoticon|badge|logo|\/aweme-avatar\/|cover_thumb|thumbnail/i.test(v)) return;
               urls.push(v.split(' ')[0]);
             };
             for(const el of document.querySelectorAll('img')){
@@ -233,7 +237,7 @@ internal static class DouyinObservationScript
                 if(now-(window.__vdAlbumAdvance.last||0)<280) return;
                 const pager=readAlbumPagerTotal();
                 const have=collectDomAlbumImageUrls().length;
-                if(pager>0 && have>=pager && window.__vdAlbumAdvance.clicks>0) return;
+                if(pager>0 && (have>=pager || window.__vdAlbumAdvance.clicks>=pager+2)) return;
                 if(window.__vdAlbumAdvance.clicks>=60) return;
                 if(clickAlbumNext()){
                   window.__vdAlbumAdvance.last=now;

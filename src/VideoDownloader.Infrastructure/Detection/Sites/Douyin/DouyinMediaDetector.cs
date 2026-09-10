@@ -441,6 +441,9 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             }
 
             var audio = SelectBest(_session.AudioCandidates);
+            var images = _session.AlbumImages.OrderBy(i => i.Index).ToArray();
+            if (_session.ExpectedAlbumImageCount is int take && take > 0 && images.Length > take)
+                images = images.Take(take).ToArray();
             return new MediaDescriptor(
                 SiteIds.Douyin,
                 page,
@@ -448,7 +451,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 MediaContentType.Album,
                 null,
                 audio,
-                _session.AlbumImages.OrderBy(i => i.Index).ToArray(),
+                images,
                 ctx,
                 Confidence: 0.9,
                 DisplayTitle: _session.Caption)
@@ -613,7 +616,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                     if (item.ValueKind != JsonValueKind.String) continue;
                     var raw = item.GetString();
                     if (!Uri.TryCreate(raw, UriKind.Absolute, out var url)) continue;
-                    if (IsExcludedAlbumImage(url)) continue;
+                    if (!IsLikelyAlbumImage(url, null) || IsExcludedAlbumImage(url)) continue;
                     list.Add(new AlbumImageItem(
                         index++,
                         url,
@@ -674,12 +677,16 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                     }
 
                     _session.AlbumImages.Clear();
-                    _session.AlbumImages.AddRange(merged);
-
                     if (_session.DeclaredAlbumImageCount is int want && want > 0)
+                    {
                         _session.ExpectedAlbumImageCount = want;
+                        if (merged.Count > want)
+                            merged = merged.Take(want).Select((img, i) => img with { Index = i }).ToList();
+                    }
                     else
-                        _session.ExpectedAlbumImageCount = _session.AlbumImages.Count;
+                        _session.ExpectedAlbumImageCount = merged.Count;
+
+                    _session.AlbumImages.AddRange(merged);
                 }
             }
 
@@ -756,6 +763,10 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
     {
         if (!IsLikelyAlbumImage(e.Url, e.MimeType)) return;
         if (IsExcludedAlbumImage(e.Url)) return;
+        if (_session.DeclaredAlbumImageCount is int declaredCap &&
+            declaredCap > 0 &&
+            _session.AlbumImages.Count >= declaredCap)
+            return;
         if (_session.AlbumImages.Any(i =>
                 string.Equals(
                     i.Url.GetLeftPart(UriPartial.Path),
@@ -1078,18 +1089,25 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 
     private static bool IsLikelyAlbumImage(Uri url, string? mime)
     {
-        if (mime?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) == true)
-            return true;
-        return Regex.IsMatch(url.AbsolutePath, @"\.(?:jpg|jpeg|png|webp|heic|avif)(?:$|\?)", RegexOptions.IgnoreCase) ||
-               url.Host.Contains("byteimg", StringComparison.OrdinalIgnoreCase) ||
-               url.Host.Contains("douyinpic", StringComparison.OrdinalIgnoreCase);
+        // Album stills: signed douyinpic/byteimg aweme-images. Reject site chrome on douyinstatic.
+        var full = url.AbsoluteUri;
+        if (url.Host.Contains("douyinstatic", StringComparison.OrdinalIgnoreCase) &&
+            !url.Host.Contains("douyinpic", StringComparison.OrdinalIgnoreCase) &&
+            !url.Host.Contains("byteimg", StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (!url.Host.Contains("douyinpic", StringComparison.OrdinalIgnoreCase) &&
+            !url.Host.Contains("byteimg", StringComparison.OrdinalIgnoreCase))
+            return false;
+        return Regex.IsMatch(full, @"aweme-images|biz_tag=aweme_images|/tos-cn-i-", RegexOptions.IgnoreCase) ||
+               (mime?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) == true &&
+                Regex.IsMatch(url.AbsolutePath, @"\.(?:jpg|jpeg|png|webp)(?:$|\?)", RegexOptions.IgnoreCase));
     }
 
     private static bool IsExcludedAlbumImage(Uri url)
     {
         var full = url.AbsoluteUri;
         return Regex.IsMatch(full,
-            @"avatar|emoji|emoticon|badge|logo|sprite|icon|favicon|cover_thumb|(?:^|[?&_/])thumbnail(?:[?&_/]|$)|aweme-image-basic",
+            @"avatar|emoji|emoticon|badge|logo|sprite|icon|favicon|cover_thumb|(?:^|[?&_/])thumbnail(?:[?&_/]|$)|aweme-image-basic|lf-douyin-pc-web",
             RegexOptions.IgnoreCase);
     }
 
