@@ -197,10 +197,25 @@ public sealed class HttpMediaDownloader
             if (response.StatusCode == HttpStatusCode.PartialContent &&
                 job.TotalBytes is long total && offset < total)
             {
-                if (offset <= previousOffset)
+                var softMedia = variant.Tracks.Count > 0 &&
+                                variant.Tracks.All(t => t.Kind is MediaTrackKind.Image or MediaTrackKind.Audio);
+                // Album CDNs frequently advertise a large Content-Range length, then close after a
+                // short 206 body. Accept the received object instead of looping into no-progress.
+                if (softMedia && offset >= 8 * 1024)
+                {
+                    _logger.LogWarning(
+                        "Soft-media 206 ended early (got {Got} of {Total}); accepting album/BGM object",
+                        offset,
+                        total);
+                    job.TotalBytes = offset;
+                }
+                else if (offset <= previousOffset)
                     throw new DownloadException(ErrorCodes.IncompleteDownload, "Partial response made no progress.");
-                redirects = 0;
-                continue;
+                else
+                {
+                    redirects = 0;
+                    continue;
+                }
             }
             EnsureDownloadLooksComplete(job, offset);
             await FinalizeDownloadAsync(job, partPath, ct);
