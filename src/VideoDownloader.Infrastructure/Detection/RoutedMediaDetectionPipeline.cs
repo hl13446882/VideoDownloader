@@ -72,6 +72,25 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
         }
     }
 
+    /// <summary>Active exclusive detector content id (Douyin aweme id), if any.</summary>
+    public string? ActiveExclusiveContentId
+    {
+        get
+        {
+            lock (_gate)
+                return _active?.ActiveContentId;
+        }
+    }
+
+    public string? ActiveExclusiveFailureReason
+    {
+        get
+        {
+            lock (_gate)
+                return _active?.FailureReason;
+        }
+    }
+
     public event EventHandler<DetectedVideo>? VideoDetected;
     public event EventHandler<DetectedVideo>? VideoUpdated;
     public event EventHandler<IReadOnlyList<DetectedVideo>>? PageProbed;
@@ -255,6 +274,14 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
             }
         }
 
+        // Do not seal the session after exclusive failure — Phase=Completed would make
+        // IsCompleted true with zero variants and block late yt-dlp emits from helping settle.
+        if (exclusive.Failed)
+        {
+            HangProbe.Mark("route.complete.end", "exclusiveFailed-noSessionSeal");
+            return;
+        }
+
         // Best-effort seal; never block forever on open discovery leases.
         try
         {
@@ -426,10 +453,16 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
                 .Select(d => MediaDescriptorMapper.ToDetectedVideo(d, _session.Id))
                 .ToList();
             _lastBuilt = videos;
+            // Late exclusive emit (e.g. TikTok yt-dlp after empty Complete) must latch completed
+            // so settle loops see hasMedia + IsCompleted together.
+            if (videos.Count > 0)
+                _exclusiveCompleted = true;
         }
 
         foreach (var video in videos)
             VideoDetected?.Invoke(this, video);
+        if (videos.Count > 0)
+            PageProbed?.Invoke(this, videos);
     }
 
     private sealed class ExclusiveScope(RoutedMediaDetectionPipeline owner, Guid sessionId, IDisposable lease) : IDiscoveryScope

@@ -367,6 +367,8 @@ public sealed partial class MainViewModel : ObservableObject
     private bool _forceReplaceResults;
     private string? _statusKey;
     private object[]? _statusArgs;
+    /// <summary>Douyin feed→detail boost already attempted for this aweme id (avoid loops).</summary>
+    private string? _douyinDetailBoostId;
 
     public ObservableCollection<AddressPreset> AddressPresets { get; } = new();
 
@@ -1031,6 +1033,8 @@ public sealed partial class MainViewModel : ObservableObject
             // Douyin /note/ albums need extra time to click-through slides (e.g. 4/17).
             var isDouyinNote = pageUrl.Host.Contains("douyin", StringComparison.OrdinalIgnoreCase) &&
                                pageUrl.AbsolutePath.Contains("/note/", StringComparison.OrdinalIgnoreCase);
+            var isDouyin = pageUrl.Host.Contains("douyin", StringComparison.OrdinalIgnoreCase) ||
+                           pageUrl.Host.Contains("iesdouyin", StringComparison.OrdinalIgnoreCase);
             var isExclusiveHost = IsExclusiveHost(pageUrl);
             var isYouTubeWatch =
                 (pageUrl.Host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) &&
@@ -1108,6 +1112,7 @@ public sealed partial class MainViewModel : ObservableObject
             // REDUNDANT(pending-delete after confirm): site-agnostic settle paid by exclusive hosts.
             // await Task.Delay(isDouyinNote ? TimeSpan.FromSeconds(5) : TimeSpan.FromSeconds(3), token);
             var settle = isDouyinNote ? TimeSpan.FromSeconds(5)
+                : isDouyin ? TimeSpan.FromSeconds(2)
                 : isYtDlpExclusive ? TimeSpan.FromMilliseconds(400)
                 : isExclusiveHost ? TimeSpan.FromSeconds(1.2)
                 : TimeSpan.FromSeconds(3);
@@ -1123,11 +1128,14 @@ public sealed partial class MainViewModel : ObservableObject
             {
                 // REDUNDANT(pending-delete after confirm): graceLimit = isDouyinNote ? 10 : 6;
                 var graceLimit = isDouyinNote ? 10
+                    : isDouyin ? 8
                     : isYtDlpExclusive ? 2
                     : isExclusiveHost ? 4
                     : 6;
                 // REDUNDANT(pending-delete after confirm): graceGap always 1.5s
-                var graceGap = isYtDlpExclusive ? TimeSpan.FromMilliseconds(600) : TimeSpan.FromSeconds(1.5);
+                var graceGap = isYtDlpExclusive ? TimeSpan.FromMilliseconds(600)
+                    : isDouyin ? TimeSpan.FromSeconds(1.2)
+                    : TimeSpan.FromSeconds(1.5);
                 for (var grace = 0; grace < graceLimit; grace++)
                 {
                     if (generation != _pageGeneration || token.IsCancellationRequested)
@@ -1178,6 +1186,7 @@ public sealed partial class MainViewModel : ObservableObject
             // short re-probe/complete cycles without starting a brand-new page generation.
             // REDUNDANT(pending-delete after confirm): lateLimit = isDouyinNote ? 8 : 4;
             var lateLimit = isDouyinNote ? 8
+                : isDouyin ? 6
                 : isYtDlpExclusive ? 1
                 : isExclusiveHost ? 2
                 : 4;
@@ -1192,6 +1201,7 @@ public sealed partial class MainViewModel : ObservableObject
                 // REDUNDANT(pending-delete after confirm): Delay(isDouyinNote ? 2.5 : 2)
                 await Task.Delay(
                     isDouyinNote ? TimeSpan.FromSeconds(2.5)
+                    : isDouyin ? TimeSpan.FromSeconds(2)
                     : isYtDlpExclusive ? TimeSpan.FromMilliseconds(800)
                     : TimeSpan.FromSeconds(2),
                     token);
@@ -1210,6 +1220,19 @@ public sealed partial class MainViewModel : ObservableObject
                 HangProbe.Mark("vm.lateRetry.end", $"i={late} videos={DetectedVideos.Count}");
             }
 
+            // Douyin feed often only has unverified web-prime; open the stable detail page once
+            // so network/zjcdn progressive can be collected (navigation starts a fresh session).
+            if (isDouyin && generation == _pageGeneration && !token.IsCancellationRequested)
+            {
+                var haveFinal = false;
+                await Application.Current.Dispatcher.InvokeAsync(() => haveFinal = DetectedVideos.Count > 0);
+                if (!haveFinal && await TryBoostDouyinDetailAsync(pageUrl, token))
+                {
+                    HangProbe.Mark("vm.session.end", "douyin-detail-boost");
+                    return;
+                }
+            }
+
             await Application.Current.Dispatcher.InvokeAsync(() =>
             {
                 if (generation != _pageGeneration)
@@ -1222,6 +1245,9 @@ public sealed partial class MainViewModel : ObservableObject
 
                 var pipeline = _pipeline as VideoDownloader.Infrastructure.Detection.UnifiedMediaPipeline;
                 var hint = pipeline?.LastValidationError ?? pipeline?.LastExternalError;
+                if (_pipeline is RoutedMediaDetectionPipeline routedHint &&
+                    !string.IsNullOrWhiteSpace(routedHint.ActiveExclusiveFailureReason))
+                    hint ??= routedHint.ActiveExclusiveFailureReason;
                 if (string.IsNullOrWhiteSpace(hint))
                     SetStatusKey("status.probeEmpty");
                 else
@@ -1248,6 +1274,85 @@ public sealed partial class MainViewModel : ObservableObject
                     _detectionRunning = false;
             }
         }
+    }
+
+    /// <summary>
+    /// Navigate feed → /video/{awemeId} once so discovery can collect durable progressive.
+    /// Returns true when navigation was kicked off (caller must not report probeEmpty).
+    /// </summary>
+    private async Task<bool> TryBoostDouyinDetailAsync(Uri pageUrl, CancellationToken token)
+    {
+        var contentId = (_pipeline as RoutedMediaDetectionPipeline)?.ActiveExclusiveContentId
+                        ?? TryExtractDouyinAwemeId(pageUrl);
+        if (string.IsNullOrWhiteSpace(contentId) || !contentId.All(char.IsDigit))
+            return false;
+
+        if (string.Equals(_douyinDetailBoostId, contentId, StringComparison.Ordinal))
+        {
+            HangProbe.Mark("vm.douyin.detailBoost.skip", "already-boosted");
+            return false;
+        }
+
+        var detailPath = "/video/" + contentId;
+        if (pageUrl.AbsolutePath.Contains(detailPath, StringComparison.OrdinalIgnoreCase))
+        {
+            HangProbe.Mark("vm.douyin.detailBoost.skip", "already-on-detail");
+            return false;
+        }
+
+        var host = SelectedTab?.Host;
+        if (host is null)
+            return false;
+
+        _douyinDetailBoostId = contentId;
+        var detail = new Uri("https://www.douyin.com/video/" + Uri.EscapeDataString(contentId));
+        HangProbe.Mark("vm.douyin.detailBoost", contentId);
+        await Application.Current.Dispatcher.InvokeAsync(() => SetStatusKey("status.probeRunning"));
+        try
+        {
+            await host.NavigateAsync(detail.AbsoluteUri, token);
+        }
+        catch (Exception ex)
+        {
+            HangProbe.Mark("vm.douyin.detailBoost.fail", ex.GetType().Name);
+            _douyinDetailBoostId = null;
+            return false;
+        }
+
+        // PageIdentityChanged starts a fresh detection session on the detail URL.
+        return true;
+    }
+
+    private static string? TryExtractDouyinAwemeId(Uri pageUrl)
+    {
+        var path = pageUrl.AbsolutePath;
+        var videoIdx = path.IndexOf("/video/", StringComparison.OrdinalIgnoreCase);
+        if (videoIdx >= 0)
+        {
+            var start = videoIdx + "/video/".Length;
+            var end = start;
+            while (end < path.Length && char.IsDigit(path[end]))
+                end++;
+            if (end > start)
+                return path[start..end];
+        }
+
+        foreach (var part in pageUrl.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var eq = part.IndexOf('=');
+            if (eq <= 0)
+                continue;
+            var key = part[..eq];
+            if (!key.Equals("modal_id", StringComparison.OrdinalIgnoreCase) &&
+                !key.Equals("aweme_id", StringComparison.OrdinalIgnoreCase) &&
+                !key.Equals("item_id", StringComparison.OrdinalIgnoreCase))
+                continue;
+            var value = Uri.UnescapeDataString(part[(eq + 1)..]);
+            if (value.Length > 0 && value.All(char.IsDigit))
+                return value;
+        }
+
+        return null;
     }
 
     private async Task RunPagePassAsync(

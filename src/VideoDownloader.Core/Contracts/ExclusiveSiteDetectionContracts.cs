@@ -44,6 +44,9 @@ public interface IExclusiveSiteMediaDetector
     bool Failed { get; }
     string? FailureReason { get; }
 
+    /// <summary>Current work content id when known (e.g. Douyin aweme id).</summary>
+    string? ActiveContentId => null;
+
     event EventHandler<IReadOnlyList<MediaDescriptor>>? DescriptorsReady;
 }
 
