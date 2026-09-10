@@ -3,48 +3,51 @@ using VideoDownloader.Core.Models;
 namespace VideoDownloader.Core.Contracts;
 
 /// <summary>
-/// Rolling success rates for exclusive-detector probe methods.
-/// Used to reorder probing (highest probability first) and to write the per-round stats document.
+/// Per-detector probe-method success ledger.
+/// Rates are NEVER shared across detectors (抖音 ≠ B站 ≠ YouTube ≠ TikTok).
 /// </summary>
 public interface IProbeMethodStats
 {
-    void Record(string siteId, string method, bool success);
+    /// <param name="detectorId">Exclusive detector id — use <see cref="SiteIds"/> values (youtube/bilibili/douyin/tiktok).</param>
+    void Record(string detectorId, string method, bool success);
 
-    double SuccessRate(string siteId, string method);
+    double SuccessRate(string detectorId, string method);
 
-    int Attempts(string siteId, string method);
+    int Attempts(string detectorId, string method);
 
-    int Successes(string siteId, string method);
+    int Successes(string detectorId, string method);
 
-    /// <summary>Stable order: highest success rate first; ties keep input order.</summary>
-    IReadOnlyList<T> OrderBySuccessRate<T>(string siteId, IReadOnlyList<T> items, Func<T, string> methodOf);
+    /// <summary>Reorder methods within one detector only.</summary>
+    IReadOnlyList<T> OrderBySuccessRate<T>(string detectorId, IReadOnlyList<T> items, Func<T, string> methodOf);
 
-    /// <summary>True when yt-dlp historically beats network/browser/dom for this site.</summary>
-    bool PreferYtdlpFirst(string siteId);
+    /// <summary>Within this detector, whether yt-dlp historically beats that detector's network/browser/dom methods.</summary>
+    bool PreferYtdlpFirst(string detectorId);
 
-    string? LastWinningMethod(string siteId);
+    string? LastWinningMethod(string detectorId);
 
     IReadOnlyList<ProbeMethodStatRow> Snapshot();
 
-    /// <summary>Append one acceptance/test round into the living markdown + JSON history.</summary>
+    /// <summary>Rewrite the living per-detector markdown + append round JSON.</summary>
     void CommitRound(string runId, IReadOnlyList<ProbeMethodRoundEntry> entries, string? markdownDocPath = null, string? historyDir = null);
 }
 
 public sealed record ProbeMethodStatRow(
-    string SiteId,
+    string DetectorId,
+    string DetectorName,
     string Method,
     int Attempts,
     int Successes,
     double Rate);
 
 public sealed record ProbeMethodRoundEntry(
-    string SiteId,
+    string DetectorId,
     string? Address,
     string? WinningMethod,
     bool Pass,
     int? DiscoveryMs,
     IReadOnlyList<string>? InvalidProbes);
 
+/// <summary>Canonical method names — always recorded under a specific detector id.</summary>
 public static class ProbeMethods
 {
     public const string YtDlp = "ytdlp";
@@ -76,4 +79,77 @@ public static class ProbeMethods
             _ when browserObserved => BrowserPlay,
             _ => NetworkCdn
         };
+}
+
+/// <summary>Exclusive detectors and the method sets that belong to each one.</summary>
+public static class ProbeDetectors
+{
+    public static readonly string[] All =
+    [
+        SiteIds.YouTube,
+        SiteIds.Bilibili,
+        SiteIds.Douyin,
+        SiteIds.TikTok
+    ];
+
+    public static string DisplayName(string detectorId) => detectorId switch
+    {
+        SiteIds.YouTube => "YouTube 探测器",
+        SiteIds.Bilibili => "B站 探测器",
+        SiteIds.Douyin => "抖音 探测器",
+        SiteIds.TikTok => "TikTok 探测器",
+        SiteIds.Generic => "通用探测器",
+        _ => detectorId + " 探测器"
+    };
+
+    /// <summary>Methods that exist for this detector (used for docs + PreferYtdlpFirst).</summary>
+    public static IReadOnlyList<string> MethodsOf(string detectorId) => detectorId switch
+    {
+        SiteIds.YouTube =>
+        [
+            ProbeMethods.YtDlp,
+            ProbeMethods.NetworkCdn,
+            ProbeMethods.BrowserPlay,
+            ProbeMethods.DomObservation,
+            ProbeMethods.YtDlpClient("android,web"),
+            ProbeMethods.YtDlpClient("ios,web"),
+            ProbeMethods.YtDlpClient("web"),
+            ProbeMethods.YtDlpClient("tv_embedded"),
+            ProbeMethods.YtDlpClient(null)
+        ],
+        SiteIds.Bilibili =>
+        [
+            ProbeMethods.YtDlp,
+            ProbeMethods.NetworkCdn,
+            ProbeMethods.BrowserPlay,
+            ProbeMethods.DomObservation
+        ],
+        SiteIds.Douyin =>
+        [
+            // Douyin has no yt-dlp path — only network/DOM/album.
+            ProbeMethods.NetworkCdn,
+            ProbeMethods.BrowserPlay,
+            ProbeMethods.DomObservation,
+            ProbeMethods.AlbumImages
+        ],
+        SiteIds.TikTok =>
+        [
+            ProbeMethods.YtDlp,
+            ProbeMethods.NetworkCdn,
+            ProbeMethods.BrowserPlay,
+            ProbeMethods.DomObservation,
+            ProbeMethods.AlbumImages,
+            ProbeMethods.YtDlpUrl("embed"),
+            ProbeMethods.YtDlpUrl("canonical")
+        ],
+        _ =>
+        [
+            ProbeMethods.NetworkCdn,
+            ProbeMethods.BrowserPlay,
+            ProbeMethods.DomObservation
+        ]
+    };
+
+    public static bool HasYtDlp(string detectorId) =>
+        MethodsOf(detectorId).Contains(ProbeMethods.YtDlp, StringComparer.Ordinal);
 }

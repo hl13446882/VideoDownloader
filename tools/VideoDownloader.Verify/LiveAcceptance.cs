@@ -537,24 +537,24 @@ public partial class MainWindow
                             .Select(v=>(v.Height,v.Container,v.VideoCodec)).Distinct().Count()??0);
                     var requiresLadder=video?.SiteId is SiteIds.YouTube or SiteIds.Bilibili;
                     var formatsOk=requiresLadder ? formatCount>1 : formatCount>0 || preferred?.Tracks.Any(t=>t.Kind==MediaTrackKind.Image)==true;
-                    var siteId=video?.SiteId
+                    var detectorId=video?.SiteId
                         ?? (uri.Host.Contains("youtube",StringComparison.OrdinalIgnoreCase)||uri.Host.Contains("youtu.be",StringComparison.OrdinalIgnoreCase) ? SiteIds.YouTube
                         : uri.Host.Contains("bilibili",StringComparison.OrdinalIgnoreCase)||uri.Host.Contains("b23.tv",StringComparison.OrdinalIgnoreCase) ? SiteIds.Bilibili
                         : uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase) ? SiteIds.TikTok
                         : uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase) ? SiteIds.Douyin
                         : SiteIds.Generic);
-                    var winningMethod=probeStats.LastWinningMethod(siteId)
+                    var winningMethod=probeStats.LastWinningMethod(detectorId)
                         ?? (video is null ? null : InferWinningMethod(video));
                     var pass=discoveryOk && completed && sampleOk && stable && switched && captionOk && uniqueIdentity && cardCountOk && noDuplicateAudio && metadataOk && formatsOk;
                     if(!pass)
-                        Log($"LIVE gate {uri.Host} #{step+1}: discoveryOk={discoveryOk}/{discoveryMs}ms completed={completed} sampleOk={sampleOk} stable={stable} switched={switched} caption={captionOk} unique={uniqueIdentity} cards={cardCount}/{cardCountOk} noDupAudio={noDuplicateAudio} metadata={metadataOk} formats={formatCount}/{formatsOk} method={winningMethod} invalid=[{string.Join(",", invalidProbes)}]");
+                        Log($"LIVE gate {uri.Host} #{step+1}: discoveryOk={discoveryOk}/{discoveryMs}ms completed={completed} sampleOk={sampleOk} stable={stable} switched={switched} caption={captionOk} unique={uniqueIdentity} cards={cardCount}/{cardCountOk} noDupAudio={noDuplicateAudio} metadata={metadataOk} formats={formatCount}/{formatsOk} detector={detectorId} method={winningMethod} invalid=[{string.Join(",", invalidProbes)}]");
                     var diagnostic=pass ? null : await WebView.CoreWebView2.ExecuteScriptAsync("(()=>{let e=[...document.querySelectorAll('video')].find(e=>{let r=e.getBoundingClientRect();return r.bottom>0&&r.top<innerHeight;});const rows=[];for(let i=0;e&&i<14;i++,e=e.parentElement){const k=Object.keys(e).find(k=>k.startsWith('__reactProps$'));const p=k?e[k]:{};rows.push({tag:e.tagName,attrs:[...e.attributes].map(a=>[a.name,a.value]),props:Object.keys(p||{}),itemKeys:Object.keys(p?.item||p?.itemInfo||p?.data||{}),src:e.currentSrc});}return JSON.stringify(rows);})()");
                     allPassed &= pass;
                     _mainVm.SelectedTab.Host.MediaSessionChanged-=Switched;
                     await using(var image=File.Create(Path.Combine(reportDir,$"{ordinal:00}.png")))
                         await WebView.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png,image);
                     var record=new {
-                        runId,ordinal,address,finalPage,step=step+1,pass,siteId,winningMethod,discoveryOk,discoveryMs,discoveryTimedOut,invalidProbes,completed,stable,switched,switches,captionOk,uniqueIdentity,
+                        runId,ordinal,address,finalPage,step=step+1,pass,detectorId,detectorName=ProbeDetectors.DisplayName(detectorId),siteId=detectorId,winningMethod,discoveryOk,discoveryMs,discoveryTimedOut,invalidProbes,completed,stable,switched,switches,captionOk,uniqueIdentity,
                         identity,session,cardCount,cardCountOk,noDuplicateAudio,metadataOk,formatCount,formatsOk,title=video?.DisplayTitle,captionSource=video is null?null:"player-or-probe",
                         heights=video?.Variants.Select(v=>v.Height).Distinct().ToArray(),
                         variants=video?.Variants.Select(v=>new{v.Height,v.VariantId,v.Container,tracks=v.Tracks.Select(t=>new{t.Kind,t.TrackId,t.SourceUrl})}),
@@ -790,7 +790,7 @@ public partial class MainWindow
                 return arr.EnumerateArray().Select(x=>x.GetString()??"").Where(x=>x.Length>0).ToArray();
             }
             entries.Add(new ProbeMethodRoundEntry(
-                Get("siteId")??SiteIds.Generic,
+                Get("detectorId")??Get("siteId")??SiteIds.Generic,
                 Get("address"),
                 Get("winningMethod"),
                 Pass(),
