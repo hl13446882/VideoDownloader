@@ -165,10 +165,10 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 (string.IsNullOrWhiteSpace(_caption) || _caption is "视频"))
                 _caption = pageTitle.Trim();
             ApplyJson(pageScriptJson);
-            // Prefer concrete /video/{id} for yt-dlp (feed root is weak).
+            // Prefer embed/v2/{id} for yt-dlp — bare /video/{id} redirects to TikTok 404.
             resolveUrl = contentId is null
                 ? _pageUrl
-                : new Uri($"https://www.tiktok.com/video/{contentId}");
+                : new Uri($"https://www.tiktok.com/embed/v2/{contentId}");
             enriched = _context;
         }
 

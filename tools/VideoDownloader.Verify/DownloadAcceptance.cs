@@ -71,11 +71,11 @@ public partial class MainWindow
                 {
                     var id = identity[3..];
                     var detail = isTikTok
-                        ? new Uri($"https://www.tiktok.com/video/{Uri.EscapeDataString(id)}")
+                        ? new Uri($"https://www.tiktok.com/embed/v2/{Uri.EscapeDataString(id)}")
                         : new Uri($"https://www.douyin.com/video/{Uri.EscapeDataString(id)}");
                     Log($"LIVE download #{ordinal}: open detail for fresh CDN {detail}");
                     WebView.CoreWebView2.Navigate(detail.AbsoluteUri);
-                    var detailDeadline = DateTime.UtcNow.AddSeconds(50);
+                    var detailDeadline = DateTime.UtcNow.AddSeconds(isTikTok ? 35 : 50);
                     MediaVariant? pick = null;
                     while (DateTime.UtcNow < detailDeadline)
                     {
@@ -98,6 +98,9 @@ public partial class MainWindow
                         // Keep waiting when length is still unknown — CDN headers often arrive late.
                         if (pick is not null && pick.TotalContentLength is null &&
                             DateTime.UtcNow > detailDeadline - TimeSpan.FromSeconds(12))
+                            break;
+                        // TikTok embed often yields durable hosts even without ContentLength yet.
+                        if (isTikTok && pick is not null)
                             break;
                         pick = null;
                     }

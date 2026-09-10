@@ -291,16 +291,20 @@ public partial class MainWindow
                         if(albumOk || (selected is not null && MediaVariantReconciler.HasCompleteAudio(selected)))
                             sampleOk &= anyTrackOk || tracks.All(t=>t.Kind==MediaTrackKind.Image);
 
-                        // Douyin DomObserved playAddr often 403s on bare sample GET but downloads
-                        // with WebView cookies — allow the engine proof gate to decide.
+                        // Douyin/TikTok DomObserved playAddr often 403/404 on bare sample GET but
+                        // downloads with WebView cookies — allow the engine proof gate to decide.
                         if(!sampleOk && selected is not null &&
-                           uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase) &&
-                           selected.Tracks.Any(t=>t.Evidence==MediaEvidence.DomObserved &&
-                                                  t.Kind==MediaTrackKind.Combined &&
-                                                  (t.SourceUrl.Host.Contains("douyinvod",StringComparison.OrdinalIgnoreCase) ||
-                                                   t.SourceUrl.Host.Contains("zjcdn",StringComparison.OrdinalIgnoreCase) ||
-                                                   t.SourceUrl.Host.Contains("bytecdn",StringComparison.OrdinalIgnoreCase) ||
-                                                   t.SourceUrl.AbsolutePath.Contains("/video/tos/",StringComparison.OrdinalIgnoreCase))))
+                           (uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase) ||
+                            uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase)) &&
+                           selected.Tracks.Any(t=>
+                               t.Kind is MediaTrackKind.Combined or MediaTrackKind.Video &&
+                               (t.Evidence is MediaEvidence.DomObserved or MediaEvidence.BrowserObserved ||
+                                t.SourceUrl.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase) ||
+                                t.SourceUrl.Host.Contains("byteoversea",StringComparison.OrdinalIgnoreCase) ||
+                                t.SourceUrl.Host.Contains("douyinvod",StringComparison.OrdinalIgnoreCase) ||
+                                t.SourceUrl.Host.Contains("zjcdn",StringComparison.OrdinalIgnoreCase) ||
+                                t.SourceUrl.Host.Contains("bytecdn",StringComparison.OrdinalIgnoreCase) ||
+                                t.SourceUrl.AbsolutePath.Contains("/video/tos/",StringComparison.OrdinalIgnoreCase))))
                         {
                             samples.Add("dom-observed: defer sample gate to engine-download with cookies");
                             sampleOk=true;
@@ -314,14 +318,18 @@ public partial class MainWindow
                             samples.Add("engine-download: "+proof.Note);
                             sampleOk &= proof.Ok;
                             // Detail-nav download leaves the feed; re-land before the next swipe.
-                            if(feed && uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase))
+                            if(feed && (uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase) ||
+                                        uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase)))
                             {
                                 try
                                 {
                                     WebView.CoreWebView2.Navigate(address);
                                     await Task.Delay(3500);
-                                    Log("Recommendation re-land="+await WebView.CoreWebView2.ExecuteScriptAsync("(()=>{const a=[...document.querySelectorAll('a,button,[role=link]')].find(e=>e.textContent.trim()==='推荐');if(a){a.click();return 'clicked 推荐';}return location.href;})()"));
-                                    await Task.Delay(2500);
+                                    if(uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        Log("Recommendation re-land="+await WebView.CoreWebView2.ExecuteScriptAsync("(()=>{const a=[...document.querySelectorAll('a,button,[role=link]')].find(e=>e.textContent.trim()==='推荐');if(a){a.click();return 'clicked 推荐';}return location.href;})()"));
+                                        await Task.Delay(2500);
+                                    }
                                     await SkipNonVideoPostsAsync();
                                 }
                                 catch(Exception ex){ Log("feed re-land skipped: "+ex.GetType().Name); }

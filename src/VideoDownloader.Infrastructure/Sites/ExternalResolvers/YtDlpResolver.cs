@@ -349,6 +349,27 @@ public sealed class YtDlpResolver : IExternalSiteResolver
             }
         }
 
+        // TikTok bare /video/{id} (no @user) redirects to 404; embed/v2 yields durable CDN.
+        if (pageUrl.Host.Contains("tiktok", StringComparison.OrdinalIgnoreCase))
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(
+                pageUrl.AbsolutePath, @"/(?:embed/v2/|video/)(?<id>\d{10,})",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (m.Success)
+                return $"https://www.tiktok.com/embed/v2/{m.Groups["id"].Value}";
+            foreach (var part in pageUrl.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var idx = part.IndexOf('=');
+                if (idx <= 0) continue;
+                var key = part[..idx];
+                var value = Uri.UnescapeDataString(part[(idx + 1)..]);
+                if ((key.Equals("item_id", StringComparison.OrdinalIgnoreCase) ||
+                     key.Equals("aweme_id", StringComparison.OrdinalIgnoreCase)) &&
+                    System.Text.RegularExpressions.Regex.IsMatch(value, @"^\d{10,}$"))
+                    return $"https://www.tiktok.com/embed/v2/{value}";
+            }
+        }
+
         var builder = new UriBuilder(pageUrl) { Fragment = string.Empty };
         return builder.Uri.AbsoluteUri;
     }
