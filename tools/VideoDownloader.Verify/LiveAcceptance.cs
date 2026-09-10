@@ -141,13 +141,22 @@ public partial class MainWindow
                         // Douyin signed playAddr expires while waiting — seal as soon as we have media.
                         // Prefer zjcdn when already present, but do not burn the URL waiting for it.
                         var hasZjcdn=detected?.Variants.Any(v=>v.SourceUrl.Host.Contains("zjcdn",StringComparison.OrdinalIgnoreCase))==true;
+                        var isTikTokFeed=feed && uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase);
                         if(changed && hasMedia &&
                            (pipeline.IsCompleted || DateTime.UtcNow>deadline-TimeSpan.FromSeconds(20)))
                             break;
-                        if(changed && pipeline.IsCompleted && !string.IsNullOrWhiteSpace(_mainVm.SelectedTab.Host.CurrentMediaSessionKey) &&
+                        // TikTok feed: never seal on completed-without-media — wait for CDN/yt-dlp.
+                        if(!isTikTokFeed &&
+                           changed && pipeline.IsCompleted && !string.IsNullOrWhiteSpace(_mainVm.SelectedTab.Host.CurrentMediaSessionKey) &&
                            (hasMedia || DateTime.UtcNow>deadline-TimeSpan.FromSeconds(8))) break;
                         if(changed && hasMedia && hasZjcdn && pipeline.IsCompleted)
                             break;
+                        if(isTikTokFeed && changed && !hasMedia && pipeline.IsCompleted &&
+                           (DateTime.UtcNow-lastProgressLog).TotalSeconds>=10)
+                        {
+                            // Failed seal with identity only — force another page pass.
+                            try { await _mainVm.SelectedTab!.Host.ProbeCurrentPageAsync(default); } catch { }
+                        }
                         if((DateTime.UtcNow-lastProgressLog).TotalSeconds>=15)
                         {
                             Log($"LIVE wait {uri.Host} #{step+1}: hasMedia={hasMedia} zjcdn={hasZjcdn} completed={pipeline.IsCompleted} session={pipeline.SessionId:N} elapsed={(DateTime.UtcNow-(deadline-TimeSpan.FromSeconds(120))).TotalSeconds:F0}s");

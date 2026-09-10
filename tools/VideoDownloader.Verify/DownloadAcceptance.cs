@@ -71,26 +71,38 @@ public partial class MainWindow
                      variant.TotalContentLength is > 0 and < 2L * 1024 * 1024))
                 {
                     var id = ttIdentity[3..];
-                    var embed = new Uri($"https://www.tiktok.com/embed/v2/{Uri.EscapeDataString(id)}");
-                    Log($"LIVE download #{ordinal}: yt-dlp embed resolve {embed} (keep feed)");
                     var resolvers = _services!.GetServices<IExternalSiteResolver>().Where(r => r.IsAvailable).ToArray();
-                    foreach (var resolver in resolvers)
+                    Uri[] attempts =
+                    [
+                        new Uri($"https://www.tiktok.com/embed/v2/{Uri.EscapeDataString(id)}"),
+                        new Uri($"https://www.tiktok.com/@tiktok/video/{Uri.EscapeDataString(id)}")
+                    ];
+                    foreach (var embed in attempts)
                     {
-                        var resolved = await resolver.ResolveAsync(embed, variant.RequestContext, default);
-                        var pick = resolved.SelectMany(v => v.Variants)
-                            .Where(MediaVariantRanking.HasVideo)
-                            .Where(v => !v.SourceUrl.Host.Contains("webapp-prime", StringComparison.OrdinalIgnoreCase) &&
-                                        !v.SourceUrl.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase))
-                            .OrderByDescending(v => v.TotalContentLength ?? 0)
-                            .ThenBy(v => v.SourceUrl.Host.Contains("tiktokcdn", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
-                            .FirstOrDefault();
-                        if (pick is not null)
+                        Log($"LIVE download #{ordinal}: yt-dlp resolve {embed} (keep feed)");
+                        foreach (var resolver in resolvers)
                         {
-                            variant = pick.WithRequestContext(variant.RequestContext);
-                            Log($"LIVE download #{ordinal}: yt-dlp CDN host={variant.SourceUrl.Host} len={variant.TotalContentLength}");
-                            break;
+                            var resolved = await resolver.ResolveAsync(embed, variant.RequestContext, default);
+                            var pick = resolved.SelectMany(v => v.Variants)
+                                .Where(MediaVariantRanking.HasVideo)
+                                .Where(v => !v.SourceUrl.Host.Contains("webapp-prime", StringComparison.OrdinalIgnoreCase) &&
+                                            !v.SourceUrl.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase))
+                                .OrderByDescending(v => v.TotalContentLength ?? 0)
+                                .ThenBy(v => v.SourceUrl.Host.Contains("tiktokcdn", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+                                .FirstOrDefault()
+                                ?? resolved.SelectMany(v => v.Variants)
+                                    .Where(MediaVariantRanking.HasVideo)
+                                    .OrderByDescending(v => v.TotalContentLength ?? 0)
+                                    .FirstOrDefault();
+                            if (pick is not null)
+                            {
+                                variant = pick.WithRequestContext(variant.RequestContext);
+                                Log($"LIVE download #{ordinal}: yt-dlp CDN host={variant.SourceUrl.Host} len={variant.TotalContentLength}");
+                                goto TikTokResolved;
+                            }
                         }
                     }
+                    TikTokResolved: ;
                 }
                 else if (isDouyin &&
                     variant.ContentIdentity is { Length: > 3 } identity &&

@@ -183,7 +183,23 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         var hasCookies = enriched.Cookies.Count > 0;
         try
         {
-            var videos = await _external.ResolveAsync(resolveUrl, enriched, ct);
+            // embed/v2 works for many items; some return Unsupported URL — fall back to @tiktok/video/{id}.
+            Uri[] resolveAttempts =
+            [
+                new Uri($"https://www.tiktok.com/embed/v2/{contentId}"),
+                new Uri($"https://www.tiktok.com/@tiktok/video/{contentId}")
+            ];
+            IReadOnlyList<DetectedVideo> videos = [];
+            foreach (var attempt in resolveAttempts)
+            {
+                videos = await _external.ResolveAsync(attempt, enriched, ct);
+                if (videos.Count > 0)
+                {
+                    resolveUrl = attempt;
+                    break;
+                }
+            }
+
             lock (_gate)
             {
                 if (videos.Count > 0 || hasCookies)
