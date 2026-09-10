@@ -156,6 +156,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 _formats.Clear();
                 _images.Clear();
                 _album = false;
+                _failed = false;
+                _failureReason = null;
                 _contentId = id;
                 _externalAttempted = false;
             }
