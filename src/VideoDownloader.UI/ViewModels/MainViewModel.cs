@@ -1032,8 +1032,61 @@ public sealed partial class MainViewModel : ObservableObject
             var isDouyinNote = pageUrl.Host.Contains("douyin", StringComparison.OrdinalIgnoreCase) &&
                                pageUrl.AbsolutePath.Contains("/note/", StringComparison.OrdinalIgnoreCase);
             var isExclusiveHost = IsExclusiveHost(pageUrl);
+            var isYouTubeWatch =
+                (pageUrl.Host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) &&
+                 pageUrl.AbsolutePath.Contains("/watch", StringComparison.OrdinalIgnoreCase) &&
+                 !string.IsNullOrWhiteSpace(pageUrl.Query) &&
+                 pageUrl.Query.Contains("v=", StringComparison.OrdinalIgnoreCase)) ||
+                pageUrl.Host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase);
             var isYtDlpExclusive = isExclusiveHost &&
                                    !pageUrl.Host.Contains("douyin", StringComparison.OrdinalIgnoreCase);
+
+            // YouTube watch: skip grace probes (they launched yt-dlp without cookies and burned 20s+).
+            // Go straight to cookied page-pass.
+            if (isYouTubeWatch)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(200), token);
+                if (generation != _pageGeneration)
+                    return;
+                await Application.Current.Dispatcher.InvokeAsync(() => SetStatusKey("status.probeRunning"));
+                HangProbe.Mark("vm.pagePass.begin", pageUrl.AbsoluteUri);
+                await RunPagePassAsync(pageUrl, pageTitle, token, generation, runExternal: true);
+                HangProbe.Mark("vm.pagePass.end", $"videos={DetectedVideos.Count}");
+
+                for (var late = 0; late < 2; late++)
+                {
+                    var have = false;
+                    await Application.Current.Dispatcher.InvokeAsync(() => have = DetectedVideos.Count > 0);
+                    if (have || generation != _pageGeneration || token.IsCancellationRequested)
+                        break;
+                    HangProbe.Mark("vm.lateRetry.begin", $"i={late}");
+                    await Task.Delay(TimeSpan.FromMilliseconds(800), token);
+                    if (generation != _pageGeneration || token.IsCancellationRequested)
+                        break;
+                    await RunPagePassAsync(pageUrl, pageTitle, token, generation, runExternal: false);
+                    HangProbe.Mark("vm.lateRetry.end", $"i={late} videos={DetectedVideos.Count}");
+                }
+
+                await Application.Current.Dispatcher.InvokeAsync(() =>
+                {
+                    if (generation != _pageGeneration)
+                        return;
+                    if (DetectedVideos.Count > 0)
+                    {
+                        SetStatusKey("status.probeDone", DetectedVideos.Count);
+                        return;
+                    }
+
+                    var pipeline = _pipeline as VideoDownloader.Infrastructure.Detection.UnifiedMediaPipeline;
+                    var hint = pipeline?.LastValidationError ?? pipeline?.LastExternalError;
+                    if (string.IsNullOrWhiteSpace(hint))
+                        SetStatusKey("status.probeEmpty");
+                    else
+                        SetStatusKey("status.probeEmptyExt", hint);
+                });
+                HangProbe.Mark("vm.session.end", $"videos={DetectedVideos.Count}");
+                return;
+            }
 
             // REDUNDANT(pending-delete after confirm): site-agnostic settle paid by exclusive hosts.
             // await Task.Delay(isDouyinNote ? TimeSpan.FromSeconds(5) : TimeSpan.FromSeconds(3), token);

@@ -64,7 +64,8 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
     {
         lock (_gate)
         {
-            if (_pageUrl is null || _failed) return Task.CompletedTask;
+            // Do not drop late CDN after a failed Complete — late-retry must still accept media.
+            if (_pageUrl is null) return Task.CompletedTask;
             if (e.StatusCode is not (200 or 206 or null)) return Task.CompletedTask;
 
             var url = e.Url;
@@ -94,6 +95,11 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
                 Evidence = IsBrowserPlay(e) ? MediaEvidence.BrowserObserved : MediaEvidence.Heuristic,
                 ContentIdentity = _contentId is null ? null : "id:" + _contentId
             });
+            if (_failed)
+            {
+                _failed = false;
+                _failureReason = null;
+            }
         }
         return Task.CompletedTask;
     }
@@ -132,19 +138,21 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
         if (string.IsNullOrWhiteSpace(contentId))
             return;
 
-        bool alreadyAttempted;
-        lock (_gate) alreadyAttempted = _externalAttempted;
-        if (!_ytdlp.IsAvailable || alreadyAttempted)
-            return;
-
         var hasCookies = enriched.Cookies.Count > 0;
+        lock (_gate)
+        {
+            if (!_ytdlp.IsAvailable || _externalAttempted)
+                return;
+            _externalAttempted = true;
+        }
+
         try
         {
             var videos = await _ytdlp.ResolveAsync(resolveUrl, enriched, ct);
             lock (_gate)
             {
-                // REDUNDANT(pending-delete after confirm): if (videos.Count > 0 || hasCookies) _externalAttempted = true;
-                _externalAttempted = true;
+                if (videos.Count == 0 && !hasCookies)
+                    _externalAttempted = false;
 
                 foreach (var v in videos)
                 {
@@ -171,6 +179,12 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
                             ContentIdentity = _contentId is null ? track.ContentIdentity : "id:" + _contentId
                         });
                 }
+
+                if (videos.Count > 0)
+                {
+                    _failed = false;
+                    _failureReason = null;
+                }
             }
         }
         catch (Exception ex)
@@ -178,8 +192,8 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
             _logger.LogInformation(ex, "Bilibili exclusive external resolve failed (no Generic fallback)");
             lock (_gate)
             {
-                // REDUNDANT(pending-delete after confirm): if (hasCookies) _externalAttempted = true;
-                _externalAttempted = true;
+                if (!hasCookies)
+                    _externalAttempted = false;
             }
         }
     }
@@ -197,6 +211,9 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
                 _logger.LogWarning("BilibiliMediaDetector Failed reason={Reason} (no Generic fallback)", _failureReason);
                 return Task.CompletedTask;
             }
+
+            _failed = false;
+            _failureReason = null;
         }
         DescriptorsReady?.Invoke(this, [d]);
         return Task.CompletedTask;

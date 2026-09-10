@@ -101,7 +101,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
     {
         lock (_gate)
         {
-            if (_pageUrl is null || _failed) return Task.CompletedTask;
+            // Do not drop late CDN after a failed Complete — late-retry must still accept media.
+            if (_pageUrl is null) return Task.CompletedTask;
             if (e.SessionId != Guid.Empty && e.SessionId != _sessionId) return Task.CompletedTask;
             if (e.StatusCode is not (200 or 206 or null)) return Task.CompletedTask;
             // Never admit HTML/document responses as TikTok media (feed often returns shells).
@@ -117,6 +118,11 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                     AddImage(e.Url, e.RequestContext);
                 else if (IsAudio(e))
                     Upsert(_audios, MakeTrack(e, MediaTrackKind.Audio));
+                if (_failed)
+                {
+                    _failed = false;
+                    _failureReason = null;
+                }
                 return Task.CompletedTask;
             }
 
@@ -133,6 +139,11 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 IsBrowserPlay(e) || LooksLikePlay(e.Url) ? MediaTrackKind.Combined : MediaTrackKind.Video;
             if (kind == MediaTrackKind.Audio) Upsert(_audios, MakeTrack(e, kind));
             else Upsert(_videos, MakeTrack(e, kind));
+            if (_failed)
+            {
+                _failed = false;
+                _failureReason = null;
+            }
         }
         return Task.CompletedTask;
     }
@@ -177,12 +188,14 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         if (string.IsNullOrWhiteSpace(contentId))
             return;
 
-        bool alreadyAttempted;
-        lock (_gate) alreadyAttempted = _externalAttempted;
-        if (!_ytdlp.IsAvailable || alreadyAttempted)
-            return;
-
         var hasCookies = enriched.Cookies.Count > 0;
+        lock (_gate)
+        {
+            if (!_ytdlp.IsAvailable || _externalAttempted)
+                return;
+            _externalAttempted = true;
+        }
+
         try
         {
             // embed/v2 works for many items; some return Unsupported URL — fall back to @tiktok/video/{id}.
@@ -196,16 +209,13 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
             {
                 videos = await _ytdlp.ResolveAsync(attempt, enriched, ct);
                 if (videos.Count > 0)
-                {
-                    resolveUrl = attempt;
                     break;
-                }
             }
 
             lock (_gate)
             {
-                // REDUNDANT(pending-delete after confirm): if (videos.Count > 0 || hasCookies) _externalAttempted = true;
-                _externalAttempted = true;
+                if (videos.Count == 0 && !hasCookies)
+                    _externalAttempted = false;
 
                 foreach (var v in videos.Where(v =>
                              string.IsNullOrWhiteSpace(_contentId) ||
@@ -240,6 +250,12 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                             });
                     }
                 }
+
+                if (videos.Count > 0)
+                {
+                    _failed = false;
+                    _failureReason = null;
+                }
             }
         }
         catch (Exception ex)
@@ -247,8 +263,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
             _logger.LogInformation(ex, "TikTok exclusive yt-dlp resolve failed (no Generic fallback)");
             lock (_gate)
             {
-                // REDUNDANT(pending-delete after confirm): if (hasCookies) _externalAttempted = true;
-                _externalAttempted = true;
+                if (!hasCookies)
+                    _externalAttempted = false;
             }
         }
     }
@@ -266,6 +282,9 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 _logger.LogWarning("TikTokMediaDetector Failed reason={Reason} (no Generic fallback)", _failureReason);
                 return Task.CompletedTask;
             }
+
+            _failed = false;
+            _failureReason = null;
         }
         DescriptorsReady?.Invoke(this, [d]);
         return Task.CompletedTask;

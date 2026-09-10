@@ -86,10 +86,12 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
             string?[] clientAttempts = siteId is SiteIds.YouTube
                 ?
                 [
-                    "youtube:player_client=web",
+                    // Prefer android first — web often fails with "Requested format is not available"
+                    // and was burning ~4s×N before a working client.
                     "youtube:player_client=android,web",
-                    "youtube:player_client=tv_embedded",
                     "youtube:player_client=ios,web",
+                    "youtube:player_client=web",
+                    "youtube:player_client=tv_embedded",
                     null
                 ]
                 : [null];
@@ -103,7 +105,6 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
             try
             {
                 string? authenticatedError = null;
-                IReadOnlyList<DetectedVideo>? bestResult = null;
                 foreach (var cookies in cookieAttempts)
                 {
                     foreach (var extractorArgs in clientAttempts)
@@ -119,17 +120,14 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                             ct);
                         if (videos.Count > 0)
                         {
-                            if (bestResult is null || DetectionScore(videos) > DetectionScore(bestResult))
-                                bestResult = videos;
-                            if (HasCompleteAdaptiveSet(videos))
-                            {
-                                LastError = null;
-                                LastFailureIsHumanVerification = false;
-                                return videos;
-                            }
+                            // First usable client wins — polling remaining clients for a "better"
+                            // adaptive set burned 15–25s after a working android/web result.
+                            LastError = null;
+                            LastFailureIsHumanVerification = false;
+                            return videos;
                         }
 
-                        // Y1: human verification is definitive for this page context —
+                        // Human verification is definitive for this page context —
                         // further player_client swaps in the same context are wasted work.
                         if (LastFailureIsHumanVerification)
                         {
@@ -145,13 +143,6 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                 }
 
             Done:
-                if (bestResult is not null)
-                {
-                    LastError = null;
-                    LastFailureIsHumanVerification = false;
-                    return bestResult;
-                }
-
                 LastError = authenticatedError ?? LastError;
                 return [];
             }
@@ -814,18 +805,6 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
 
         return "mp4";
     }
-
-    private static int DetectionScore(IReadOnlyList<DetectedVideo> videos) => videos
-        .SelectMany(video => video.Variants)
-        .Select(variant => (variant.Height ?? 0) * 10 +
-                           (variant.Tracks.Any(track => track.Kind == MediaTrackKind.Audio) ? 1 : 0))
-        .DefaultIfEmpty(0)
-        .Max();
-
-    private static bool HasCompleteAdaptiveSet(IReadOnlyList<DetectedVideo> videos) => videos
-        .SelectMany(video => video.Variants)
-        .Any(variant => variant.Height >= 720 &&
-                        variant.Tracks.Any(track => track.Kind is MediaTrackKind.Audio or MediaTrackKind.Combined));
 
     private static bool StringPropertyEquals(JsonElement element, string propertyName, string expected) =>
         element.TryGetProperty(propertyName, out var value) &&
