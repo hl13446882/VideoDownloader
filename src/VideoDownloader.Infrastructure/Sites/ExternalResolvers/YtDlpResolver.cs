@@ -349,14 +349,31 @@ public sealed class YtDlpResolver : IExternalSiteResolver
             }
         }
 
-        // TikTok bare /video/{id} (no @user) redirects to 404; embed/v2 yields durable CDN.
+        // TikTok-only narrow rewrite: bare /video/{id} 404s. Keep /@user/video/{id} and
+        // /embed/v2/{id} intact so site detectors can try both forms without collapsing.
         if (pageUrl.Host.Contains("tiktok", StringComparison.OrdinalIgnoreCase))
         {
-            var m = System.Text.RegularExpressions.Regex.Match(
-                pageUrl.AbsolutePath, @"/(?:embed/v2/|video/)(?<id>\d{10,})",
+            var userVideo = System.Text.RegularExpressions.Regex.Match(
+                pageUrl.AbsolutePath,
+                @"^/@(?<user>[^/]+)/video/(?<id>\d{10,})/?$",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            if (m.Success)
-                return $"https://www.tiktok.com/embed/v2/{m.Groups["id"].Value}";
+            if (userVideo.Success)
+                return $"https://www.tiktok.com/@{userVideo.Groups["user"].Value}/video/{userVideo.Groups["id"].Value}";
+
+            var embed = System.Text.RegularExpressions.Regex.Match(
+                pageUrl.AbsolutePath,
+                @"^/embed/v2/(?<id>\d{10,})/?$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (embed.Success)
+                return $"https://www.tiktok.com/embed/v2/{embed.Groups["id"].Value}";
+
+            var bare = System.Text.RegularExpressions.Regex.Match(
+                pageUrl.AbsolutePath,
+                @"^/video/(?<id>\d{10,})/?$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (bare.Success)
+                return $"https://www.tiktok.com/@tiktok/video/{bare.Groups["id"].Value}";
+
             foreach (var part in pageUrl.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
             {
                 var idx = part.IndexOf('=');
@@ -366,7 +383,7 @@ public sealed class YtDlpResolver : IExternalSiteResolver
                 if ((key.Equals("item_id", StringComparison.OrdinalIgnoreCase) ||
                      key.Equals("aweme_id", StringComparison.OrdinalIgnoreCase)) &&
                     System.Text.RegularExpressions.Regex.IsMatch(value, @"^\d{10,}$"))
-                    return $"https://www.tiktok.com/embed/v2/{value}";
+                    return $"https://www.tiktok.com/@tiktok/video/{value}";
             }
         }
 
