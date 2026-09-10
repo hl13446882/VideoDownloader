@@ -684,7 +684,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                     var images = tracks
                         .Where(t => t.Kind == MediaTrackKind.Image)
                         .Select(LocalPathOf)
-                        .Where(p => File.Exists(p) && new FileInfo(p).Length >= 8 * 1024)
+                        .Where(p => File.Exists(p) && new FileInfo(p).Length >= 1024)
                         .ToArray();
                     var audio = tracks.FirstOrDefault(t => t.Kind == MediaTrackKind.Audio);
                     var expectedImages = job.Variant.Tracks.Count(t => t.Kind == MediaTrackKind.Image);
@@ -812,7 +812,10 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                 PageUrl = job.PageUrl,
                 TargetPath = trackPath,
                 Status = DownloadStatus.Downloading,
-                TotalBytes = track.ContentLength,
+                // Album image/BGM CDNs lie about Content-Length; let the downloader learn size from the body.
+                TotalBytes = track.Kind is MediaTrackKind.Image or MediaTrackKind.Audio
+                    ? null
+                    : track.ContentLength,
                 CreatedAt = DateTimeOffset.UtcNow,
                 UpdatedAt = DateTimeOffset.UtcNow
             };

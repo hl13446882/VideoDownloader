@@ -119,13 +119,26 @@ public sealed class HttpMediaDownloader
         HttpClient? client = null)
     {
         var variant = job.Variant;
+        var softMedia = variant.Tracks.Count > 0 &&
+                        variant.Tracks.All(t => t.Kind is MediaTrackKind.Image or MediaTrackKind.Audio);
         var partPath = job.TargetPath + ".part";
         Directory.CreateDirectory(Path.GetDirectoryName(partPath)!);
 
         var offset = 0L;
-        if (File.Exists(partPath))
+        // Douyin album/BGM CDNs frequently break or truncate when Range is used — always full GET.
+        if (softMedia)
+        {
+            if (File.Exists(partPath))
+                File.Delete(partPath);
+            if (File.Exists(job.TargetPath))
+                File.Delete(job.TargetPath);
+            job.TotalBytes = null;
+            job.DownloadedBytes = 0;
+        }
+        else if (File.Exists(partPath))
         {
             offset = new FileInfo(partPath).Length;
+            job.DownloadedBytes = offset;
         }
 
         job.DownloadedBytes = offset;
@@ -139,14 +152,16 @@ public sealed class HttpMediaDownloader
                 resource with { Url = url },
                 HttpMethod.Get);
 
-            request.Headers.Range = new RangeHeaderValue(offset, null);
-            request.Headers.Remove("If-Range");
+            if (!softMedia)
+            {
+                request.Headers.Range = new RangeHeaderValue(offset, null);
+                request.Headers.Remove("If-Range");
+                if (offset > 0)
+                    RequestMessageFactory.ApplyIfRange(request, job.ETag, job.LastModified);
+            }
+
             request.Headers.AcceptEncoding.Clear();
             request.Headers.AcceptEncoding.ParseAdd("identity");
-            if (offset > 0)
-            {
-                RequestMessageFactory.ApplyIfRange(request, job.ETag, job.LastModified);
-            }
 
             _logger.LogInformation(
                 "GET {Url} offset={Offset}",
@@ -194,29 +209,27 @@ public sealed class HttpMediaDownloader
 
             // Stream is closed: reconcile .part if the job was renamed mid-transfer.
             partPath = ReconcilePartPath(job, partPath);
-            if (response.StatusCode == HttpStatusCode.PartialContent &&
+            if (!softMedia &&
+                response.StatusCode == HttpStatusCode.PartialContent &&
                 job.TotalBytes is long total && offset < total)
             {
-                var softMedia = variant.Tracks.Count > 0 &&
-                                variant.Tracks.All(t => t.Kind is MediaTrackKind.Image or MediaTrackKind.Audio);
-                // Album CDNs frequently advertise a large Content-Range length, then close after a
-                // short 206 body. Accept the received object instead of looping into no-progress.
-                if (softMedia && offset >= 8 * 1024)
-                {
-                    _logger.LogWarning(
-                        "Soft-media 206 ended early (got {Got} of {Total}); accepting album/BGM object",
-                        offset,
-                        total);
-                    job.TotalBytes = offset;
-                }
-                else if (offset <= previousOffset)
+                if (offset <= previousOffset)
                     throw new DownloadException(ErrorCodes.IncompleteDownload, "Partial response made no progress.");
-                else
-                {
-                    redirects = 0;
-                    continue;
-                }
+                redirects = 0;
+                continue;
             }
+
+            // Soft-media full GET: accept whatever body arrived if it looks like a real object.
+            if (softMedia && offset > 0 && offset < 8 * 1024 &&
+                response.Content.Headers.ContentLength is long declared && declared > offset)
+            {
+                // Tiny body vs large declared length — still keep if we got a usable image/audio crumb.
+                if (offset < 1024)
+                    throw new DownloadException(ErrorCodes.IncompleteDownload,
+                        $"Downloaded {offset} of {declared} bytes.");
+                job.TotalBytes = offset;
+            }
+
             EnsureDownloadLooksComplete(job, offset);
             await FinalizeDownloadAsync(job, partPath, ct);
             return;
@@ -350,7 +363,7 @@ public sealed class HttpMediaDownloader
         {
             // Douyin/TikTok album CDNs often advertise inflated Content-Length then close early.
             // Accept a non-empty image/audio body rather than failing the whole slideshow.
-            if (!(softMedia && received >= 8 * 1024))
+            if (!(softMedia && received >= 1024))
                 throw new DownloadException(ErrorCodes.IncompleteDownload, "Response body length does not match its range.");
             _logger.LogWarning(
                 "Soft-media download length mismatch (got {Got}, declared {Declared}); accepting track kind={Kind}",
@@ -370,7 +383,7 @@ public sealed class HttpMediaDownloader
                         job.Variant.Tracks.All(t => t.Kind is MediaTrackKind.Image or MediaTrackKind.Audio);
         if (job.TotalBytes is long expected && actualLength != expected)
         {
-            if (softMedia && actualLength >= 8 * 1024)
+            if (softMedia && actualLength >= 1024)
             {
                 job.TotalBytes = actualLength;
             }
@@ -384,7 +397,7 @@ public sealed class HttpMediaDownloader
         var minBytes = job.Variant.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
             ? MediaResourceSizeFilter.MinProgressiveVideoBytes
             : softMedia
-                ? 8 * 1024
+                ? 1024
                 : MediaResourceSizeFilter.MinDisplayBytes;
         if (job.DownloadedBytes > 0 && job.DownloadedBytes < minBytes)
         {
