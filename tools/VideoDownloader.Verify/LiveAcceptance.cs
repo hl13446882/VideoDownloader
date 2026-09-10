@@ -102,16 +102,13 @@ public partial class MainWindow
                 }
                 else if(!feed && exclusiveHost)
                     Log($"LIVE skip generic warmup for exclusive host {uri.Host} (invalid probe avoidance)");
-                if(feed && uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase)
-                   && !uri.AbsolutePath.Equals("/jingxuan",StringComparison.OrdinalIgnoreCase))
+                if(feed && uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase))
                 {
-                    // 推荐流：点「推荐」确保落在推荐 feed；精选流不要点，否则会跳走。
+                    var tab=DouyinFeedTabLabel(uri);
                     await Task.Delay(2500);
-                    Log("Recommendation navigation="+await WebView.CoreWebView2.ExecuteScriptAsync("(()=>{const a=[...document.querySelectorAll('a,button,[role=link]')].find(e=>e.textContent.trim()==='推荐');if(a){a.click();return 'clicked 推荐';}return location.href;})()"));
+                    Log($"Douyin feed tab={tab} → "+await ClickDouyinFeedTabAsync(tab));
                     await Task.Delay(2500);
                 }
-                else if(feed && uri.AbsolutePath.Equals("/jingxuan",StringComparison.OrdinalIgnoreCase))
-                    Log("LIVE Douyin jingxuan feed: ArrowDown×10 (no 推荐 click)");
                 if(feed && uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase)) await SkipNonVideoPostsAsync();
                 for(var step=0;step<feedSteps;step++)
                 {
@@ -403,9 +400,10 @@ public partial class MainWindow
                             {
                                 try
                                 {
+                                    var tab=DouyinFeedTabLabel(uri);
                                     WebView.CoreWebView2.Navigate(address);
                                     await Task.Delay(3500);
-                                    Log("Recommendation re-land="+await WebView.CoreWebView2.ExecuteScriptAsync("(()=>{const a=[...document.querySelectorAll('a,button,[role=link]')].find(e=>e.textContent.trim()==='推荐');if(a){a.click();return 'clicked 推荐';}return location.href;})()"));
+                                    Log($"Douyin feed re-land tab={tab} → "+await ClickDouyinFeedTabAsync(tab));
                                     await Task.Delay(2500);
                                     await SkipNonVideoPostsAsync();
                                 }
@@ -571,6 +569,22 @@ public partial class MainWindow
                     Log($"LIVE {(pass?"PASS":"FAIL")} {uri.Host} #{step+1}: discovery={discoveryMs}ms completed={completed} stable={stable} switched={switched}/{switches} caption={captionOk} unique={uniqueIdentity} {video?.DisplayTitle}; {string.Join("; ",samples)}");
                 }
 
+                if(IsDouyinScrollFeed(uri))
+                {
+                    var sitePassCount=0;
+                    for(var i=siteRecordStart;i<records.Count;i++)
+                    {
+                        var json=JsonSerializer.Serialize(records[i]);
+                        using var doc=JsonDocument.Parse(json);
+                        if(doc.RootElement.TryGetProperty("pass",out var p) && p.GetBoolean())
+                            sitePassCount++;
+                    }
+                    var need=records.Count-siteRecordStart; // 10
+                    var douyinOk=sitePassCount>=need && need==10;
+                    Log($"LIVE Douyin {DouyinFeedTabLabel(uri)} feed gate: passes={sitePassCount}/{need} require={need} 有效下载 => {(douyinOk?"PASS":"FAIL")}");
+                    if(!douyinOk) allPassed=false;
+                }
+
                 if(uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase))
                 {
                     var sitePassCount=0;
@@ -706,7 +720,7 @@ public partial class MainWindow
     }
 
     /// <summary>
-    /// Douyin 精选 / 推荐：统一用 ArrowDown 滚动刷新，每条地址验收 10 个作品。
+    /// Douyin 精选 / 推荐：统一用 ArrowDown 滚动刷新，每条地址验收 10 个作品（均需有效下载）。
     /// 即使 URL 带 modal_id，仍按滚动 feed 处理（向下切到下一条）。
     /// </summary>
     private static bool IsDouyinScrollFeed(Uri uri)
@@ -718,17 +732,38 @@ public partial class MainWindow
             return true;
         if(uri.AbsolutePath is "/" or "")
         {
-            // /?recommend=1 或首页推荐流
             foreach(var part in uri.Query.TrimStart('?').Split('&',StringSplitOptions.RemoveEmptyEntries))
             {
                 var i=part.IndexOf('=');
                 var key=i<0?part:part[..i];
                 if(key is "recommend") return true;
             }
-            // bare www.douyin.com/ — treat as recommend feed
             return true;
         }
         return false;
+    }
+
+    private static string DouyinFeedTabLabel(Uri uri) =>
+        uri.AbsolutePath.Equals("/jingxuan",StringComparison.OrdinalIgnoreCase) ? "精选" : "推荐";
+
+    private async Task<string> ClickDouyinFeedTabAsync(string tabLabel)
+    {
+        // Escape for JS string literal.
+        var want=tabLabel.Replace("\\","\\\\").Replace("'","\\'");
+        var script=
+            "(()=>{"+
+            "const want='"+want+"';"+
+            "const nodes=[...document.querySelectorAll('a,button,[role=link],[role=tab],span,div')];"+
+            "const a=nodes.find(e=>{"+
+            "  const t=(e.textContent||'').trim();"+
+            "  if(t!==want) return false;"+
+            "  const r=e.getBoundingClientRect();"+
+            "  return r.width>0 && r.height>0 && r.top>=0 && r.top<120;"+
+            "}) || nodes.find(e=>(e.textContent||'').trim()===want);"+
+            "if(a){a.click();return 'clicked '+want;}"+
+            "return location.href;"+
+            "})()";
+        return await WebView.CoreWebView2.ExecuteScriptAsync(script);
     }
 
     private static bool IsSameAcceptanceDocument(string? current,string expected)
