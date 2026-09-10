@@ -508,7 +508,19 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         {
             var session = _pipeline.SessionId;
             Diagnostics.HangProbe.Mark("host.script.RunAsync", $"session={session:N} onUi={_uiDispatcher.CheckAccess()}");
-            var script = """
+            var exclusivePage = CurrentPageUrl is not null && IsExclusiveMediaHost(CurrentPageUrl);
+            // REDUNDANT(pending-delete after confirm): always splice MediaAddressDiscoveryScript for exclusive pages.
+            // var script = """...""".Replace("ADDRESS_DISCOVERY", MediaAddressDiscoveryScript.Expression);
+            var script = exclusivePage
+                ? """
+                (() => {
+                  const observation = window.__vdProbe?.() ?? window.__vdObserve?.();
+                  const result = observation ?? {href:location.href,media:[]};
+                  result.candidates = [...(result.candidates ?? [])];
+                  return JSON.stringify(result);
+                })();
+                """
+                : """
                 (() => {
                   const observation = window.__vdProbe?.() ?? window.__vdObserve?.();
                   const result = observation ?? {href:location.href,media:[]};
@@ -525,6 +537,9 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             var payload = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
             // Always harvest cross-frame player addresses (MacCMS / iframe HLS). Do not
             // gate on missing identity — pages may have a document title without media.
+            // REDUNDANT(pending-delete after confirm): FrameAddressDiscovery on exclusive hosts (Douyin/YT/…).
+            if (!exclusivePage)
+            {
             try
             {
                 Diagnostics.HangProbe.Mark("host.frameDiscovery.begin", $"session={session:N}");
@@ -557,6 +572,11 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             {
                 Diagnostics.HangProbe.Mark("host.frameDiscovery.fail", ex.GetType().Name);
                 _logger.LogInformation("Frame discovery unavailable session={Session} reason={Reason}", session, ex.GetType().Name);
+            }
+            }
+            else
+            {
+                Diagnostics.HangProbe.Mark("host.frameDiscovery.skipExclusive", $"session={session:N}");
             }
             return session == _pipeline.SessionId ? payload.ToJsonString() : null;
         }
@@ -991,7 +1011,11 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
                 headers);
 
             EnqueueRawEvent(raw with { SessionId = pending.SessionId }, requestScope?.Fork());
-            if (_captureEnabled && ShouldScanResponseBody(raw) && raw.ContentLength is null or < 2097152 &&
+            // REDUNDANT(pending-delete after confirm): response-body MediaAddressScanner on exclusive hosts.
+            var scanPage = pending.PageUrl ?? CurrentPageUrl;
+            if (_captureEnabled &&
+                (scanPage is null || !IsExclusiveMediaHost(scanPage)) &&
+                ShouldScanResponseBody(raw) && raw.ContentLength is null or < 2097152 &&
                 (requestScope?.Fork() ?? _pipeline.BeginDiscovery(pending.SessionId)) is { } scope)
             {
                 _responseBodies[requestId] = (raw with { SessionId = pending.SessionId }, scope);
@@ -1064,6 +1088,19 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
                url.Contains("iteminfo", StringComparison.OrdinalIgnoreCase) ||
                url.Contains("/detail", StringComparison.OrdinalIgnoreCase) ||
                url.Contains("/feed", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsExclusiveMediaHost(Uri pageUrl)
+    {
+        var host = pageUrl.Host;
+        return host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("b23.tv", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task ConsumeAsync(CancellationToken ct)

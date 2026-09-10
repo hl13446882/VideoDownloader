@@ -204,8 +204,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
 
             lock (_gate)
             {
-                if (videos.Count > 0 || hasCookies)
-                    _externalAttempted = true;
+                // REDUNDANT(pending-delete after confirm): if (videos.Count > 0 || hasCookies) _externalAttempted = true;
+                _externalAttempted = true;
 
                 foreach (var v in videos.Where(v =>
                              string.IsNullOrWhiteSpace(_contentId) ||
@@ -247,8 +247,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
             _logger.LogInformation(ex, "TikTok exclusive yt-dlp resolve failed (no Generic fallback)");
             lock (_gate)
             {
-                if (hasCookies)
-                    _externalAttempted = true;
+                // REDUNDANT(pending-delete after confirm): if (hasCookies) _externalAttempted = true;
+                _externalAttempted = true;
             }
         }
     }

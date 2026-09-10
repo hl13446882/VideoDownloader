@@ -1031,7 +1031,17 @@ public sealed partial class MainViewModel : ObservableObject
             // Douyin /note/ albums need extra time to click-through slides (e.g. 4/17).
             var isDouyinNote = pageUrl.Host.Contains("douyin", StringComparison.OrdinalIgnoreCase) &&
                                pageUrl.AbsolutePath.Contains("/note/", StringComparison.OrdinalIgnoreCase);
-            await Task.Delay(isDouyinNote ? TimeSpan.FromSeconds(5) : TimeSpan.FromSeconds(3), token);
+            var isExclusiveHost = IsExclusiveHost(pageUrl);
+            var isYtDlpExclusive = isExclusiveHost &&
+                                   !pageUrl.Host.Contains("douyin", StringComparison.OrdinalIgnoreCase);
+
+            // REDUNDANT(pending-delete after confirm): site-agnostic settle paid by exclusive hosts.
+            // await Task.Delay(isDouyinNote ? TimeSpan.FromSeconds(5) : TimeSpan.FromSeconds(3), token);
+            var settle = isDouyinNote ? TimeSpan.FromSeconds(5)
+                : isYtDlpExclusive ? TimeSpan.FromMilliseconds(400)
+                : isExclusiveHost ? TimeSpan.FromSeconds(1.2)
+                : TimeSpan.FromSeconds(3);
+            await Task.Delay(settle, token);
             if (generation != _pageGeneration)
             {
                 HangProbe.Mark("vm.session.stale.afterDelay", $"gen={generation}/{_pageGeneration}");
@@ -1041,7 +1051,13 @@ public sealed partial class MainViewModel : ObservableObject
             var host = SelectedTab?.Host;
             if (host is not null)
             {
-                var graceLimit = isDouyinNote ? 10 : 6;
+                // REDUNDANT(pending-delete after confirm): graceLimit = isDouyinNote ? 10 : 6;
+                var graceLimit = isDouyinNote ? 10
+                    : isYtDlpExclusive ? 2
+                    : isExclusiveHost ? 4
+                    : 6;
+                // REDUNDANT(pending-delete after confirm): graceGap always 1.5s
+                var graceGap = isYtDlpExclusive ? TimeSpan.FromMilliseconds(600) : TimeSpan.FromSeconds(1.5);
                 for (var grace = 0; grace < graceLimit; grace++)
                 {
                     if (generation != _pageGeneration || token.IsCancellationRequested)
@@ -1079,7 +1095,7 @@ public sealed partial class MainViewModel : ObservableObject
                     if (found && !videoDenied)
                         break;
 
-                    await Task.Delay(TimeSpan.FromSeconds(1.5), token);
+                    await Task.Delay(graceGap, token);
                 }
             }
 
@@ -1090,7 +1106,11 @@ public sealed partial class MainViewModel : ObservableObject
 
             // Feed soft-nav often seals on MSE-only before progressive CDN arrives; give a few
             // short re-probe/complete cycles without starting a brand-new page generation.
-            var lateLimit = isDouyinNote ? 8 : 4;
+            // REDUNDANT(pending-delete after confirm): lateLimit = isDouyinNote ? 8 : 4;
+            var lateLimit = isDouyinNote ? 8
+                : isYtDlpExclusive ? 1
+                : isExclusiveHost ? 2
+                : 4;
             for (var late = 0; late < lateLimit; late++)
             {
                 var have = false;
@@ -1099,7 +1119,12 @@ public sealed partial class MainViewModel : ObservableObject
                     break;
 
                 HangProbe.Mark("vm.lateRetry.begin", $"i={late}");
-                await Task.Delay(TimeSpan.FromSeconds(isDouyinNote ? 2.5 : 2), token);
+                // REDUNDANT(pending-delete after confirm): Delay(isDouyinNote ? 2.5 : 2)
+                await Task.Delay(
+                    isDouyinNote ? TimeSpan.FromSeconds(2.5)
+                    : isYtDlpExclusive ? TimeSpan.FromMilliseconds(800)
+                    : TimeSpan.FromSeconds(2),
+                    token);
                 if (generation != _pageGeneration || token.IsCancellationRequested)
                     break;
 
@@ -1721,6 +1746,20 @@ public sealed partial class MainViewModel : ObservableObject
 
     private static bool IsExclusiveSiteId(string siteId) =>
         siteId is SiteIds.Douyin or SiteIds.TikTok or SiteIds.YouTube or SiteIds.Bilibili;
+
+    /// <summary>Host-level exclusive sites (Douyin/TikTok/YouTube/Bilibili) for settle/probe tuning.</summary>
+    private static bool IsExclusiveHost(Uri pageUrl)
+    {
+        var host = pageUrl.Host;
+        return host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("b23.tv", StringComparison.OrdinalIgnoreCase);
+    }
 
     private void FocusLargestVideoVariant(DetectedVideoViewModel vm)
     {

@@ -147,7 +147,21 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
         {
             var page = normalized.PageUrl ?? _page;
             if (page is not null)
-                EnsureRouteUnlocked(page);
+            {
+                // REDUNDANT(pending-delete after confirm): EnsureRouteUnlocked on every network event.
+                // if (page is not null) EnsureRouteUnlocked(page);
+                if (_active is not null &&
+                    _page is not null &&
+                    string.Equals(_page.Host, page.Host, StringComparison.OrdinalIgnoreCase) &&
+                    SameExclusiveWork(_page, page, _kind))
+                {
+                    _page = page;
+                }
+                else
+                {
+                    EnsureRouteUnlocked(page);
+                }
+            }
 
             exclusive = _active;
             if (exclusive is not null)
@@ -248,7 +262,9 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
             lock (_gate)
                 idle = session.CompleteAsync(ct);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(TimeSpan.FromSeconds(8));
+            // REDUNDANT(pending-delete after confirm): CancelAfter(8s) after exclusive Complete already emitted.
+            // timeout.CancelAfter(TimeSpan.FromSeconds(8));
+            timeout.CancelAfter(TimeSpan.FromSeconds(1.5));
             HangProbe.Mark("route.complete.idle.begin");
             await idle.WaitAsync(timeout.Token).ConfigureAwait(false);
             HangProbe.Mark("route.complete.idle.end");

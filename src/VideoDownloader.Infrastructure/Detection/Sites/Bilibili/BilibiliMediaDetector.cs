@@ -143,8 +143,8 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
             var videos = await _ytdlp.ResolveAsync(resolveUrl, enriched, ct);
             lock (_gate)
             {
-                if (videos.Count > 0 || hasCookies)
-                    _externalAttempted = true;
+                // REDUNDANT(pending-delete after confirm): if (videos.Count > 0 || hasCookies) _externalAttempted = true;
+                _externalAttempted = true;
 
                 foreach (var v in videos)
                 {
@@ -178,8 +178,8 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
             _logger.LogInformation(ex, "Bilibili exclusive external resolve failed (no Generic fallback)");
             lock (_gate)
             {
-                if (hasCookies)
-                    _externalAttempted = true;
+                // REDUNDANT(pending-delete after confirm): if (hasCookies) _externalAttempted = true;
+                _externalAttempted = true;
             }
         }
     }

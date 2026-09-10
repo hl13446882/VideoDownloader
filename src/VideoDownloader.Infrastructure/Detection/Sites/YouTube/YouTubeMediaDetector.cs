@@ -147,9 +147,10 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
             Diagnostics.HangProbe.Mark("youtube.ytdlp.end", $"count={videos.Count}");
             lock (_gate)
             {
-                // Latch only after cookied attempt or success so no-cookie bot fails can retry.
-                if (videos.Count > 0 || hasCookies)
-                    _externalAttempted = true;
+                // REDUNDANT(pending-delete after confirm): only latch after cookied attempt or success,
+                // which re-ran yt-dlp on every grace probe when cookies were empty.
+                // if (videos.Count > 0 || hasCookies) _externalAttempted = true;
+                _externalAttempted = true;
 
                 foreach (var v in videos.Where(v =>
                              string.IsNullOrWhiteSpace(_contentId) ||
@@ -183,8 +184,8 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
             _logger.LogInformation(ex, "YouTube exclusive yt-dlp resolve failed (no Generic fallback)");
             lock (_gate)
             {
-                if (hasCookies)
-                    _externalAttempted = true;
+                // REDUNDANT(pending-delete after confirm): if (hasCookies) _externalAttempted = true;
+                _externalAttempted = true;
             }
         }
     }
