@@ -402,12 +402,53 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             await _repository.SaveAsync(job, ct);
 
             if (recovered == DownloadStatus.Paused && _options.Download.AutoRecoverDownloads)
+            {
+                // Stale paused/hung downloads (expired CDN, abandoned YouTube) must not
+                // seize every concurrency slot and leave new enqueues stuck at Pending.
+                if (IsStaleForAutoRecover(job))
+                {
+                    _stateMachine.Fail(job, ErrorCodes.ContextExpired);
+                    await _repository.SaveAsync(job, ct);
+                    _logger.LogWarning(
+                        "Skipped auto-recover for stale job {JobId} (updated={UpdatedAt})",
+                        job.Id,
+                        job.UpdatedAt);
+                    continue;
+                }
+
                 _ = RunJobAsync(job);
+            }
         }
 
         CleanupOrphanedScratch(_jobs.Values);
 
         _logger.LogInformation("Recovered {Count} download jobs from persistence.", persisted.Count);
+    }
+
+    private static bool IsStaleForAutoRecover(DownloadJob job)
+    {
+        if (job.UpdatedAt < DateTimeOffset.UtcNow - TimeSpan.FromMinutes(30))
+            return true;
+
+        var query = job.Variant.SourceUrl.Query;
+        if (string.IsNullOrEmpty(query))
+            return false;
+
+        foreach (var part in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var eq = part.IndexOf('=');
+            if (eq <= 0)
+                continue;
+            if (!part.AsSpan(0, eq).Equals("expire", StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (!long.TryParse(part.AsSpan(eq + 1), out var epoch))
+                continue;
+            var expireAt = DateTimeOffset.FromUnixTimeSeconds(epoch);
+            if (expireAt < DateTimeOffset.UtcNow - TimeSpan.FromMinutes(1))
+                return true;
+        }
+
+        return false;
     }
 
     private async Task RunJobAsync(DownloadJob job)
@@ -514,7 +555,15 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                                 IsValidated = false
                             };
                             var finalUrl = await _availability.ResolveFinalUrlAsync(probe, gateway, cts.Token);
-                            if (!string.Equals(finalUrl.AbsoluteUri, job.Variant.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
+                            // HTTP 200 on the gateway is not enough — ResolveFinalUrlAsync already
+                            // samples bytes; still reject landing back on the same fragile CDN family.
+                            if (fragileSigned && MediaAddressRenewal.IsFragileSignedHost(finalUrl))
+                            {
+                                _logger.LogWarning(
+                                    "Job {JobId} Douyin gateway renew landed on fragile host={Host}; treating as failure",
+                                    job.Id, finalUrl.Host);
+                            }
+                            else if (!string.Equals(finalUrl.AbsoluteUri, job.Variant.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
                             {
                                 job.Variant = ReplaceVariantSource(job.Variant, finalUrl, refreshed);
                                 ResetTransferState(job);
@@ -1192,6 +1241,12 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             // CONTEXT_EXPIRED means the signed URL/session is dead; replaying the same job
             // cannot recover without a fresh probe. Skip auto-retry.
             if (string.Equals(job.LastErrorCode, ErrorCodes.ContextExpired, StringComparison.OrdinalIgnoreCase))
+                continue;
+            // Timed-out / incomplete transfers usually need a fresh probe, not a 10s replay.
+            if (string.Equals(job.LastErrorCode, ErrorCodes.NetTimeout, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(job.LastErrorCode, ErrorCodes.IncompleteDownload, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (now - job.UpdatedAt > TimeSpan.FromMinutes(30))
                 continue;
 
             _logger.LogInformation(

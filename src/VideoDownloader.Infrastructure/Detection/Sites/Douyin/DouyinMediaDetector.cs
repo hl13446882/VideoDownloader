@@ -580,15 +580,22 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                         t.Kind == MediaTrackKind.Combined &&
                         !DouyinPlayEvidence.IsSuspiciousTinyProgressive(t) &&
                         FitsObservedDuration(t.ContentLength))
-            .OrderByDescending(t => ScoreTrack(t, audios.Count > 0))
+            .OrderByDescending(t => DouyinPlayEvidence.IsVerifiedProgressive(t) ? 1 : 0)
+            .ThenByDescending(t => ScoreTrack(t, audios.Count > 0))
             .ToList();
 
-        // When a durable CDN exists, never default to fragile web-prime for the primary pick.
+        // When a durable CDN exists, never default to fragile signed hosts for the primary pick.
         var durable = progressive
-            .Where(t => !t.SourceUrl.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase))
+            .Where(t => !t.SourceUrl.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase) &&
+                        !t.SourceUrl.Host.Contains("webapp-prime", StringComparison.OrdinalIgnoreCase))
             .ToList();
         if (durable.Count > 0)
             progressive = durable;
+
+        // Prefer verified progressive over any unverified Dom/router listing.
+        var verified = progressive.Where(DouyinPlayEvidence.IsVerifiedProgressive).ToList();
+        if (verified.Count > 0)
+            progressive = verified;
 
         // Prefer known large objects over unknown-length crumbs when both exist.
         var sized = progressive.Where(t => t.ContentLength is >= MediaResourceSizeFilter.MinProgressiveVideoBytes).ToList();
@@ -612,7 +619,9 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         // zjcdn progressive downloads reliably; web-prime douyinvod often 403s outside WebView.
         if (t.SourceUrl.Host.Contains("zjcdn", StringComparison.OrdinalIgnoreCase)) score += 500;
         if (t.SourceUrl.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase)) score -= 900;
-        if (t.BrowserObserved) score += 500;
+        // Real CDP/play only — DomObserved must not earn this bonus.
+        if (t.BrowserObserved && t.Evidence == MediaEvidence.BrowserObserved) score += 500;
+        if (t.IsValidated) score += 400;
         if (t.Kind == MediaTrackKind.Combined) score += 800;
         if (t.Kind == MediaTrackKind.Video)
             score += hasAudioPair ? 150 : -400;
@@ -621,8 +630,10 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         if (t.ContentLength is > 0 and < MediaResourceSizeFilter.MinDisplayBytes) score -= 500;
         // Demote ultra-low Douyin quality crumbs (br/qs) that often yield ~200KB shells.
         score += DouyinPlayEvidence.ScorePlayQualityHint(t.SourceUrl);
-        // Prefer network-sized objects over unsigned observation crumbs.
-        if (t.Evidence == MediaEvidence.DomObserved && t.ContentLength is null) score -= 80;
+        // router_data / unsigned observation crumbs stay below network-sized progressive.
+        if (t.Evidence == MediaEvidence.DomObserved) score -= 300;
+        if (string.Equals(t.ProbeMethod, ProbeMethods.RouterData, StringComparison.OrdinalIgnoreCase))
+            score -= 200;
         if (t.Evidence == MediaEvidence.BrowserObserved) score += 100;
         score += (int)Math.Min(t.ContentLength ?? 0, int.MaxValue) / (1024 * 1024);
         return score;
@@ -852,9 +863,9 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                         null,
                         _session.Context)
                     {
-                        // Page-sourced CDN needs WebView cookies on download; keep IsValidated
-                        // false so availability sampling is not silently skipped.
-                        BrowserObserved = !isMse && DouyinPlayEvidence.IsStrongVodHost(url),
+                        // Dom/router_data listings are NOT browser-observed. Faking BrowserObserved
+                        // lets unverified web-prime overwrite network zjcdn progressive.
+                        BrowserObserved = false,
                         IsValidated = false,
                         Evidence = MediaEvidence.DomObserved,
                         ContentIdentity = _session.CurrentContentId is null ? null : "id:" + _session.CurrentContentId,
@@ -1137,8 +1148,22 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             list[idx] = existing;
             if (track.ContentIdentity is null)
                 track = track with { ContentIdentity = existing.ContentIdentity };
+
+            var existingVerified = DouyinPlayEvidence.IsVerifiedProgressive(existing);
+            var incomingVerified = DouyinPlayEvidence.IsVerifiedProgressive(track);
+            // Hard rule: verified progressive must not be overwritten by unverified Dom/router_data.
+            if (existingVerified && !incomingVerified)
+                return;
+
+            if (incomingVerified && !existingVerified)
+            {
+                list[idx] = track;
+                return;
+            }
+
             if ((track.ContentLength ?? 0) >= (existing.ContentLength ?? 0) ||
-                (track.BrowserObserved && !existing.BrowserObserved))
+                (track.BrowserObserved && track.Evidence == MediaEvidence.BrowserObserved &&
+                 !(existing.BrowserObserved && existing.Evidence == MediaEvidence.BrowserObserved)))
                 list[idx] = track;
             return;
         }

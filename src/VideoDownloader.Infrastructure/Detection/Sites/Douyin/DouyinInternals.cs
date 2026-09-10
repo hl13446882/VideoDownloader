@@ -162,6 +162,36 @@ internal static class DouyinPlayEvidence
         track.Kind == MediaTrackKind.Combined &&
         track.ContentLength is > 0 and < MediaResourceSizeFilter.MinProgressiveVideoBytes;
 
+    /// <summary>
+    /// Progressive that already has readable proof (validated / real browser play / sized network).
+    /// Dom router_data listings are never verified — they must not overwrite these.
+    /// </summary>
+    public static bool IsVerifiedProgressive(MediaTrack track)
+    {
+        if (track.IsMseTrack || track.Kind is not (MediaTrackKind.Combined or MediaTrackKind.Video))
+            return false;
+        if (track.Evidence == MediaEvidence.DomObserved && !track.IsValidated)
+            return false;
+        if (string.Equals(track.ProbeMethod, ProbeMethods.RouterData, StringComparison.OrdinalIgnoreCase) &&
+            !track.IsValidated)
+            return false;
+
+        if (track.IsValidated)
+            return true;
+        if (track.BrowserObserved && track.Evidence == MediaEvidence.BrowserObserved)
+            return true;
+        // Network progressive with a credible declared size counts as verified enough to protect.
+        if (track.ContentLength is >= MediaResourceSizeFilter.MinProgressiveVideoBytes &&
+            track.Evidence is MediaEvidence.Heuristic or MediaEvidence.ExternalResolved or MediaEvidence.BrowserObserved)
+            return true;
+        if (track.ContentLength is >= MediaResourceSizeFilter.MinProgressiveVideoBytes &&
+            (string.Equals(track.ProbeMethod, ProbeMethods.NetworkMedia, StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(track.ProbeMethod, ProbeMethods.VideoElement, StringComparison.OrdinalIgnoreCase)))
+            return true;
+
+        return false;
+    }
+
     /// <summary>Soft quality hint from Douyin CDN query (br/qs). Higher is better.</summary>
     public static int ScorePlayQualityHint(Uri url)
     {

@@ -82,12 +82,10 @@ internal static class MediaAddressRenewal
         {
             if (!SameContent(previous, alternate) || !Compatible(previous, alternate)) continue;
             if (IsKnownUndersizedVideo(alternate)) continue;
-            if (string.Equals(alternate.SourceUrl.AbsoluteUri, previous.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
+            // Same fragile signed host/family rarely unlocks after 403; never retry web-prime↔web-prime.
+            if (IsFragileSignedHost(previous.SourceUrl) && IsFragileSignedHost(alternate.SourceUrl))
                 continue;
-            // Same fragile signed host rarely unlocks after 403; prefer other hosts when present.
-            if (IsFragileSignedHost(previous.SourceUrl) &&
-                SameHost(previous, alternate) &&
-                previous.Alternatives.Any(a => !SameHost(previous, a) && !IsKnownUndersizedVideo(a)))
+            if (string.Equals(alternate.SourceUrl.AbsoluteUri, previous.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
                 continue;
             try
             {
@@ -143,7 +141,8 @@ internal static class MediaAddressRenewal
         if (host.Contains("zjcdn", StringComparison.OrdinalIgnoreCase)) return 300;
         if (host.Contains("bytecdn", StringComparison.OrdinalIgnoreCase) ||
             host.Contains("byteicdn", StringComparison.OrdinalIgnoreCase)) return 200;
-        if (host.Contains("web-prime", StringComparison.OrdinalIgnoreCase)) return -400;
+        if (host.Contains("web-prime", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("webapp-prime", StringComparison.OrdinalIgnoreCase)) return -400;
         if (host.Contains("douyinvod", StringComparison.OrdinalIgnoreCase)) return 50;
         return 0;
     }
@@ -152,7 +151,8 @@ internal static class MediaAddressRenewal
         string.Equals(a.SourceUrl.Host, b.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
 
     internal static bool IsFragileSignedHost(Uri url) =>
-        url.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase);
+        url.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase) ||
+        url.Host.Contains("webapp-prime", StringComparison.OrdinalIgnoreCase);
 
     internal static Uri? RecoveryAddress(Uri page, string? identity)
     {
