@@ -26,7 +26,8 @@ internal static class MediaAddressRenewal
             page = RecoveryAddress(page, previous.ContentIdentity) ?? page;
         if (!HasStableContentAddress(page))
             throw new DownloadException(ErrorCodes.ContextExpired, "The feed has no stable video address; rediscover the intended video.");
-        foreach (var resolver in resolvers.Where(r => r.IsAvailable).Take(3))
+        var siteId = InferSiteId(page);
+        foreach (var resolver in resolvers.Where(r => r.IsAvailable && (siteId is null || r.SupportsSite(siteId))).Take(3))
         {
             IReadOnlyList<DetectedVideo> videos;
             try { videos = await resolver.ResolveAsync(page, context, timeout.Token); }
@@ -173,5 +174,25 @@ internal static class MediaAddressRenewal
             page.AbsolutePath.Contains("/shorts/",StringComparison.OrdinalIgnoreCase) ||
             System.Text.RegularExpressions.Regex.IsMatch(page.AbsolutePath, @"/archives/\d+/?$") ||
             Path.HasExtension(page.AbsolutePath);
+    }
+
+    /// <summary>Map page host to the isolated yt-dlp extractor site id (null → try Generic only via SupportsSite).</summary>
+    private static string? InferSiteId(Uri page)
+    {
+        var host = page.Host;
+        if (host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase))
+            return SiteIds.YouTube;
+        if (host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase))
+            return SiteIds.TikTok;
+        if (host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("bilibili.tv", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("b23.tv", StringComparison.OrdinalIgnoreCase))
+            return SiteIds.Bilibili;
+        if (host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase))
+            return SiteIds.Douyin;
+        return SiteIds.Generic;
     }
 }

@@ -162,7 +162,9 @@ public partial class MainWindow
             var album = variant.Tracks.Any(t => t.Kind == MediaTrackKind.Image);
             static bool IsTrustedSmall(long? bytes) => bytes is >= minAcceptComplete and < minimum;
             var mustComplete = album || IsTrustedSmall(variant.TotalContentLength);
-            var deadline = DateTime.UtcNow.AddMinutes(mustComplete ? 4 : 5);
+            // Bilibili/YouTube remux A+V — do not cancel early on byte progress (leaves video-only).
+            var remuxSite = video.SiteId is SiteIds.Bilibili or SiteIds.YouTube;
+            var deadline = DateTime.UtcNow.AddMinutes(mustComplete ? 4 : remuxSite ? 8 : 5);
             var nextLog = DateTime.UtcNow;
             long lastBytes = -1;
             var stallTicks = 0;
@@ -178,7 +180,7 @@ public partial class MainWindow
                 }
 
                 var knownSmallNow = mustComplete || IsTrustedSmall(job.TotalBytes);
-                if (!album && !knownSmallNow && job.DownloadedBytes >= progressPassBytes)
+                if (!remuxSite && !album && !knownSmallNow && job.DownloadedBytes >= progressPassBytes)
                 {
                     await engine.CancelAsync(job.Id);
                     return (true, $"progress-pass bytes={job.DownloadedBytes} host={variant.SourceUrl.Host}");

@@ -45,7 +45,17 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IMediaDetector, MediaDetector>();
         services.AddSingleton<IMediaAggregator, MediaAggregator>();
         services.AddSingleton<IManifestResolver, ManifestResolver>();
-        services.AddSingleton<IExternalSiteResolver, YtDlpResolver>();
+        // Physically isolated yt-dlp extractors (one instance per detector family).
+        // Douyin has no yt-dlp extractor — network/observation only.
+        services.AddSingleton<VideoDownloader.Infrastructure.Detection.Sites.YouTube.YouTubeYtDlpExtractor>();
+        services.AddSingleton<VideoDownloader.Infrastructure.Detection.Sites.TikTok.TikTokYtDlpExtractor>();
+        services.AddSingleton<VideoDownloader.Infrastructure.Detection.Sites.Bilibili.BilibiliYtDlpExtractor>();
+        services.AddSingleton<VideoDownloader.Infrastructure.Detection.Sites.Generic.GenericYtDlpExtractor>();
+        // Download renewal may enumerate by SupportsSite; do not register the retired shared YtDlpResolver.
+        services.AddSingleton<IExternalSiteResolver>(sp => sp.GetRequiredService<VideoDownloader.Infrastructure.Detection.Sites.YouTube.YouTubeYtDlpExtractor>());
+        services.AddSingleton<IExternalSiteResolver>(sp => sp.GetRequiredService<VideoDownloader.Infrastructure.Detection.Sites.TikTok.TikTokYtDlpExtractor>());
+        services.AddSingleton<IExternalSiteResolver>(sp => sp.GetRequiredService<VideoDownloader.Infrastructure.Detection.Sites.Bilibili.BilibiliYtDlpExtractor>());
+        services.AddSingleton<IExternalSiteResolver>(sp => sp.GetRequiredService<VideoDownloader.Infrastructure.Detection.Sites.Generic.GenericYtDlpExtractor>());
         services.AddSingleton<ISiteMediaAdapter, VideoDownloader.Infrastructure.Sites.MediaAdapters.GenericMediaAdapter>();
         // Douyin/TikTok/YouTube/Bilibili use exclusive detectors — do not register MediaAdapters.
         services.AddSingleton<ICandidateDecisionPolicy, CandidateDecisionPolicy>();

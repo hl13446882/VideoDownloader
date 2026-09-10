@@ -11,6 +11,7 @@ using VideoDownloader.Infrastructure.Detection.Sites.Bilibili;
 using VideoDownloader.Infrastructure.Detection.Sites.Douyin;
 using VideoDownloader.Infrastructure.Detection.Sites.TikTok;
 using VideoDownloader.Infrastructure.Detection.Sites.YouTube;
+// Site-private yt-dlp extractors (stubs for detector construction).
 
 namespace VideoDownloader.Infrastructure.Tests;
 
@@ -463,9 +464,9 @@ public class ExclusiveSiteDetectionTests
         var detectors = new IExclusiveSiteMediaDetector[]
         {
             new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance),
-            new TikTokMediaDetector(NullLogger<TikTokMediaDetector>.Instance),
-            new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance),
-            new BilibiliMediaDetector(NullLogger<BilibiliMediaDetector>.Instance)
+            new TikTokMediaDetector(NullLogger<TikTokMediaDetector>.Instance, StubTikTokYtDlp()),
+            new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance, StubYouTubeYtDlp()),
+            new BilibiliMediaDetector(NullLogger<BilibiliMediaDetector>.Instance, StubBilibiliYtDlp())
         };
         return new RoutedMediaDetectionPipeline(
             unified,
@@ -473,6 +474,15 @@ public class ExclusiveSiteDetectionTests
             new ExclusiveSiteMediaDetectorResolver(detectors),
             NullLogger<RoutedMediaDetectionPipeline>.Instance);
     }
+
+    private static YouTubeYtDlpExtractor StubYouTubeYtDlp() =>
+        new(Options.Create(new AppOptions()), NullLogger<YouTubeYtDlpExtractor>.Instance);
+
+    private static TikTokYtDlpExtractor StubTikTokYtDlp() =>
+        new(Options.Create(new AppOptions()), NullLogger<TikTokYtDlpExtractor>.Instance);
+
+    private static BilibiliYtDlpExtractor StubBilibiliYtDlp() =>
+        new(Options.Create(new AppOptions()), NullLogger<BilibiliYtDlpExtractor>.Instance);
 
     [Theory]
     [InlineData("https://www.douyin.com/video/1234567890123456789", SiteKind.Douyin)]
@@ -498,9 +508,9 @@ public class ExclusiveSiteDetectionTests
         var detectors = new IExclusiveSiteMediaDetector[]
         {
             new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance),
-            new TikTokMediaDetector(NullLogger<TikTokMediaDetector>.Instance),
-            new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance),
-            new BilibiliMediaDetector(NullLogger<BilibiliMediaDetector>.Instance)
+            new TikTokMediaDetector(NullLogger<TikTokMediaDetector>.Instance, StubTikTokYtDlp()),
+            new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance, StubYouTubeYtDlp()),
+            new BilibiliMediaDetector(NullLogger<BilibiliMediaDetector>.Instance, StubBilibiliYtDlp())
         };
         foreach (var page in pages)
             Assert.Equal(1, detectors.Count(d => d.Matches(page)));
@@ -991,7 +1001,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task TikTok_Exclusive_Positive_Path()
     {
-        var detector = new TikTokMediaDetector(NullLogger<TikTokMediaDetector>.Instance);
+        var detector = new TikTokMediaDetector(NullLogger<TikTokMediaDetector>.Instance, StubTikTokYtDlp());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var page = new Uri("https://www.tiktok.com/@u/video/1234567890123456789");
@@ -1006,7 +1016,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task YouTube_Exclusive_Positive_Path()
     {
-        var detector = new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance);
+        var detector = new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance, StubYouTubeYtDlp());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var page = new Uri("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
@@ -1021,7 +1031,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Bilibili_Exclusive_Positive_Path()
     {
-        var detector = new BilibiliMediaDetector(NullLogger<BilibiliMediaDetector>.Instance);
+        var detector = new BilibiliMediaDetector(NullLogger<BilibiliMediaDetector>.Instance, StubBilibiliYtDlp());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var page = new Uri("https://www.bilibili.com/video/BV1xx411c7mD");

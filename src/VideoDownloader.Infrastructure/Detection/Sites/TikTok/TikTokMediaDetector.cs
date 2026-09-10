@@ -18,7 +18,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private readonly ILogger<TikTokMediaDetector> _logger;
-    private readonly IExternalSiteResolver? _external;
+    private readonly TikTokYtDlpExtractor _ytdlp;
     private readonly object _gate = new();
     private Guid _sessionId;
     private Uri? _pageUrl;
@@ -37,10 +37,10 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
 
     public TikTokMediaDetector(
         ILogger<TikTokMediaDetector> logger,
-        IEnumerable<IExternalSiteResolver>? externals = null)
+        TikTokYtDlpExtractor ytdlp)
     {
         _logger = logger;
-        _external = (externals ?? []).FirstOrDefault(e => e.IsAvailable);
+        _ytdlp = ytdlp;
     }
 
     public string Name => "TikTokMediaDetector";
@@ -179,7 +179,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
 
         bool alreadyAttempted;
         lock (_gate) alreadyAttempted = _externalAttempted;
-        if (_external is null || alreadyAttempted)
+        if (!_ytdlp.IsAvailable || alreadyAttempted)
             return;
 
         var hasCookies = enriched.Cookies.Count > 0;
@@ -194,7 +194,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
             IReadOnlyList<DetectedVideo> videos = [];
             foreach (var attempt in resolveAttempts)
             {
-                videos = await _external.ResolveAsync(attempt, enriched, ct);
+                videos = await _ytdlp.ResolveAsync(attempt, enriched, ct);
                 if (videos.Count > 0)
                 {
                     resolveUrl = attempt;

@@ -1122,7 +1122,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(generation, ct);
         var token = cancellation.Token;
         var anyAvailable = false;
-        foreach (var resolver in _externals.Where(r => r.IsAvailable))
+        foreach (var resolver in _externals.Where(r => r.IsAvailable && r.SupportsSite(SiteIds.Generic)))
         {
             anyAvailable = true;
             if (generation.IsCancellationRequested || sessionId != SessionId)

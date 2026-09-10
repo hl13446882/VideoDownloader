@@ -10,7 +10,7 @@ namespace VideoDownloader.Infrastructure.Detection.Sites.YouTube;
 public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
 {
     private readonly ILogger<YouTubeMediaDetector> _logger;
-    private readonly IExternalSiteResolver? _external;
+    private readonly YouTubeYtDlpExtractor _ytdlp;
     private readonly object _gate = new();
     private Guid _sessionId;
     private Uri? _pageUrl;
@@ -25,10 +25,10 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
 
     public YouTubeMediaDetector(
         ILogger<YouTubeMediaDetector> logger,
-        IEnumerable<IExternalSiteResolver>? externals = null)
+        YouTubeYtDlpExtractor ytdlp)
     {
         _logger = logger;
-        _external = (externals ?? []).FirstOrDefault(e => e.IsAvailable);
+        _ytdlp = ytdlp;
     }
 
     public string Name => "YouTubeMediaDetector";
@@ -136,14 +136,14 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
 
         bool alreadyAttempted;
         lock (_gate) alreadyAttempted = _externalAttempted;
-        if (_external is null || alreadyAttempted)
+        if (!_ytdlp.IsAvailable || alreadyAttempted)
             return;
 
         var hasCookies = enriched.Cookies.Count > 0;
         Diagnostics.HangProbe.Mark("youtube.ytdlp.begin", $"{resolveUrl.AbsoluteUri} cookies={enriched.Cookies.Count}");
         try
         {
-            var videos = await _external.ResolveAsync(resolveUrl, enriched, ct);
+            var videos = await _ytdlp.ResolveAsync(resolveUrl, enriched, ct);
             Diagnostics.HangProbe.Mark("youtube.ytdlp.end", $"count={videos.Count}");
             lock (_gate)
             {

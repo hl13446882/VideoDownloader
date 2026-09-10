@@ -5,10 +5,16 @@ if(-not $SkipBuild){
     dotnet build (Join-Path $root 'tools\VideoDownloader.Verify') -c Release --verbosity quiet
     if($LASTEXITCODE -ne 0){throw 'Verifier build failed'}
 }
-# TikTok(feed≥6 / ≥5 pass) + Bilibili + AES clear-key + multi-video generic.
-# YouTube skipped: user judged PASS on 2026-09-10 (see DOCS/live-acceptance-handoff-20260910.md).
-# Each download proof must be >20MiB (see DownloadAcceptance).
+# Full campaign after yt-dlp physical isolation + singleton/single-entry detectors.
+# Sites: YouTube x3, Douyin (feed+jingxuan+short), TikTok feed (>=5/6), Bilibili x3,
+# Generic AES clear-key + multi-video. Each download proof must be >20MiB (see DownloadAcceptance).
 $urls=@(
+    'https://www.youtube.com/watch?v=oe9rK1jzNbA&list=RDoe9rK1jzNbA&start_radio=1',
+    'https://www.youtube.com/watch?v=Y_tPE3o5NWk&list=RDY_tPE3o5NWk&start_radio=1',
+    'https://www.youtube.com/watch?v=rKrq5V3GJWI&list=RDrKrq5V3GJWI&start_radio=1',
+    'https://www.douyin.com/?recommend=1',
+    'https://www.douyin.com/jingxuan?modal_id=7660503158577286451',
+    'https://v.douyin.com/9cY9PQIM6HY/',
     'https://www.tiktok.com/',
     'https://www.bilibili.com/video/BV1xMtw6XEAu',
     'https://www.bilibili.com/video/BV1CXWuz3E7V/',

@@ -10,7 +10,7 @@ namespace VideoDownloader.Infrastructure.Detection.Sites.Bilibili;
 public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
 {
     private readonly ILogger<BilibiliMediaDetector> _logger;
-    private readonly IExternalSiteResolver? _external;
+    private readonly BilibiliYtDlpExtractor _ytdlp;
     private readonly object _gate = new();
     private Guid _sessionId;
     private Uri? _pageUrl;
@@ -25,10 +25,10 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
 
     public BilibiliMediaDetector(
         ILogger<BilibiliMediaDetector> logger,
-        IEnumerable<IExternalSiteResolver>? externals = null)
+        BilibiliYtDlpExtractor ytdlp)
     {
         _logger = logger;
-        _external = (externals ?? []).FirstOrDefault(e => e.IsAvailable);
+        _ytdlp = ytdlp;
     }
 
     public string Name => "BilibiliMediaDetector";
@@ -134,13 +134,13 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
 
         bool alreadyAttempted;
         lock (_gate) alreadyAttempted = _externalAttempted;
-        if (_external is null || alreadyAttempted)
+        if (!_ytdlp.IsAvailable || alreadyAttempted)
             return;
 
         var hasCookies = enriched.Cookies.Count > 0;
         try
         {
-            var videos = await _external.ResolveAsync(resolveUrl, enriched, ct);
+            var videos = await _ytdlp.ResolveAsync(resolveUrl, enriched, ct);
             lock (_gate)
             {
                 if (videos.Count > 0 || hasCookies)
