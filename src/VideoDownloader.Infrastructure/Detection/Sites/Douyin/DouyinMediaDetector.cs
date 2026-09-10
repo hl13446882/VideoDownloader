@@ -343,6 +343,19 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             if (sessionId == Guid.Empty)
                 return Task.CompletedTask;
 
+            // Final seal: if declared slots never all resolved, download the resolved set completely.
+            if (_session.CurrentMode == DouyinContentMode.Album &&
+                _session.AlbumImages.Count > 0 &&
+                _session.ExpectedAlbumImageCount is int need &&
+                need > _session.AlbumImages.Count)
+            {
+                _logger.LogWarning(
+                    "Douyin album Complete with resolved images={Have} declared/expected={Need}; sealing resolved set",
+                    _session.AlbumImages.Count,
+                    need);
+                _session.ExpectedAlbumImageCount = _session.AlbumImages.Count;
+            }
+
             descriptor = BuildDescriptor();
             if (descriptor is null)
             {
