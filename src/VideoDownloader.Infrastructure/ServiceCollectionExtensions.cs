@@ -76,6 +76,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IDownloadRepository, SqliteDownloadRepository>();
         services.AddSingleton<IDownloadBackendRouter, DownloadBackendRouter>();
         services.AddSingleton<IDownloadEngine, DownloadEngine>();
+        services.AddSingleton<IMediaAddressRediscoverer, BrowserMediaAddressRediscoverer>();
         services.AddSingleton<IFfmpegAdapter, FfmpegAdapter>();
         services.AddHttpClient("license", client =>
         {

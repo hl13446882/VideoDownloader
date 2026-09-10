@@ -86,6 +86,9 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 
     public Task ProcessNetworkAsync(NormalizedNetworkEvent networkEvent, CancellationToken ct)
     {
+        MediaDescriptor? lateEmit = null;
+        var lateSession = Guid.Empty;
+
         lock (_gate)
         {
             if (_session.PageUrl is null || !IsCurrentSession(networkEvent.SessionId))
@@ -246,8 +249,44 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 track.Kind is MediaTrackKind.Video or MediaTrackKind.Combined &&
                 !isMse)
                 _session.SwitchContent(_session.CurrentContentId, DouyinContentMode.Video);
+
+            // After a deferred fragile Complete, emit as soon as durable/verified progressive arrives.
+            if (!isMse &&
+                track.Kind == MediaTrackKind.Combined &&
+                !DouyinPlayEvidence.IsFragileUnverifiedProgressive(track))
+            {
+                var late = BuildDescriptor();
+                if (late is not null)
+                {
+                    lateSession = _session.SessionId;
+                    lateEmit = late;
+                    _failed = false;
+                    _failureReason = null;
+                    if (late.MediaId is { Length: > 0 } mediaId && late.Video is not null)
+                        RememberProgressiveOwner(late.Video.SourceUrl, mediaId);
+                    var win = late.Video?.ProbeMethod ?? ProbeMethods.NetworkMedia;
+                    _probeStats.Record(SiteIds.Douyin, win, true);
+                    _logger.LogInformation(
+                        "[DouyinSelect] session={Session} selected={Host}{Path} kind={Kind} formats={Formats} method={Method} reason=late_progressive owner={Owner}",
+                        _session.SessionId,
+                        late.Video?.SourceUrl.Host,
+                        TruncatePath(late.Video?.SourceUrl.AbsolutePath ?? ""),
+                        late.Video?.Kind,
+                        late.Formats.Count, win, late.MediaId);
+                }
+            }
         }
 
+        if (lateEmit is null)
+            return Task.CompletedTask;
+
+        lock (_gate)
+        {
+            if (_session.SessionId != lateSession)
+                return Task.CompletedTask;
+        }
+
+        DescriptorsReady?.Invoke(this, [lateEmit]);
         return Task.CompletedTask;
     }
 
@@ -396,15 +435,23 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 var hasMseOnly = _session.CurrentMode != DouyinContentMode.Album &&
                                  _session.VideoCandidates.Any(t =>
                                      t.IsMseTrack || DouyinPlayEvidence.IsMseVideoPath(t.SourceUrl));
+                var fragileOnly = _session.CurrentMode != DouyinContentMode.Album &&
+                                  _session.VideoCandidates.Where(BelongsToCurrent).Any(t =>
+                                      !t.IsMseTrack && t.Kind == MediaTrackKind.Combined) &&
+                                  _session.VideoCandidates.Where(BelongsToCurrent).Where(t =>
+                                      !t.IsMseTrack && t.Kind == MediaTrackKind.Combined)
+                                      .All(DouyinPlayEvidence.IsFragileUnverifiedProgressive);
                 _failureReason = _session.CurrentMode == DouyinContentMode.Album
                     ? (_session.ExpectedAlbumImageCount is int want &&
                        want > 0 &&
                        _session.AlbumImages.Count < want
                         ? $"douyin_album_incomplete:{_session.AlbumImages.Count}/{want}"
                         : "douyin_album_no_images")
-                    : hasMseOnly
-                        ? "douyin_mse_only"
-                        : "douyin_no_media";
+                    : fragileOnly
+                        ? "douyin_fragile_only"
+                        : hasMseOnly
+                            ? "douyin_mse_only"
+                            : "douyin_no_media";
                 _logger.LogWarning(
                     "[DouyinSelect] session={Session} selected=none reason={Reason} images={Images}/{Expected} candidates={Count} (no Generic fallback)",
                     _session.SessionId, _failureReason,
@@ -412,6 +459,8 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                     _session.VideoCandidates.Count);
                 if (_session.CurrentMode == DouyinContentMode.Album)
                     _probeStats.Record(SiteIds.Douyin, ProbeMethods.Album, false);
+                else if (fragileOnly)
+                    _probeStats.Record(SiteIds.Douyin, ProbeMethods.RouterData, false);
                 else if (hasMseOnly)
                     _probeStats.Record(SiteIds.Douyin, ProbeMethods.NetworkMedia, false);
                 else
@@ -499,6 +548,19 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         var video = SelectBestVideo(_session.VideoCandidates.Where(BelongsToCurrent).ToArray(), _session.AudioCandidates.Where(BelongsToCurrent).ToArray());
         if (video is null)
             return null;
+
+        // Hard rule: never seal an unverified fragile signed CDN as the download primary.
+        // Wait for network/zjcdn (or validated progressive); Complete records douyin_fragile_only if none arrive.
+        if (DouyinPlayEvidence.IsFragileUnverifiedProgressive(video))
+        {
+            _logger.LogInformation(
+                "Douyin defer seal fragile unverified host={Host} path={Path} method={Method}",
+                video.SourceUrl.Host,
+                TruncatePath(video.SourceUrl.AbsolutePath),
+                video.ProbeMethod);
+            return null;
+        }
+
         var pairedAudio = SelectBest(_session.AudioCandidates.Where(BelongsToCurrent).ToArray());
         // Muxed progressive already carries audio — do not remux a second track.
         if (video.Kind == MediaTrackKind.Combined)

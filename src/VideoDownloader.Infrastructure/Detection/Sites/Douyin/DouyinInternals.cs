@@ -162,6 +162,19 @@ internal static class DouyinPlayEvidence
         track.Kind == MediaTrackKind.Combined &&
         track.ContentLength is > 0 and < MediaResourceSizeFilter.MinProgressiveVideoBytes;
 
+    public static bool IsFragileSignedHost(Uri url) =>
+        url.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase) ||
+        url.Host.Contains("webapp-prime", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Fragile Dom/router listing with no readable proof — must not seal as download primary.
+    /// </summary>
+    public static bool IsFragileUnverifiedProgressive(MediaTrack track) =>
+        !track.IsMseTrack &&
+        track.Kind is MediaTrackKind.Combined or MediaTrackKind.Video &&
+        IsFragileSignedHost(track.SourceUrl) &&
+        !IsVerifiedProgressive(track);
+
     /// <summary>
     /// Progressive that already has readable proof (validated / real browser play / sized network).
     /// Dom router_data listings are never verified — they must not overwrite these.

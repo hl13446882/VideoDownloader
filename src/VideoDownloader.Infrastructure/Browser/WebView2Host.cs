@@ -444,8 +444,14 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
     {
         if (_core is null)
             throw new InvalidOperationException("WebView2 is not initialized.");
-        _core.Navigate(url);
-        return Task.CompletedTask;
+
+        if (_uiDispatcher is null || _uiDispatcher.CheckAccess())
+        {
+            _core.Navigate(url);
+            return Task.CompletedTask;
+        }
+
+        return _uiDispatcher.InvokeAsync(() => _core.Navigate(url)).Task;
     }
 
     public bool CanGoBack => _core?.CanGoBack == true;

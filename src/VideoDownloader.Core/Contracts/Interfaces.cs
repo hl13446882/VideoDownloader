@@ -119,6 +119,18 @@ public interface IRequestContextProvider
         bool forceCookies = false);
 }
 
+/// <summary>
+/// Re-open a stable page in the active browser and wait for a fresh downloadable media address.
+/// Used when signed CDN URLs 403 and offline resolvers cannot renew (e.g. Douyin).
+/// </summary>
+public interface IMediaAddressRediscoverer
+{
+    Task<MediaVariant?> RediscoverAsync(
+        Uri recoveryPage,
+        MediaVariant previous,
+        CancellationToken ct);
+}
+
 public interface IMediaDetectionPipeline
 {
     IDiscoveryScope? BeginDiscovery(Guid sessionId) => null;

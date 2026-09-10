@@ -30,6 +30,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
     private readonly LicenseService _license;
     private readonly IReadOnlyList<IExternalSiteResolver> _resolvers;
     private readonly MediaAvailabilityValidator? _availability;
+    private readonly IMediaAddressRediscoverer? _rediscoverer;
     private readonly ConcurrentDictionary<Guid, DownloadJob> _jobs = new();
     private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _ctsMap = new();
     private readonly ConcurrentDictionary<Guid, byte> _removedJobs = new();
@@ -51,7 +52,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         ILogger<DownloadEngine> logger,
         LicenseService license,
         IEnumerable<IExternalSiteResolver>? resolvers = null,
-        MediaAvailabilityValidator? availability = null)
+        MediaAvailabilityValidator? availability = null,
+        IMediaAddressRediscoverer? rediscoverer = null)
     {
         _httpDownloader = httpDownloader;
         _m3u8 = m3u8;
@@ -65,6 +67,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         _license = license;
         _resolvers = (resolvers ?? []).ToArray();
         _availability = availability;
+        _rediscoverer = rediscoverer;
         _concurrency = new SemaphoreSlim(_options.Download.MaxConcurrentDownloads);
         _failedRetryLoop = Task.Run(() => FailedRetryLoopAsync(_lifetime.Token));
     }
@@ -472,6 +475,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             var gatewayRenewed = false;
             var addressRenewed = false;
             var alternatesTried = false;
+            var browserRediscovered = false;
 
             while (true)
             {
@@ -482,7 +486,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                 }
                 catch (DownloadException ex) when (
                     ex.ErrorCode == ErrorCodes.Http403 &&
-                    !(cookieRetried && gatewayRenewed && addressRenewed) &&
+                    !(cookieRetried && gatewayRenewed && addressRenewed && browserRediscovered) &&
                     !cts.IsCancellationRequested)
                 {
                     _logger.LogWarning("Job {JobId} media HTTP_403; starting same-content recovery", job.Id);
@@ -580,6 +584,43 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                                 "Job {JobId} Douyin gateway renew failed: {Reason}",
                                 job.Id,
                                 VideoDownloader.Infrastructure.Logging.SanitizedLogger.SanitizeMessage(gatewayError.Message));
+                        }
+                    }
+
+                    // Douyin has no yt-dlp renewer: reopen the detail page in WebView and re-detect.
+                    if (!browserRediscovered &&
+                        _rediscoverer is not null &&
+                        (fragileSigned || IsDouyinRecoveryPage(pageUrl)))
+                    {
+                        browserRediscovered = true;
+                        try
+                        {
+                            var rediscovered = await _rediscoverer.RediscoverAsync(
+                                pageUrl, job.Variant, cts.Token);
+                            if (rediscovered is not null &&
+                                !string.Equals(
+                                    rediscovered.SourceUrl.AbsoluteUri,
+                                    job.Variant.SourceUrl.AbsoluteUri,
+                                    StringComparison.OrdinalIgnoreCase))
+                            {
+                                job.Variant = rediscovered.WithRequestContext(
+                                    rediscovered.RequestContext.Cookies.Count > 0
+                                        ? rediscovered.RequestContext
+                                        : refreshed);
+                                ResetTransferState(job);
+                                await checkpoint();
+                                _logger.LogInformation(
+                                    "Douyin browser rediscover switched job {JobId} host={Host}",
+                                    job.Id, job.Variant.SourceUrl.Host);
+                                continue;
+                            }
+                        }
+                        catch (Exception rediscoverError)
+                        {
+                            _logger.LogWarning(
+                                "Job {JobId} Douyin browser rediscover failed: {Reason}",
+                                job.Id,
+                                VideoDownloader.Infrastructure.Logging.SanitizedLogger.SanitizeMessage(rediscoverError.Message));
                         }
                     }
 
@@ -962,6 +1003,10 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
 
         return null;
     }
+
+    private static bool IsDouyinRecoveryPage(Uri pageUrl) =>
+        pageUrl.Host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
+        pageUrl.Host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase);
 
     private static bool TryBuildDouyinPlayGateway(MediaVariant variant, Uri pageUrl, out Uri gateway)
     {
