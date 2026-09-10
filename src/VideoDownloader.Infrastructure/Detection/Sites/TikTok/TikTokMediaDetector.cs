@@ -18,6 +18,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private readonly ILogger<TikTokMediaDetector> _logger;
+    private readonly IExternalSiteResolver? _external;
     private readonly object _gate = new();
     private Guid _sessionId;
     private Uri? _pageUrl;
@@ -26,13 +27,21 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
     private RequestContext _context = RequestContext.CreateEmpty();
     private readonly List<MediaTrack> _videos = [];
     private readonly List<MediaTrack> _audios = [];
+    private readonly List<MediaVariant> _formats = [];
     private readonly List<AlbumImageItem> _images = [];
     private bool _album;
     private bool _failed;
     private string? _failureReason;
+    private bool _externalAttempted;
     private CancellationTokenSource _lifetime = new();
 
-    public TikTokMediaDetector(ILogger<TikTokMediaDetector> logger) => _logger = logger;
+    public TikTokMediaDetector(
+        ILogger<TikTokMediaDetector> logger,
+        IEnumerable<IExternalSiteResolver>? externals = null)
+    {
+        _logger = logger;
+        _external = (externals ?? []).FirstOrDefault(e => e.IsAvailable);
+    }
 
     public string Name => "TikTokMediaDetector";
     public SiteKind Site => SiteKind.TikTok;
@@ -80,10 +89,12 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         _context = RequestContext.CreateEmpty();
         _videos.Clear();
         _audios.Clear();
+        _formats.Clear();
         _images.Clear();
         _album = false;
         _failed = false;
         _failureReason = null;
+        _externalAttempted = false;
     }
 
     public Task ProcessNetworkAsync(NormalizedNetworkEvent e, CancellationToken ct)
@@ -93,6 +104,12 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
             if (_pageUrl is null || _failed) return Task.CompletedTask;
             if (e.SessionId != Guid.Empty && e.SessionId != _sessionId) return Task.CompletedTask;
             if (e.StatusCode is not (200 or 206 or null)) return Task.CompletedTask;
+            // Never admit HTML/document responses as TikTok media (feed often returns shells).
+            if (e.MimeType is not null &&
+                (e.MimeType.Contains("html", StringComparison.OrdinalIgnoreCase) ||
+                 e.MimeType.Contains("text/", StringComparison.OrdinalIgnoreCase) ||
+                 e.MimeType.Contains("json", StringComparison.OrdinalIgnoreCase)))
+                return Task.CompletedTask;
 
             if (_album)
             {
@@ -120,9 +137,12 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         return Task.CompletedTask;
     }
 
-    public Task ProcessPageObservationAsync(
+    public async Task ProcessPageObservationAsync(
         Uri pageUrl, string? pageTitle, string? pageScriptJson, RequestContext context, CancellationToken ct)
     {
+        string? contentId;
+        Uri resolveUrl;
+        RequestContext enriched;
         lock (_gate)
         {
             if (_pageUrl is null) BeginSession(pageUrl, _sessionId == Guid.Empty ? Guid.NewGuid() : _sessionId);
@@ -133,15 +153,86 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
             {
                 _videos.Clear();
                 _audios.Clear();
+                _formats.Clear();
                 _images.Clear();
                 _album = false;
                 _contentId = id;
+                _externalAttempted = false;
             }
             _contentId ??= id;
-            if (!string.IsNullOrWhiteSpace(pageTitle)) _caption ??= pageTitle.Trim();
+            contentId = _contentId;
+            if (!string.IsNullOrWhiteSpace(pageTitle) &&
+                (string.IsNullOrWhiteSpace(_caption) || _caption is "视频"))
+                _caption = pageTitle.Trim();
             ApplyJson(pageScriptJson);
+            // Prefer concrete /video/{id} for yt-dlp (feed root is weak).
+            resolveUrl = contentId is null
+                ? _pageUrl
+                : new Uri($"https://www.tiktok.com/video/{contentId}");
+            enriched = _context;
         }
-        return Task.CompletedTask;
+
+        if (string.IsNullOrWhiteSpace(contentId))
+            return;
+
+        bool alreadyAttempted;
+        lock (_gate) alreadyAttempted = _externalAttempted;
+        if (_external is null || alreadyAttempted)
+            return;
+
+        var hasCookies = enriched.Cookies.Count > 0;
+        try
+        {
+            var videos = await _external.ResolveAsync(resolveUrl, enriched, ct);
+            lock (_gate)
+            {
+                if (videos.Count > 0 || hasCookies)
+                    _externalAttempted = true;
+
+                foreach (var v in videos.Where(v =>
+                             string.IsNullOrWhiteSpace(_contentId) ||
+                             string.Equals(v.SiteContentId, _contentId, StringComparison.OrdinalIgnoreCase) ||
+                             string.IsNullOrWhiteSpace(v.SiteContentId)))
+                {
+                    if (!string.IsNullOrWhiteSpace(v.DisplayTitle) &&
+                        (string.IsNullOrWhiteSpace(_caption) || _caption is "视频"))
+                        _caption = v.DisplayTitle;
+                    foreach (var variant in v.Variants)
+                    {
+                        if (variant.Tracks.Any(t => t.Kind == MediaTrackKind.Combined) &&
+                            variant.Tracks.Any(t => t.Kind == MediaTrackKind.Audio))
+                            continue;
+                        _formats.Add(variant with
+                        {
+                            ContentIdentity = _contentId is null ? variant.ContentIdentity : "id:" + _contentId,
+                            RecoveryPageUrl = _pageUrl
+                        });
+                    }
+                    foreach (var track in v.Variants.SelectMany(x => x.Tracks))
+                    {
+                        if (track.Kind == MediaTrackKind.Audio)
+                            Upsert(_audios, track with
+                            {
+                                ContentIdentity = _contentId is null ? track.ContentIdentity : "id:" + _contentId
+                            });
+                        else
+                            Upsert(_videos, track with
+                            {
+                                ContentIdentity = _contentId is null ? track.ContentIdentity : "id:" + _contentId
+                            });
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogInformation(ex, "TikTok exclusive yt-dlp resolve failed (no Generic fallback)");
+            lock (_gate)
+            {
+                if (hasCookies)
+                    _externalAttempted = true;
+            }
+        }
     }
 
     public Task CompleteAsync(CancellationToken ct)
@@ -172,12 +263,46 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 null, Best(_audios), _images.OrderBy(i => i.Index).ToArray(), _context, 0.9, _caption)
             { SessionId = _sessionId };
         }
+
+        if (_formats.Count > 0)
+        {
+            var best = _formats
+                .Where(v => v.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined))
+                .OrderByDescending(v => ScoreVariant(v))
+                .FirstOrDefault();
+            if (best is not null)
+            {
+                return new MediaDescriptor(SiteIds.TikTok, _pageUrl, _contentId, MediaContentType.Video,
+                    best.Tracks.FirstOrDefault(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined),
+                    best.Tracks.FirstOrDefault(t => t.Kind == MediaTrackKind.Audio),
+                    [], _context, 0.95, _caption)
+                {
+                    SessionId = _sessionId,
+                    Formats = _formats.ToArray()
+                };
+            }
+        }
+
         var video = Best(_videos);
         if (video is null) return null;
         var audio = video.Kind == MediaTrackKind.Combined ? null : Best(_audios);
         return new MediaDescriptor(SiteIds.TikTok, _pageUrl, _contentId, MediaContentType.Video,
             video, audio, [], _context, video.BrowserObserved ? 0.95 : 0.75, _caption)
         { SessionId = _sessionId };
+    }
+
+    private static int ScoreVariant(MediaVariant v)
+    {
+        var host = v.SourceUrl.Host;
+        var score = (v.Height ?? 0) * 10;
+        if (host.Contains("webapp-prime", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("web-prime", StringComparison.OrdinalIgnoreCase))
+            score -= 900;
+        if (host.Contains("tiktokcdn", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("byteoversea", StringComparison.OrdinalIgnoreCase))
+            score += 500;
+        score += (int)Math.Min(v.TotalContentLength ?? 0, int.MaxValue) / (1024 * 1024);
+        return score;
     }
 
     private void ApplyJson(string? json)
@@ -270,7 +395,12 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
 
     private static MediaTrack? Best(IEnumerable<MediaTrack> tracks)
     {
-        var list = tracks.ToList();
+        var list = tracks
+            .Where(t => t.ContentLength is null or >= MediaResourceSizeFilter.MinProgressiveVideoBytes ||
+                        t.BrowserObserved)
+            .ToList();
+        if (list.Count == 0)
+            list = tracks.ToList();
         if (list.Count == 0) return null;
         // Douyin-like: when a durable CDN exists, never default to fragile webapp-prime.
         var durable = list

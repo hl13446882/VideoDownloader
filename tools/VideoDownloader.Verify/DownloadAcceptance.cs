@@ -58,16 +58,21 @@ public partial class MainWindow
                 if (refreshed.Cookies.Count > 0)
                     variant = variant.WithRequestContext(refreshed);
 
-                // Feed web-prime playAddr often 403s. Briefly open the detail page in WebView to
-                // capture a fresh progressive; caller must re-land the feed afterward.
-                if (video.PageUrl.Host.Contains("douyin", StringComparison.OrdinalIgnoreCase) &&
+                // Feed web-prime / webapp-prime playAddr often 403s or is a crumb shell.
+                // Briefly open the detail page in WebView to capture a fresh progressive.
+                var isDouyin = video.PageUrl.Host.Contains("douyin", StringComparison.OrdinalIgnoreCase);
+                var isTikTok = video.PageUrl.Host.Contains("tiktok", StringComparison.OrdinalIgnoreCase);
+                if ((isDouyin || isTikTok) &&
                     variant.ContentIdentity is { Length: > 3 } identity &&
                     identity.StartsWith("id:", StringComparison.Ordinal) &&
                     (variant.SourceUrl.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase) ||
+                     variant.SourceUrl.Host.Contains("webapp-prime", StringComparison.OrdinalIgnoreCase) ||
                      variant.TotalContentLength is > 0 and < 2L * 1024 * 1024))
                 {
                     var id = identity[3..];
-                    var detail = new Uri($"https://www.douyin.com/video/{Uri.EscapeDataString(id)}");
+                    var detail = isTikTok
+                        ? new Uri($"https://www.tiktok.com/video/{Uri.EscapeDataString(id)}")
+                        : new Uri($"https://www.douyin.com/video/{Uri.EscapeDataString(id)}");
                     Log($"LIVE download #{ordinal}: open detail for fresh CDN {detail}");
                     WebView.CoreWebView2.Navigate(detail.AbsoluteUri);
                     var detailDeadline = DateTime.UtcNow.AddSeconds(50);
@@ -79,10 +84,14 @@ public partial class MainWindow
                         var fresh = _mainVm?.SelectedDetectedVideo?.Video;
                         pick = fresh?.Variants
                             .Where(MediaVariantRanking.HasVideo)
-                            .Where(v => !v.SourceUrl.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase))
+                            .Where(v => !v.SourceUrl.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase) &&
+                                        !v.SourceUrl.Host.Contains("webapp-prime", StringComparison.OrdinalIgnoreCase))
                             .Where(v => v.TotalContentLength is null or >= 512L * 1024)
                             .OrderByDescending(v => v.TotalContentLength ?? 0)
-                            .ThenBy(v => v.SourceUrl.Host.Contains("zjcdn", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+                            .ThenBy(v =>
+                                v.SourceUrl.Host.Contains("zjcdn", StringComparison.OrdinalIgnoreCase) ||
+                                v.SourceUrl.Host.Contains("tiktokcdn", StringComparison.OrdinalIgnoreCase) ||
+                                v.SourceUrl.Host.Contains("byteoversea", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
                             .FirstOrDefault();
                         if (pick is not null && pick.TotalContentLength is >= 512L * 1024)
                             break;
