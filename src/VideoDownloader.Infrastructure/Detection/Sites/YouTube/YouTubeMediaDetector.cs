@@ -97,7 +97,8 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
                 BrowserObserved = IsBrowserPlay(e),
                 IsValidated = IsBrowserPlay(e),
                 Evidence = IsBrowserPlay(e) ? MediaEvidence.BrowserObserved : MediaEvidence.Heuristic,
-                ContentIdentity = _contentId is null ? null : "id:" + _contentId
+                ContentIdentity = _contentId is null ? null : "id:" + _contentId,
+                ProbeMethod = ProbeMethods.NetworkMedia
             });
             if (_failed)
             {
@@ -221,9 +222,9 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
                 _failureReason = "youtube_no_media";
                 _logger.LogWarning("YouTubeMediaDetector Failed reason={Reason} (no Generic fallback)", _failureReason);
                 if (_externalAttempted)
-                    _probeStats.Record(SiteIds.YouTube, ProbeMethods.YtDlp, false);
+                    _probeStats.Record(SiteIds.YouTube, _ytdlp.LastProbeMethod ?? ProbeMethods.YtDlpDefault, false);
                 if (_tracks.Count > 0)
-                    _probeStats.Record(SiteIds.YouTube, ProbeMethods.NetworkCdn, false);
+                    _probeStats.Record(SiteIds.YouTube, ProbeMethods.NetworkMedia, false);
                 return Task.CompletedTask;
             }
 
@@ -250,7 +251,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
                 .OrderByDescending(v => v.Height ?? 0)
                 .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
                 .FirstOrDefault();
-            winningMethod = ProbeMethods.YtDlp;
+            winningMethod = _ytdlp.LastProbeMethod ?? ProbeMethods.YtDlpDefault;
             return new MediaDescriptor(SiteIds.YouTube, _pageUrl, _contentId, MediaContentType.Video,
                 best?.Tracks.FirstOrDefault(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined),
                 best?.Tracks.FirstOrDefault(t => t.Kind == MediaTrackKind.Audio),
@@ -271,13 +272,10 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
             .OrderByDescending(t => t.ContentLength ?? 0)
             .FirstOrDefault();
         if (video is null && audio is null) return null;
+        winningMethod = ProbeMethods.NetworkMedia;
         if (video is null)
-        {
-            winningMethod = ProbeMethods.ClassifyTrack(audio!.Evidence, audio.BrowserObserved);
             return new MediaDescriptor(SiteIds.YouTube, _pageUrl, _contentId, MediaContentType.Audio,
                 null, audio, [], _context, 0.7, _caption) { SessionId = _sessionId };
-        }
-        winningMethod = ProbeMethods.ClassifyTrack(video.Evidence, video.BrowserObserved);
         return new MediaDescriptor(SiteIds.YouTube, _pageUrl, _contentId, MediaContentType.Video,
             video,
             video.Kind == MediaTrackKind.Combined ? null : audio,

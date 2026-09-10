@@ -5,10 +5,11 @@ namespace VideoDownloader.Core.Contracts;
 /// <summary>
 /// Per-detector probe-method success ledger.
 /// Rates are NEVER shared across detectors (抖音 ≠ B站 ≠ YouTube ≠ TikTok).
+/// Only real address-discovery methods belong here — not every path that merely sees media.
 /// </summary>
 public interface IProbeMethodStats
 {
-    /// <param name="detectorId">Exclusive detector id — use <see cref="SiteIds"/> values (youtube/bilibili/douyin/tiktok).</param>
+    /// <param name="detectorId">Exclusive detector id — use <see cref="SiteIds"/> values.</param>
     void Record(string detectorId, string method, bool success);
 
     double SuccessRate(string detectorId, string method);
@@ -20,14 +21,13 @@ public interface IProbeMethodStats
     /// <summary>Reorder methods within one detector only.</summary>
     IReadOnlyList<T> OrderBySuccessRate<T>(string detectorId, IReadOnlyList<T> items, Func<T, string> methodOf);
 
-    /// <summary>Within this detector, whether yt-dlp historically beats that detector's network/browser/dom methods.</summary>
+    /// <summary>Within this detector, whether yt-dlp historically beats that detector's network methods.</summary>
     bool PreferYtdlpFirst(string detectorId);
 
     string? LastWinningMethod(string detectorId);
 
     IReadOnlyList<ProbeMethodStatRow> Snapshot();
 
-    /// <summary>Rewrite the living per-detector markdown + append round JSON.</summary>
     void CommitRound(string runId, IReadOnlyList<ProbeMethodRoundEntry> entries, string? markdownDocPath = null, string? historyDir = null);
 }
 
@@ -47,41 +47,56 @@ public sealed record ProbeMethodRoundEntry(
     int? DiscoveryMs,
     IReadOnlyList<string>? InvalidProbes);
 
-/// <summary>Canonical method names — always recorded under a specific detector id.</summary>
+/// <summary>
+/// Canonical address-discovery method names, scoped by detector in the ledger.
+/// Do not list DOM/browser as peer "main" methods where they are only identity/fallback signals.
+/// </summary>
 public static class ProbeMethods
 {
+    // —— YouTube ——
+    public const string YtDlpPotMweb = "ytdlp.pot_mweb";
+    public const string YtDlpDefault = "ytdlp.default";
+    public const string YtDlpWebEmbedded = "ytdlp.web_embedded";
+    public const string NetworkMedia = "network_media";
+
+    // —— Bilibili ——
+    public const string PlayurlApi = "playurl_api";
+    public const string NetworkPlayurl = "network_playurl";
     public const string YtDlp = "ytdlp";
-    public const string NetworkCdn = "network_cdn";
-    public const string BrowserPlay = "browser_play";
-    public const string DomObservation = "dom_observation";
-    public const string AlbumImages = "album_images";
+
+    // —— Douyin ——
+    public const string AwemeDetail = "aweme_detail";
+    public const string VideoElement = "video_element";
+    public const string RouterData = "router_data";
+    public const string Album = "album";
+
+    // —— TikTok ——
+    public const string WebData = "web_data";
+
     public const string ScheduleYtdlpFirst = "schedule:ytdlp_first";
     public const string ScheduleNetworkFirst = "schedule:network_first";
 
-    public static string YtDlpClient(string? extractorArgs)
+    public static string YouTubeClientMethod(string? extractorArgs)
     {
         if (string.IsNullOrWhiteSpace(extractorArgs))
-            return "ytdlp.client:default";
-        const string prefix = "youtube:player_client=";
-        var key = extractorArgs.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-            ? extractorArgs[prefix.Length..]
-            : extractorArgs;
-        return "ytdlp.client:" + key;
+            return YtDlpDefault;
+        if (extractorArgs.Contains("mweb", StringComparison.OrdinalIgnoreCase))
+            return YtDlpPotMweb;
+        if (extractorArgs.Contains("web_embedded", StringComparison.OrdinalIgnoreCase))
+            return YtDlpWebEmbedded;
+        return YtDlpDefault;
     }
 
-    public static string YtDlpUrl(string kind) => "ytdlp.url:" + kind;
-
-    public static string ClassifyTrack(MediaEvidence evidence, bool browserObserved) =>
-        evidence switch
-        {
-            MediaEvidence.BrowserObserved => BrowserPlay,
-            MediaEvidence.DomObserved => DomObservation,
-            _ when browserObserved => BrowserPlay,
-            _ => NetworkCdn
-        };
+    public static string? YouTubeExtractorArgs(string method) => method switch
+    {
+        YtDlpPotMweb => "youtube:player_client=mweb",
+        YtDlpWebEmbedded => "youtube:player_client=web_embedded",
+        YtDlpDefault => null,
+        _ => null
+    };
 }
 
-/// <summary>Exclusive detectors and the method sets that belong to each one.</summary>
+/// <summary>Exclusive detectors and the real address-discovery methods that belong to each.</summary>
 public static class ProbeDetectors
 {
     public static readonly string[] All =
@@ -102,54 +117,43 @@ public static class ProbeDetectors
         _ => detectorId + " 探测器"
     };
 
-    /// <summary>Methods that exist for this detector (used for docs + PreferYtdlpFirst).</summary>
     public static IReadOnlyList<string> MethodsOf(string detectorId) => detectorId switch
     {
         SiteIds.YouTube =>
         [
-            ProbeMethods.YtDlp,
-            ProbeMethods.NetworkCdn,
-            ProbeMethods.BrowserPlay,
-            ProbeMethods.DomObservation,
-            ProbeMethods.YtDlpClient("android,web"),
-            ProbeMethods.YtDlpClient("ios,web"),
-            ProbeMethods.YtDlpClient("web"),
-            ProbeMethods.YtDlpClient("tv_embedded"),
-            ProbeMethods.YtDlpClient(null)
+            ProbeMethods.YtDlpPotMweb,
+            ProbeMethods.YtDlpDefault,
+            ProbeMethods.YtDlpWebEmbedded,
+            ProbeMethods.NetworkMedia
         ],
         SiteIds.Bilibili =>
         [
-            ProbeMethods.YtDlp,
-            ProbeMethods.NetworkCdn,
-            ProbeMethods.BrowserPlay,
-            ProbeMethods.DomObservation
+            ProbeMethods.PlayurlApi,
+            ProbeMethods.NetworkPlayurl,
+            ProbeMethods.YtDlp
         ],
         SiteIds.Douyin =>
         [
-            // Douyin has no yt-dlp path — only network/DOM/album.
-            ProbeMethods.NetworkCdn,
-            ProbeMethods.BrowserPlay,
-            ProbeMethods.DomObservation,
-            ProbeMethods.AlbumImages
+            ProbeMethods.AwemeDetail,
+            ProbeMethods.NetworkMedia,
+            ProbeMethods.VideoElement,
+            ProbeMethods.RouterData,
+            ProbeMethods.Album
         ],
         SiteIds.TikTok =>
         [
             ProbeMethods.YtDlp,
-            ProbeMethods.NetworkCdn,
-            ProbeMethods.BrowserPlay,
-            ProbeMethods.DomObservation,
-            ProbeMethods.AlbumImages,
-            ProbeMethods.YtDlpUrl("embed"),
-            ProbeMethods.YtDlpUrl("canonical")
+            ProbeMethods.WebData,
+            ProbeMethods.NetworkMedia,
+            ProbeMethods.VideoElement,
+            ProbeMethods.Album
         ],
-        _ =>
-        [
-            ProbeMethods.NetworkCdn,
-            ProbeMethods.BrowserPlay,
-            ProbeMethods.DomObservation
-        ]
+        _ => [ProbeMethods.NetworkMedia]
     };
 
-    public static bool HasYtDlp(string detectorId) =>
-        MethodsOf(detectorId).Contains(ProbeMethods.YtDlp, StringComparer.Ordinal);
+    public static bool HasYtDlp(string detectorId) => detectorId switch
+    {
+        SiteIds.YouTube or SiteIds.Bilibili or SiteIds.TikTok => true,
+        _ => false
+    };
 }

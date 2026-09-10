@@ -96,7 +96,8 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
                 BrowserObserved = IsBrowserPlay(e),
                 IsValidated = IsBrowserPlay(e),
                 Evidence = IsBrowserPlay(e) ? MediaEvidence.BrowserObserved : MediaEvidence.Heuristic,
-                ContentIdentity = _contentId is null ? null : "id:" + _contentId
+                ContentIdentity = _contentId is null ? null : "id:" + _contentId,
+                ProbeMethod = ProbeMethods.NetworkPlayurl
             });
             if (_failed)
             {
@@ -216,7 +217,7 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
                 if (_externalAttempted)
                     _probeStats.Record(SiteIds.Bilibili, ProbeMethods.YtDlp, false);
                 if (_tracks.Count > 0)
-                    _probeStats.Record(SiteIds.Bilibili, ProbeMethods.NetworkCdn, false);
+                    _probeStats.Record(SiteIds.Bilibili, ProbeMethods.NetworkPlayurl, false);
                 return Task.CompletedTask;
             }
 
@@ -242,6 +243,7 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
                 .OrderByDescending(v => v.Height ?? 0)
                 .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
                 .FirstOrDefault();
+            // Direct playurl_api not implemented yet — yt-dlp path still hits wbi playurl under the hood.
             winningMethod = ProbeMethods.YtDlp;
             return new MediaDescriptor(SiteIds.Bilibili, _pageUrl, _contentId, MediaContentType.Video,
                 best?.Tracks.FirstOrDefault(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined),
@@ -263,13 +265,10 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
             .OrderByDescending(t => t.ContentLength ?? 0)
             .FirstOrDefault();
         if (video is null && audio is null) return null;
+        winningMethod = ProbeMethods.NetworkPlayurl;
         if (video is null)
-        {
-            winningMethod = ProbeMethods.ClassifyTrack(audio!.Evidence, audio.BrowserObserved);
             return new MediaDescriptor(SiteIds.Bilibili, _pageUrl, _contentId, MediaContentType.Audio,
                 null, audio, [], _context, 0.7, _caption) { SessionId = _sessionId };
-        }
-        winningMethod = ProbeMethods.ClassifyTrack(video.Evidence, video.BrowserObserved);
         return new MediaDescriptor(SiteIds.Bilibili, _pageUrl, _contentId, MediaContentType.Video,
             video, video.Kind == MediaTrackKind.Combined ? null : audio, [], _context,
             video.BrowserObserved ? 0.95 : 0.8, _caption) { SessionId = _sessionId };

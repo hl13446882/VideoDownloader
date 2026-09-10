@@ -1011,10 +1011,14 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
                 headers);
 
             EnqueueRawEvent(raw with { SessionId = pending.SessionId }, requestScope?.Fork());
-            // REDUNDANT(pending-delete after confirm): response-body MediaAddressScanner on exclusive hosts.
+            // Exclusive hosts skip generic body scanning — except Douyin aweme/detail JSON,
+            // which is the primary address-discovery method for that detector.
             var scanPage = pending.PageUrl ?? CurrentPageUrl;
+            var douyinAwemeDetail = scanPage is not null &&
+                                    IsDouyinHost(scanPage) &&
+                                    IsAwemeDetailApi(raw.Url);
             if (_captureEnabled &&
-                (scanPage is null || !IsExclusiveMediaHost(scanPage)) &&
+                (scanPage is null || !IsExclusiveMediaHost(scanPage) || douyinAwemeDetail) &&
                 ShouldScanResponseBody(raw) && raw.ContentLength is null or < 2097152 &&
                 (requestScope?.Fork() ?? _pipeline.BeginDiscovery(pending.SessionId)) is { } scope)
             {
@@ -1070,8 +1074,17 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
                 requestOwner == currentOwner ? requestOwner : null);
             _logger.LogInformation("Response discovery session={Session} host={Host} candidates={Count}", pending.Event.SessionId, pending.Event.Url.Host, addresses.Count);
             if (addresses.Count > 0 && _captureEnabled)
-                await scope.SubmitAsync(page, JsonSerializer.Serialize(new { candidates = addresses.Select(a => new { url = a.Url, contentIdentity = a.ContentIdentity }) }),
+            {
+                var probeMethod = IsAwemeDetailApi(pending.Event.Url)
+                    ? VideoDownloader.Core.Contracts.ProbeMethods.AwemeDetail
+                    : null;
+                await scope.SubmitAsync(page, JsonSerializer.Serialize(new
+                {
+                    probeMethod,
+                    candidates = addresses.Select(a => new { url = a.Url, contentIdentity = a.ContentIdentity })
+                }),
                     CaptureCurrentContext(page,page), timeout.Token);
+            }
         }
         catch (Exception ex) { _logger.LogDebug(ex, "Bounded response discovery failed"); }
     }
@@ -1101,6 +1114,19 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
                host.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase) ||
                host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase) ||
                host.Contains("b23.tv", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsDouyinHost(Uri pageUrl) =>
+        pageUrl.Host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
+        pageUrl.Host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsAwemeDetailApi(Uri url)
+    {
+        var path = url.AbsolutePath;
+        return path.Contains("/aweme/v1/web/aweme/detail", StringComparison.OrdinalIgnoreCase) ||
+               path.Contains("/aweme/detail", StringComparison.OrdinalIgnoreCase) ||
+               (path.Contains("/aweme/", StringComparison.OrdinalIgnoreCase) &&
+                path.Contains("detail", StringComparison.OrdinalIgnoreCase));
     }
 
     private async Task ConsumeAsync(CancellationToken ct)

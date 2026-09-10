@@ -210,7 +210,10 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 // Prefer explicit URL aweme id; otherwise bind only after observation sealed
                 // the work (feed CDN progressive rarely embeds aweme ids).
                 ContentIdentity = ownerTag,
-                IsMseTrack = isMse
+                IsMseTrack = isMse,
+                ProbeMethod = DouyinPlayEvidence.IsBrowserPlay(networkEvent)
+                    ? ProbeMethods.VideoElement
+                    : ProbeMethods.NetworkMedia
             };
 
             _logger.LogInformation(
@@ -408,11 +411,11 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                     _session.AlbumImages.Count, _session.ExpectedAlbumImageCount,
                     _session.VideoCandidates.Count);
                 if (_session.CurrentMode == DouyinContentMode.Album)
-                    _probeStats.Record(SiteIds.Douyin, ProbeMethods.AlbumImages, false);
+                    _probeStats.Record(SiteIds.Douyin, ProbeMethods.Album, false);
                 else if (hasMseOnly)
-                    _probeStats.Record(SiteIds.Douyin, ProbeMethods.NetworkCdn, false);
+                    _probeStats.Record(SiteIds.Douyin, ProbeMethods.NetworkMedia, false);
                 else
-                    _probeStats.Record(SiteIds.Douyin, ProbeMethods.DomObservation, false);
+                    _probeStats.Record(SiteIds.Douyin, ProbeMethods.AwemeDetail, false);
                 return Task.CompletedTask;
             }
 
@@ -421,10 +424,15 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             if (descriptor.MediaId is { Length: > 0 } mediaId && descriptor.Video is not null)
                 RememberProgressiveOwner(descriptor.Video.SourceUrl, mediaId);
             var win = descriptor.ContentType == MediaContentType.Album
-                ? ProbeMethods.AlbumImages
-                : descriptor.Video is not null
-                    ? ProbeMethods.ClassifyTrack(descriptor.Video.Evidence, descriptor.Video.BrowserObserved)
-                    : ProbeMethods.NetworkCdn;
+                ? ProbeMethods.Album
+                : descriptor.Video?.ProbeMethod
+                  ?? (descriptor.Video is not null
+                      ? (descriptor.Video.Evidence == MediaEvidence.BrowserObserved
+                          ? ProbeMethods.VideoElement
+                          : descriptor.Video.Evidence == MediaEvidence.DomObserved
+                              ? ProbeMethods.RouterData
+                              : ProbeMethods.NetworkMedia)
+                      : ProbeMethods.NetworkMedia);
             _probeStats.Record(SiteIds.Douyin, win, true);
             _logger.LogInformation(
                 "[DouyinSelect] session={Session} selected={Host}{Path} kind={Kind} formats={Formats} method={Method} reason=progressive_muxed owner={Owner}",
@@ -630,6 +638,66 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         {
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
+            // Response-body scan of aweme/v1/web/aweme/detail (and similar) arrives as candidates.
+            if (root.TryGetProperty("candidates", out var candidates) && candidates.ValueKind == JsonValueKind.Array)
+            {
+                var method = root.TryGetProperty("probeMethod", out var pm) && pm.ValueKind == JsonValueKind.String
+                    ? pm.GetString()
+                    : ProbeMethods.AwemeDetail;
+                if (string.IsNullOrWhiteSpace(method))
+                    method = ProbeMethods.AwemeDetail;
+                foreach (var item in candidates.EnumerateArray())
+                {
+                    string? raw = null;
+                    string? identity = null;
+                    if (item.ValueKind == JsonValueKind.String)
+                        raw = item.GetString();
+                    else if (item.ValueKind == JsonValueKind.Object)
+                    {
+                        if (item.TryGetProperty("url", out var u)) raw = u.GetString();
+                        if (item.TryGetProperty("contentIdentity", out var id) && id.ValueKind == JsonValueKind.String)
+                            identity = id.GetString();
+                    }
+                    if (!Uri.TryCreate(raw, UriKind.Absolute, out var url)) continue;
+                    if (DouyinPlayEvidence.IsNonDownloadableHost(url)) continue;
+                    if (!DouyinPlayEvidence.IsPlayableUrl(url)) continue;
+                    var mediaId = DouyinIdentity.ExtractIdFromQuery(url) ?? ExtractIdFromUrlPath(url)
+                                  ?? (identity is not null && identity.StartsWith("id:", StringComparison.Ordinal)
+                                      ? identity[3..]
+                                      : null);
+                    if (_session.CurrentContentId is not null && mediaId is not null &&
+                        !string.Equals(mediaId, _session.CurrentContentId, StringComparison.Ordinal))
+                        continue;
+                    var kind = DouyinPlayEvidence.InferKind(url, null);
+                    var isMse = DouyinPlayEvidence.IsMseAdaptivePath(url);
+                    var trackKind = kind switch
+                    {
+                        MediaTrackKind.Audio => MediaTrackKind.Audio,
+                        MediaTrackKind.Video => MediaTrackKind.Video,
+                        _ when isMse => MediaTrackKind.Video,
+                        _ => MediaTrackKind.Combined
+                    };
+                    var track = new MediaTrack(
+                        trackKind == MediaTrackKind.Audio ? "audio" : "media",
+                        trackKind,
+                        url, null, InferContainer(url, null), null, null, _session.Context)
+                    {
+                        BrowserObserved = false,
+                        IsValidated = false,
+                        Evidence = MediaEvidence.DomObserved,
+                        ContentIdentity = _session.CurrentContentId is null && mediaId is null
+                            ? null
+                            : "id:" + (_session.CurrentContentId ?? mediaId),
+                        IsMseTrack = isMse,
+                        ProbeMethod = method
+                    };
+                    if (track.Kind == MediaTrackKind.Audio)
+                        Upsert(_session.AudioCandidates, track);
+                    else if (!isMse || _session.CurrentMode != DouyinContentMode.Album)
+                        Upsert(_session.VideoCandidates, track);
+                }
+            }
+
             if (root.TryGetProperty("caption", out var caption) &&
                 caption.ValueKind == JsonValueKind.String &&
                 !string.IsNullOrWhiteSpace(caption.GetString()))
@@ -790,7 +858,8 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                         IsValidated = false,
                         Evidence = MediaEvidence.DomObserved,
                         ContentIdentity = _session.CurrentContentId is null ? null : "id:" + _session.CurrentContentId,
-                        IsMseTrack = isMse
+                        IsMseTrack = isMse,
+                        ProbeMethod = ProbeMethods.RouterData
                     };
                     if (track.Kind == MediaTrackKind.Audio)
                         Upsert(_session.AudioCandidates, track);

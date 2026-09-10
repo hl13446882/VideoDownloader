@@ -42,4 +42,10 @@ public sealed record MediaTrack(
     /// These require reconstruction and must never enter the ordinary progressive download path.
     /// </summary>
     public bool IsMseTrack { get; init; }
+
+    /// <summary>
+    /// Which address-discovery method produced this track (detector-scoped ledger key).
+    /// Examples: aweme_detail, network_media, ytdlp.pot_mweb.
+    /// </summary>
+    public string? ProbeMethod { get; init; }
 }

@@ -32,6 +32,9 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
 
     public bool LastFailureIsHumanVerification { get; private set; }
 
+    /// <summary>Which YouTube address method last produced formats (ytdlp.pot_mweb / default / web_embedded).</summary>
+    public string? LastProbeMethod { get; private set; }
+
     public bool IsAvailable
     {
         get
@@ -53,6 +56,7 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
         ct.ThrowIfCancellationRequested();
         LastError = null;
         LastFailureIsHumanVerification = false;
+        LastProbeMethod = null;
         if (!IsAvailable)
         {
             LastError = "yt-dlp 不可用";
@@ -88,21 +92,18 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                     siteId);
             }
 
+            // Contract: only real address methods — pot_mweb → default → web_embedded.
+            // Do not poll android/ios/web/tv_embedded as peer ledger methods.
             string?[] clientAttemptsDefault =
             [
-                // Prefer android first — web often fails with "Requested format is not available"
-                // and was burning ~4s×N before a working client.
-                "youtube:player_client=android,web",
-                "youtube:player_client=ios,web",
-                "youtube:player_client=web",
-                "youtube:player_client=tv_embedded",
-                null
+                ProbeMethods.YouTubeExtractorArgs(ProbeMethods.YtDlpPotMweb),
+                ProbeMethods.YouTubeExtractorArgs(ProbeMethods.YtDlpDefault),
+                ProbeMethods.YouTubeExtractorArgs(ProbeMethods.YtDlpWebEmbedded)
             ];
-            // Reorder by historical success rate so the hottest client is tried first.
             var clientAttempts = _probeStats.OrderBySuccessRate(
                 SiteIds.YouTube,
                 clientAttemptsDefault,
-                ProbeMethods.YtDlpClient).ToArray();
+                ProbeMethods.YouTubeClientMethod).ToArray();
 
             // Browser-cookie use is opt-in. When it is enabled, retry YouTube without
             // the captured session too because stale sessions can prevent extraction.
@@ -117,7 +118,7 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                 {
                     foreach (var extractorArgs in clientAttempts)
                     {
-                        var method = ProbeMethods.YtDlpClient(extractorArgs);
+                        var method = ProbeMethods.YouTubeClientMethod(extractorArgs);
                         var videos = await RunYtDlpOnceAsync(
                             path,
                             resolveUrl,
@@ -129,18 +130,15 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                             ct);
                         if (videos.Count > 0)
                         {
-                            // First usable client wins — polling remaining clients for a "better"
-                            // adaptive set burned 15–25s after a working android/web result.
                             LastError = null;
                             LastFailureIsHumanVerification = false;
+                            LastProbeMethod = method;
                             _probeStats.Record(SiteIds.YouTube, method, true);
                             return videos;
                         }
 
                         _probeStats.Record(SiteIds.YouTube, method, false);
 
-                        // Human verification is definitive for this page context —
-                        // further player_client swaps in the same context are wasted work.
                         if (LastFailureIsHumanVerification)
                         {
                             _logger.LogInformation(

@@ -804,12 +804,16 @@ public partial class MainWindow
     private static string InferWinningMethod(DetectedVideo video)
     {
         if(video.Variants.Any(v=>string.Equals(v.Container,"album",StringComparison.OrdinalIgnoreCase)||v.Tracks.Any(t=>t.Kind==MediaTrackKind.Image)))
-            return ProbeMethods.AlbumImages;
+            return ProbeMethods.Album;
         var track=video.Variants.SelectMany(v=>v.Tracks)
             .OrderByDescending(t=>t.BrowserObserved)
             .ThenByDescending(t=>t.ContentLength??0)
             .FirstOrDefault();
-        return track is null ? ProbeMethods.NetworkCdn : ProbeMethods.ClassifyTrack(track.Evidence,track.BrowserObserved);
+        if(track is null) return ProbeMethods.NetworkMedia;
+        if(!string.IsNullOrWhiteSpace(track.ProbeMethod)) return track.ProbeMethod!;
+        return track.Evidence==MediaEvidence.BrowserObserved ? ProbeMethods.VideoElement
+            : track.Evidence==MediaEvidence.DomObserved ? ProbeMethods.RouterData
+            : ProbeMethods.NetworkMedia;
     }
 
     private async Task<(bool Ok,string Note)> ReadMediaSampleAsync(

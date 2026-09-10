@@ -201,25 +201,18 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
 
         try
         {
-            // Prefer historically stronger URL shape first (embed vs canonical).
-            var resolveAttempts = _probeStats.OrderBySuccessRate(
-                SiteIds.TikTok,
-                new (Uri Url, string Method)[]
-                {
-                    (new Uri($"https://www.tiktok.com/embed/v2/{contentId}"), ProbeMethods.YtDlpUrl("embed")),
-                    (new Uri($"https://www.tiktok.com/@tiktok/video/{contentId}"), ProbeMethods.YtDlpUrl("canonical"))
-                },
-                x => x.Method);
+            // Internal URL fallback only — not peer ledger methods (same TikTok extractor).
+            Uri[] resolveAttempts =
+            [
+                new Uri($"https://www.tiktok.com/embed/v2/{contentId}"),
+                new Uri($"https://www.tiktok.com/@tiktok/video/{contentId}")
+            ];
             IReadOnlyList<DetectedVideo> videos = [];
             foreach (var attempt in resolveAttempts)
             {
-                videos = await _ytdlp.ResolveAsync(attempt.Url, enriched, ct);
+                videos = await _ytdlp.ResolveAsync(attempt, enriched, ct);
                 if (videos.Count > 0)
-                {
-                    _probeStats.Record(SiteIds.TikTok, attempt.Method, true);
                     break;
-                }
-                _probeStats.Record(SiteIds.TikTok, attempt.Method, false);
             }
 
             lock (_gate)
@@ -314,7 +307,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         if (_album)
         {
             if (_images.Count == 0) return null;
-            winningMethod = ProbeMethods.AlbumImages;
+            winningMethod = ProbeMethods.Album;
             return new MediaDescriptor(SiteIds.TikTok, _pageUrl, _contentId, MediaContentType.Album,
                 null, Best(_audios), _images.OrderBy(i => i.Index).ToArray(), _context, 0.9, _caption)
             { SessionId = _sessionId };
@@ -343,7 +336,13 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         var video = Best(_videos);
         if (video is null) return null;
         var audio = video.Kind == MediaTrackKind.Combined ? null : Best(_audios);
-        winningMethod = ProbeMethods.ClassifyTrack(video.Evidence, video.BrowserObserved);
+        winningMethod = !string.IsNullOrWhiteSpace(video.ProbeMethod)
+            ? video.ProbeMethod
+            : video.Evidence == MediaEvidence.DomObserved
+                ? ProbeMethods.WebData
+                : video.BrowserObserved
+                    ? ProbeMethods.VideoElement
+                    : ProbeMethods.NetworkMedia;
         return new MediaDescriptor(SiteIds.TikTok, _pageUrl, _contentId, MediaContentType.Video,
             video, audio, [], _context, video.BrowserObserved ? 0.95 : 0.75, _caption)
         { SessionId = _sessionId };
@@ -413,7 +412,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                         {
                             IsValidated = true,
                             Evidence = MediaEvidence.DomObserved,
-                            ContentIdentity = _contentId is null ? null : "id:" + _contentId
+                            ContentIdentity = _contentId is null ? null : "id:" + _contentId,
+                            ProbeMethod = ProbeMethods.WebData
                         });
                 }
             }
@@ -435,7 +435,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
             BrowserObserved = IsBrowserPlay(e),
             IsValidated = IsBrowserPlay(e),
             Evidence = IsBrowserPlay(e) ? MediaEvidence.BrowserObserved : MediaEvidence.Heuristic,
-            ContentIdentity = _contentId is null ? null : "id:" + _contentId
+            ContentIdentity = _contentId is null ? null : "id:" + _contentId,
+            ProbeMethod = IsBrowserPlay(e) ? ProbeMethods.VideoElement : ProbeMethods.NetworkMedia
         };
 
     private static void Upsert(List<MediaTrack> list, MediaTrack track)

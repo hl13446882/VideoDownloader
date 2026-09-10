@@ -97,19 +97,45 @@ public sealed class ProbeMethodStatsStore : IProbeMethodStats
 
     public bool PreferYtdlpFirst(string detectorId)
     {
-        // Douyin (and any detector without yt-dlp) must never borrow YouTube/Bili rates.
         if (!ProbeDetectors.HasYtDlp(detectorId))
             return false;
 
-        var ytdlp = SuccessRate(detectorId, ProbeMethods.YtDlp);
-        var network = Math.Max(
-            SuccessRate(detectorId, ProbeMethods.NetworkCdn),
+        if (detectorId is SiteIds.YouTube)
+        {
+            var ytdlp = Math.Max(
+                SuccessRate(detectorId, ProbeMethods.YtDlpPotMweb),
+                Math.Max(
+                    SuccessRate(detectorId, ProbeMethods.YtDlpDefault),
+                    SuccessRate(detectorId, ProbeMethods.YtDlpWebEmbedded)));
+            var network = SuccessRate(detectorId, ProbeMethods.NetworkMedia);
+            var attempts = Attempts(detectorId, ProbeMethods.YtDlpPotMweb)
+                           + Attempts(detectorId, ProbeMethods.YtDlpDefault)
+                           + Attempts(detectorId, ProbeMethods.YtDlpWebEmbedded);
+            if (attempts < 2)
+                return true;
+            return ytdlp >= network;
+        }
+
+        if (detectorId is SiteIds.Bilibili)
+        {
+            var api = SuccessRate(detectorId, ProbeMethods.PlayurlApi);
+            var ytdlp = SuccessRate(detectorId, ProbeMethods.YtDlp);
+            var network = SuccessRate(detectorId, ProbeMethods.NetworkPlayurl);
+            if (Attempts(detectorId, ProbeMethods.PlayurlApi) + Attempts(detectorId, ProbeMethods.YtDlp) < 2)
+                return false; // prefer network/grace until we have playurl_api samples
+            return Math.Max(api, ytdlp) >= network;
+        }
+
+        // TikTok: yt-dlp is the designed primary.
+        var tk = SuccessRate(detectorId, ProbeMethods.YtDlp);
+        var alt = Math.Max(
+            SuccessRate(detectorId, ProbeMethods.NetworkMedia),
             Math.Max(
-                SuccessRate(detectorId, ProbeMethods.BrowserPlay),
-                SuccessRate(detectorId, ProbeMethods.DomObservation)));
+                SuccessRate(detectorId, ProbeMethods.WebData),
+                SuccessRate(detectorId, ProbeMethods.VideoElement)));
         if (Attempts(detectorId, ProbeMethods.YtDlp) < 2)
-            return detectorId is SiteIds.YouTube;
-        return ytdlp >= network;
+            return true;
+        return tk >= alt;
     }
 
     public string? LastWinningMethod(string detectorId) =>
@@ -259,17 +285,24 @@ public sealed class ProbeMethodStatsStore : IProbeMethodStats
             sb.AppendLine();
         }
 
-        sb.AppendLine("## 方法含义（按探测器适用）");
+        sb.AppendLine("## 方法含义（真正取址方法；按探测器适用）");
         sb.AppendLine();
-        sb.AppendLine("| 方法 | YouTube | B站 | 抖音 | TikTok | 含义 |");
+        sb.AppendLine("| 方法 | YouTube | B站 | 抖音 | TikTok | 角色 |");
         sb.AppendLine("|---|---|---|---|---|---|");
-        sb.AppendLine("| `ytdlp` | ✓ | ✓ | ✗ | ✓ | 外部 yt-dlp |");
-        sb.AppendLine("| `network_cdn` | ✓ | ✓ | ✓ | ✓ | 网络 CDN / progressive |");
-        sb.AppendLine("| `browser_play` | ✓ | ✓ | ✓ | ✓ | 浏览器已播放 |");
-        sb.AppendLine("| `dom_observation` | ✓ | ✓ | ✓ | ✓ | DOM / playAddr |");
-        sb.AppendLine("| `album_images` | ✗ | ✗ | ✓ | ✓ | 图集图片 |");
-        sb.AppendLine("| `ytdlp.client:*` | ✓ | ✗ | ✗ | ✗ | YouTube player_client |");
-        sb.AppendLine("| `ytdlp.url:*` | ✗ | ✗ | ✗ | ✓ | TikTok embed / canonical URL |");
+        sb.AppendLine("| `ytdlp.pot_mweb` | 主 | ✗ | ✗ | ✗ | mweb + PO Token |");
+        sb.AppendLine("| `ytdlp.default` | 回退 | ✗ | ✗ | ✗ | yt-dlp 默认 client |");
+        sb.AppendLine("| `ytdlp.web_embedded` | 回退 | ✗ | ✗ | ✗ | embeddable only |");
+        sb.AppendLine("| `playurl_api` | ✗ | 主 | ✗ | ✗ | wbi playurl → DASH |");
+        sb.AppendLine("| `network_playurl` | ✗ | 回退 | ✗ | ✗ | 浏览器捕获 playurl/upos |");
+        sb.AppendLine("| `ytdlp` | ✗ | 回退 | ✗ | 主 | 站点 yt-dlp extractor |");
+        sb.AppendLine("| `aweme_detail` | ✗ | ✗ | 主 | ✗ | 拦截 aweme/detail JSON |");
+        sb.AppendLine("| `network_media` | 最后回退 | ✗ | 回退 | 回退 | CDN / play_addr 流 |");
+        sb.AppendLine("| `video_element` | ✗ | ✗ | 回退 | 回退 | 当前 video 元素 |");
+        sb.AppendLine("| `router_data` | ✗ | ✗ | 回退 | ✗ | `_ROUTER_DATA` 等 |");
+        sb.AppendLine("| `web_data` | ✗ | ✗ | ✗ | 回退 | SIGI_STATE / UNIVERSAL_DATA |");
+        sb.AppendLine("| `album` | ✗ | ✗ | 图集 | 图集 | 图集独立路径 |");
+        sb.AppendLine();
+        sb.AppendLine("> 不再把 `dom_observation` / `browser_play` / `ytdlp.url:embed|canonical` 列为平级核心方法。");
         sb.AppendLine();
         sb.AppendLine("历史轮次 JSON：`DOCS/probe-method-stats-rounds/<runId>.json`（内含 `byDetector` 分组）");
 
