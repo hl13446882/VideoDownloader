@@ -598,12 +598,25 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 
                 if (root.TryGetProperty("imageCount", out var countEl) &&
                     countEl.ValueKind == JsonValueKind.Number &&
-                    countEl.TryGetInt32(out var declared) &&
-                    declared > 0)
+                    countEl.TryGetInt32(out var collected) &&
+                    collected > 0)
                 {
                     _session.ExpectedAlbumImageCount = Math.Max(
                         _session.ExpectedAlbumImageCount ?? 0,
+                        collected);
+                }
+
+                if (root.TryGetProperty("declaredImageCount", out var declaredEl) &&
+                    declaredEl.ValueKind == JsonValueKind.Number &&
+                    declaredEl.TryGetInt32(out var declared) &&
+                    declared > 0)
+                {
+                    _session.DeclaredAlbumImageCount = Math.Max(
+                        _session.DeclaredAlbumImageCount ?? 0,
                         declared);
+                    // Prefer declared slots when observation already resolved that many URLs.
+                    if ((_session.ExpectedAlbumImageCount ?? 0) >= declared)
+                        _session.ExpectedAlbumImageCount = declared;
                 }
 
                 if (list.Count > 0)
@@ -617,6 +630,10 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                     _session.ExpectedAlbumImageCount = Math.Max(
                         _session.ExpectedAlbumImageCount ?? 0,
                         _session.AlbumImages.Count);
+                    if (_session.DeclaredAlbumImageCount is int want &&
+                        want > 0 &&
+                        _session.AlbumImages.Count >= want)
+                        _session.ExpectedAlbumImageCount = want;
                 }
             }
 
@@ -707,6 +724,15 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             null,
             GuessImageFormat(e.Url),
             EnrichContext(e.RequestContext)));
+        // Grow expected toward declared slots as CDN images arrive.
+        if (_session.DeclaredAlbumImageCount is int declared &&
+            declared > 0 &&
+            _session.AlbumImages.Count >= declared)
+            _session.ExpectedAlbumImageCount = declared;
+        else
+            _session.ExpectedAlbumImageCount = Math.Max(
+                _session.ExpectedAlbumImageCount ?? 0,
+                _session.AlbumImages.Count);
     }
 
     private void TryAcceptAlbumNetworkAudio(NormalizedNetworkEvent e)

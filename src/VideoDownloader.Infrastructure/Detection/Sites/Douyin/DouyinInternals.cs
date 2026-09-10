@@ -344,8 +344,10 @@ internal sealed class DouyinDetectionSession
     public List<MediaTrack> VideoCandidates { get; } = [];
     public List<MediaTrack> AudioCandidates { get; } = [];
     public List<AlbumImageItem> AlbumImages { get; } = [];
-    /// <summary>Declared album size from observation (image_list length). Download must match.</summary>
+    /// <summary>Resolved album URL count from observation (seal when AlbumImages reaches this).</summary>
     public int? ExpectedAlbumImageCount { get; set; }
+    /// <summary>Declared slot count from aweme (may exceed resolved URLs while CDN images still arrive).</summary>
+    public int? DeclaredAlbumImageCount { get; set; }
     /// <summary>Other-aweme progressive seen in this session only.</summary>
     public Dictionary<string, List<MediaTrack>> ParkedByContentId { get; } =
         new(StringComparer.Ordinal);
@@ -390,6 +392,7 @@ internal sealed class DouyinDetectionSession
         AudioCandidates.Clear();
         AlbumImages.Clear();
         ExpectedAlbumImageCount = null;
+        DeclaredAlbumImageCount = null;
         // Keep ParkedByContentId / ProgressiveOwnerByResourceKey across soft feed switches so
         // next-work progressive parked under this session can be AdoptParked after identity binds.
     }
@@ -417,6 +420,7 @@ internal sealed class DouyinDetectionSession
         AudioCandidates.Clear();
         AlbumImages.Clear();
         ExpectedAlbumImageCount = null;
+        DeclaredAlbumImageCount = null;
         ParkedByContentId.Clear();
         ProgressiveOwnerByResourceKey.Clear();
     }
