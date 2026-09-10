@@ -327,20 +327,21 @@ public sealed class HttpMediaDownloader
         }
 
         var received = written - offset;
-        var imageOnly = job.Variant.Tracks.Count > 0 &&
-                        job.Variant.Tracks.All(t => t.Kind == MediaTrackKind.Image);
+        var softMedia = job.Variant.Tracks.Count > 0 &&
+                        job.Variant.Tracks.All(t => t.Kind is MediaTrackKind.Image or MediaTrackKind.Audio);
         if ((response.Content.Headers.ContentLength is long bodyLength && received != bodyLength) ||
             (response.StatusCode == HttpStatusCode.PartialContent &&
              written != response.Content.Headers.ContentRange!.To!.Value + 1))
         {
             // Douyin/TikTok album CDNs often advertise inflated Content-Length then close early.
-            // Accept a non-empty image body rather than failing the whole slideshow.
-            if (!(imageOnly && received >= 8 * 1024))
+            // Accept a non-empty image/audio body rather than failing the whole slideshow.
+            if (!(softMedia && received >= 8 * 1024))
                 throw new DownloadException(ErrorCodes.IncompleteDownload, "Response body length does not match its range.");
             _logger.LogWarning(
-                "Image download length mismatch (got {Got}, declared {Declared}); accepting for album track",
+                "Soft-media download length mismatch (got {Got}, declared {Declared}); accepting track kind={Kind}",
                 received,
-                response.Content.Headers.ContentLength);
+                response.Content.Headers.ContentLength,
+                job.Variant.Tracks[0].Kind);
             job.TotalBytes = written;
         }
         job.DownloadedBytes = file.Length;
@@ -350,11 +351,11 @@ public sealed class HttpMediaDownloader
     private static void EnsureDownloadLooksComplete(DownloadJob job, long actualLength)
     {
         job.DownloadedBytes = actualLength;
-        var imageOnly = job.Variant.Tracks.Count > 0 &&
-                        job.Variant.Tracks.All(t => t.Kind == MediaTrackKind.Image);
+        var softMedia = job.Variant.Tracks.Count > 0 &&
+                        job.Variant.Tracks.All(t => t.Kind is MediaTrackKind.Image or MediaTrackKind.Audio);
         if (job.TotalBytes is long expected && actualLength != expected)
         {
-            if (imageOnly && actualLength >= 8 * 1024)
+            if (softMedia && actualLength >= 8 * 1024)
             {
                 job.TotalBytes = actualLength;
             }
@@ -367,7 +368,7 @@ public sealed class HttpMediaDownloader
 
         var minBytes = job.Variant.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
             ? MediaResourceSizeFilter.MinProgressiveVideoBytes
-            : imageOnly
+            : softMedia
                 ? 8 * 1024
                 : MediaResourceSizeFilter.MinDisplayBytes;
         if (job.DownloadedBytes > 0 && job.DownloadedBytes < minBytes)
