@@ -327,10 +327,22 @@ public sealed class HttpMediaDownloader
         }
 
         var received = written - offset;
+        var imageOnly = job.Variant.Tracks.Count > 0 &&
+                        job.Variant.Tracks.All(t => t.Kind == MediaTrackKind.Image);
         if ((response.Content.Headers.ContentLength is long bodyLength && received != bodyLength) ||
             (response.StatusCode == HttpStatusCode.PartialContent &&
              written != response.Content.Headers.ContentRange!.To!.Value + 1))
-            throw new DownloadException(ErrorCodes.IncompleteDownload, "Response body length does not match its range.");
+        {
+            // Douyin/TikTok album CDNs often advertise inflated Content-Length then close early.
+            // Accept a non-empty image body rather than failing the whole slideshow.
+            if (!(imageOnly && received >= 8 * 1024))
+                throw new DownloadException(ErrorCodes.IncompleteDownload, "Response body length does not match its range.");
+            _logger.LogWarning(
+                "Image download length mismatch (got {Got}, declared {Declared}); accepting for album track",
+                received,
+                response.Content.Headers.ContentLength);
+            job.TotalBytes = written;
+        }
         job.DownloadedBytes = file.Length;
         return file.Length;
     }
@@ -338,13 +350,26 @@ public sealed class HttpMediaDownloader
     private static void EnsureDownloadLooksComplete(DownloadJob job, long actualLength)
     {
         job.DownloadedBytes = actualLength;
+        var imageOnly = job.Variant.Tracks.Count > 0 &&
+                        job.Variant.Tracks.All(t => t.Kind == MediaTrackKind.Image);
         if (job.TotalBytes is long expected && actualLength != expected)
-            throw new DownloadException(ErrorCodes.IncompleteDownload,
-                $"Downloaded {actualLength} of {expected} bytes.");
+        {
+            if (imageOnly && actualLength >= 8 * 1024)
+            {
+                job.TotalBytes = actualLength;
+            }
+            else
+            {
+                throw new DownloadException(ErrorCodes.IncompleteDownload,
+                    $"Downloaded {actualLength} of {expected} bytes.");
+            }
+        }
 
         var minBytes = job.Variant.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
             ? MediaResourceSizeFilter.MinProgressiveVideoBytes
-            : MediaResourceSizeFilter.MinDisplayBytes;
+            : imageOnly
+                ? 8 * 1024
+                : MediaResourceSizeFilter.MinDisplayBytes;
         if (job.DownloadedBytes > 0 && job.DownloadedBytes < minBytes)
         {
             throw new DownloadException(

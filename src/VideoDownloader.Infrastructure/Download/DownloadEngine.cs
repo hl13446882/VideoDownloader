@@ -791,14 +791,13 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                 continue;
             }
 
-            var trackVariant = MediaVariant.FromCombinedTrack(
+            var trackVariant = MediaVariant.FromTracks(
                 track.TrackId,
-                track.SourceUrl,
-                track.RequestContext,
+                width: null,
+                height: null,
                 bandwidth: track.Bandwidth,
-                codec: track.Codec,
                 container: track.Container,
-                contentLength: track.ContentLength);
+                tracks: [track]);
 
             var trackJob = new DownloadJob
             {

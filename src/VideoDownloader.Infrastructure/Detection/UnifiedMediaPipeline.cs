@@ -2012,8 +2012,10 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         var pageBili = pageHost.Contains("bilibili", StringComparison.OrdinalIgnoreCase);
         var mediaBili = mediaHost.Contains("bilivideo", StringComparison.OrdinalIgnoreCase) ||
                         mediaHost.Contains("bilibili", StringComparison.OrdinalIgnoreCase) ||
+                        mediaHost.StartsWith("upos-", StringComparison.OrdinalIgnoreCase) ||
                         (mediaHost.Contains("akamaized", StringComparison.OrdinalIgnoreCase) &&
-                         media.AbsolutePath.Contains("upos", StringComparison.OrdinalIgnoreCase));
+                         (mediaHost.Contains("upos", StringComparison.OrdinalIgnoreCase) ||
+                          media.AbsolutePath.Contains("upos", StringComparison.OrdinalIgnoreCase)));
         if (mediaBili && !pageBili)
             return true;
 
