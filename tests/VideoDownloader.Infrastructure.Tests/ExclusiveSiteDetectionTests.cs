@@ -884,6 +884,46 @@ public class ExclusiveSiteDetectionTests
     }
 
     [Fact]
+    public async Task Douyin_Album_With_DeclaredCount_Waits_Until_Filled()
+    {
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var page = new Uri("https://www.douyin.com/note/7276638706021240125");
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "相册",
+            """{"identity":"content:7276638706021240125","album":true,"caption":"相册","media":["https://sf6-cdn-tos.douyinstatic.com/obj/ies-music/a.mp3"],"images":["https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img1.jpeg","https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img2.jpeg"],"imageCount":2,"declaredImageCount":3}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.Null(last);
+
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img3.jpeg") with
+        {
+            ResourceType = "Image", StatusCode = 200, ContentLength = 80_000, MimeType = "image/jpeg"
+        }, CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.NotNull(last);
+        Assert.Equal(3, last!.Images.Count);
+    }
+
+    [Fact]
+    public async Task Douyin_Album_Without_DeclaredCount_Seals_Collected()
+    {
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var page = new Uri("https://www.douyin.com/note/7276638706021240125");
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "相册",
+            """{"identity":"content:7276638706021240125","album":true,"caption":"相册","media":["https://sf6-cdn-tos.douyinstatic.com/obj/ies-music/a.mp3"],"images":["https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img1.jpeg","https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img2.jpeg"],"imageCount":2}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.NotNull(last);
+        Assert.Equal(2, last!.Images.Count);
+    }
+
+    [Fact]
     public void MediaVariantRanking_Prefers_Progressive_Over_Larger_Mse()
     {
         var progressive = MediaVariant.FromCombinedTrack(

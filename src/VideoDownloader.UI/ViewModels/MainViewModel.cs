@@ -1028,7 +1028,10 @@ public sealed partial class MainViewModel : ObservableObject
 
             // Let CDP/WebResource capture accumulate before the single page pass.
             // Feed players (blob + delayed playAddr) often need longer than a short settle.
-            await Task.Delay(TimeSpan.FromSeconds(3), token);
+            // Douyin /note/ albums need extra time to click-through slides (e.g. 4/17).
+            var isDouyinNote = pageUrl.Host.Contains("douyin", StringComparison.OrdinalIgnoreCase) &&
+                               pageUrl.AbsolutePath.Contains("/note/", StringComparison.OrdinalIgnoreCase);
+            await Task.Delay(isDouyinNote ? TimeSpan.FromSeconds(5) : TimeSpan.FromSeconds(3), token);
             if (generation != _pageGeneration)
             {
                 HangProbe.Mark("vm.session.stale.afterDelay", $"gen={generation}/{_pageGeneration}");
@@ -1038,7 +1041,8 @@ public sealed partial class MainViewModel : ObservableObject
             var host = SelectedTab?.Host;
             if (host is not null)
             {
-                for (var grace = 0; grace < 6; grace++)
+                var graceLimit = isDouyinNote ? 10 : 6;
+                for (var grace = 0; grace < graceLimit; grace++)
                 {
                     if (generation != _pageGeneration || token.IsCancellationRequested)
                     {
@@ -1086,7 +1090,8 @@ public sealed partial class MainViewModel : ObservableObject
 
             // Feed soft-nav often seals on MSE-only before progressive CDN arrives; give a few
             // short re-probe/complete cycles without starting a brand-new page generation.
-            for (var late = 0; late < 4; late++)
+            var lateLimit = isDouyinNote ? 8 : 4;
+            for (var late = 0; late < lateLimit; late++)
             {
                 var have = false;
                 await Application.Current.Dispatcher.InvokeAsync(() => have = DetectedVideos.Count > 0);
@@ -1094,7 +1099,7 @@ public sealed partial class MainViewModel : ObservableObject
                     break;
 
                 HangProbe.Mark("vm.lateRetry.begin", $"i={late}");
-                await Task.Delay(TimeSpan.FromSeconds(2), token);
+                await Task.Delay(TimeSpan.FromSeconds(isDouyinNote ? 2.5 : 2), token);
                 if (generation != _pageGeneration || token.IsCancellationRequested)
                     break;
 

@@ -149,7 +149,7 @@ internal static class DouyinObservationScript
             }
             return [...new Set(urls)];
           };
-          // Declared album slot count from aweme record (may exceed resolvable URL count briefly).
+          // Explicit album total only (JSON image_count / list length). 0 = unknown.
           const countDouyinAlbumSlots = record => {
             let n=0;
             for(const key of ['images','image_list','imageList','image_infos','photos']){
@@ -165,6 +165,83 @@ internal static class DouyinObservationScript
             if(typeof record?.imageCount==='number') n=Math.max(n, record.imageCount|0);
             return n;
           };
+          // Page UI pager like "4/17" — denominator is the declared album size.
+          const readAlbumPagerTotal = () => {
+            let total=0;
+            const consider = text => {
+              if(!text) return;
+              const m=String(text).trim().match(/^(\d{1,2})\s*\/\s*(\d{1,2})$/);
+              if(!m) return;
+              const cur=+m[1], all=+m[2];
+              if(cur>=1 && all>=2 && all<=99 && cur<=all) total=Math.max(total, all);
+            };
+            for(const el of document.querySelectorAll('span,div,p,li,em,i,label')){
+              const t=(el.childNodes.length===1 ? (el.textContent||'') : '').trim();
+              if(t.length>=3 && t.length<=8) consider(t);
+            }
+            if(!total){
+              const body=(document.body?.innerText||'').slice(0,8000);
+              for(const m of body.matchAll(/(\d{1,2})\s*\/\s*(\d{1,2})/g)){
+                const cur=+m[1], all=+m[2];
+                if(cur>=1 && all>=2 && all<=99 && cur<=all) total=Math.max(total, all);
+              }
+            }
+            return total;
+          };
+          const collectDomAlbumImageUrls = () => {
+            const urls=[];
+            const push=v=>{
+              if(typeof v!=='string' || !/^https?:/i.test(v)) return;
+              if(!/(?:byteimg|douyinpic)/i.test(v) && !/\.(jpg|jpeg|png|webp)([?#]|$)/i.test(v)) return;
+              if(/avatar|emoji|emoticon|badge|logo|\/aweme-avatar\//i.test(v)) return;
+              urls.push(v.split(' ')[0]);
+            };
+            for(const el of document.querySelectorAll('img')){
+              push(el.currentSrc||el.src||'');
+              push(el.getAttribute('data-src')||'');
+              const ss=el.getAttribute('srcset')||'';
+              for(const part of ss.split(',')) push(part.trim().split(/\s+/)[0]||'');
+            }
+            return [...new Set(urls)];
+          };
+          // Click the album "next" control so lazy slides / CDN URLs appear.
+          const clickAlbumNext = () => {
+            const candidates=[
+              ...document.querySelectorAll('button,[role="button"],div,span')
+            ].filter(el=>{
+              const label=((el.getAttribute('aria-label')||'')+' '+(el.getAttribute('title')||'')).toLowerCase();
+              const cls=(el.className&&typeof el.className==='string'?el.className:'').toLowerCase();
+              if(/next|下一|向右|right/.test(label)) return visible(el)>0;
+              if(/(?:swiper|slider|slide|carousel|note).*(?:next|right)|(?:next|right).*(?:swiper|slider|slide|arrow)/i.test(cls)
+                 && visible(el)>0) return true;
+              const t=(el.textContent||'').trim();
+              return (t==='>' || t==='›' || t==='→') && visible(el)>0;
+            });
+            const btn=candidates.find(el=>{
+              const r=el.getBoundingClientRect();
+              return r.width>8 && r.width<120 && r.height>8 && r.height<120;
+            }) || candidates[0];
+            if(!btn) return false;
+            try{ btn.click(); return true; }catch{ return false; }
+          };
+          if(!window.__vdAlbumAdvance){
+            window.__vdAlbumAdvance = { last:0, clicks:0 };
+            setInterval(()=>{
+              try{
+                if(!/\/note\//i.test(location.pathname) && !document.body?.innerText?.match(/\d+\s*\/\s*\d+/)) return;
+                const now=Date.now();
+                if(now-(window.__vdAlbumAdvance.last||0)<280) return;
+                const pager=readAlbumPagerTotal();
+                const have=collectDomAlbumImageUrls().length;
+                if(pager>0 && have>=pager && window.__vdAlbumAdvance.clicks>0) return;
+                if(window.__vdAlbumAdvance.clicks>=60) return;
+                if(clickAlbumNext()){
+                  window.__vdAlbumAdvance.last=now;
+                  window.__vdAlbumAdvance.clicks++;
+                }
+              }catch{}
+            }, 280);
+          }
           const collectDouyinPlayUrls = record => {
             const urls=[];
             const push=v=>{
@@ -258,37 +335,46 @@ internal static class DouyinObservationScript
               if(el?.textContent) push(JSON.parse(el.textContent));
             }catch{}
             try{push(window.__UNIVERSAL_DATA_FOR_REHYDRATION__);}catch{}
-            const seen=new WeakSet(); let budget=900;
-            const find=(value,depth)=>{
-              if(!value||typeof value!=='object'||value instanceof Node||seen.has(value)||depth>12||--budget<0) return null;
+            try{
+              const el=document.getElementById('RENDER_DATA')||document.getElementById('__NEXT_DATA__');
+              if(el?.textContent) push(JSON.parse(decodeURIComponent(el.textContent)));
+            }catch{}
+            try{push(window._ROUTER_DATA);push(window.__INITIAL_STATE__);push(window.RENDER_DATA);}catch{}
+            // Prefer the matching aweme with the richest image list (not the first partial hit).
+            let best=null, bestSlots=0;
+            const seen=new WeakSet(); let budget=1800;
+            const walk=(value,depth)=>{
+              if(!value||typeof value!=='object'||value instanceof Node||seen.has(value)||depth>14||--budget<0) return;
               seen.add(value);
               const hasImages = !!(value.images||value.image_list||value.image_post_info||value.imagePost||value.image_infos);
-              const id = value.aweme_id||value.itemId||value.videoId||value.id||value.modal_id||value.note_id;
-              if(hasImages && String(id)===expectedId) return value;
-              if(Array.isArray(value)){ for(const c of value.slice(0,40)){const r=find(c,depth+1); if(r) return r;} }
-              else { for(const c of Object.values(value)){const r=find(c,depth+1); if(r) return r;} }
-              return null;
+              const id = value.aweme_id||value.awemeId||value.itemId||value.item_id||value.videoId||value.video_id||value.id||value.modal_id||value.note_id;
+              if(hasImages && String(id)===String(expectedId)){
+                const slots=countDouyinAlbumSlots(value);
+                if(slots>bestSlots || (!best && slots>=0)){ best=value; bestSlots=slots; }
+              }
+              if(Array.isArray(value)){ for(const c of value.slice(0,64)) walk(c,depth+1); }
+              else { for(const c of Object.values(value)) walk(c,depth+1); }
             };
-            for(const root of roots){ record=find(root,0); if(record) break; }
+            for(const root of roots) walk(root,0);
+            record=best;
+            const pagerTotal=readAlbumPagerTotal();
+            const domImages=collectDomAlbumImageUrls();
             if(!record){
-              if(!/\/note\//i.test(location.pathname)) return null;
-              const imgs=[...document.querySelectorAll('img')].filter(e=>{
-                const r=e.getBoundingClientRect();
-                const src=e.currentSrc||e.src||'';
-                return r.width>120 && r.height>120 && visible(e)>0 && /^https?:/i.test(src) &&
-                  !/avatar|emoji|emoticon|badge|logo/i.test(src);
-              }).slice(0,24);
+              if(!/\/note\//i.test(location.pathname) && pagerTotal<1 && domImages.length<1) return null;
+              const images=domImages;
+              if(images.length<1) return null;
               const audio=[...document.querySelectorAll('audio,video')].find(e=>/^https?:/i.test(e.currentSrc||e.src||''));
-              if(imgs.length<1) return null;
               const id=expectedId;
               const caption=(document.querySelector('[data-e2e="browse-video-desc"],.desc')?.textContent
                 || document.title || '').trim().replace(/\s*[_|].*抖音.*$/u,'').trim();
               const media=[]; if(audio) media.push(audio.currentSrc||audio.src);
-              return { type:'vd-video-identity', identity: id ? (location.host+':content:'+id) : pageKey(location.href),
-                caption, href:location.href, media, images:imgs.map(e=>e.currentSrc||e.src),
-                imageCount: imgs.length, declaredImageCount: imgs.length, album:true };
+              // declaredImageCount only when page/JSON states a total; else omit (seal by collected).
+              const out={ type:'vd-video-identity', identity: id ? (location.host+':content:'+id) : pageKey(location.href),
+                caption, href:location.href, media, images, imageCount: images.length, album:true };
+              if(pagerTotal>0) out.declaredImageCount=pagerTotal;
+              return out;
             }
-            const images=collectDouyinImages(record);
+            const images=[...new Set([...collectDouyinImages(record), ...domImages])];
             if(images.length<1) return null;
             const music=record.music||{};
             const audioUrls=[];
@@ -304,9 +390,20 @@ internal static class DouyinObservationScript
             const id=String(record.aweme_id||record.itemId||record.videoId||record.id||expectedId||'');
             const caption=String(record.desc||record.description||record.title||'').trim();
             const imageCount=images.length;
-            const declaredImageCount=Math.max(countDouyinAlbumSlots(record), images.length);
-            return { type:'vd-video-identity', identity: id ? (location.host+':content:'+id) : pageKey(location.href),
-              caption, href:location.href, media:[...new Set(audioUrls)], images, imageCount, declaredImageCount, album:true };
+            // Only emit declared when page pager (e.g. 4/17) or JSON image_count states a total.
+            // Do not treat collected URL length alone as declared — that seals "as many as we got".
+            const slots=countDouyinAlbumSlots(record);
+            const declared=Math.max(pagerTotal,
+              (typeof record?.image_count==='number' ? record.image_count|0 : 0),
+              (typeof record?.imageCount==='number' ? record.imageCount|0 : 0),
+              (typeof (record?.image_post_info||record?.imagePost)?.image_count==='number'
+                ? ((record.image_post_info||record.imagePost).image_count|0) : 0),
+              // Full hydration lists are an authoritative total when longer than the pager-less DOM set.
+              slots >= images.length ? slots : 0);
+            const out={ type:'vd-video-identity', identity: id ? (location.host+':content:'+id) : pageKey(location.href),
+              caption, href:location.href, media:[...new Set(audioUrls)], images, imageCount, album:true };
+            if(declared>0) out.declaredImageCount=declared;
+            return out;
           };
           window.__vdObserve = () => {
             const album = observeDouyinAlbum();

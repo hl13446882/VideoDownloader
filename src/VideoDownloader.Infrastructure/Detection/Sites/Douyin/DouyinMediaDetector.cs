@@ -343,17 +343,31 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             if (sessionId == Guid.Empty)
                 return Task.CompletedTask;
 
-            // Final seal: if declared slots never all resolved, download the resolved set completely.
+            // Final seal:
+            // - page declared a total (e.g. 4/17 → 17): keep expecting that many; do not snap down
+            // - no declared total: seal with whatever images were collected
             if (_session.CurrentMode == DouyinContentMode.Album &&
                 _session.AlbumImages.Count > 0 &&
                 _session.ExpectedAlbumImageCount is int expectedSlots &&
                 expectedSlots > _session.AlbumImages.Count)
             {
-                _logger.LogWarning(
-                    "Douyin album Complete with resolved images={Have} declared/expected={Need}; sealing resolved set",
-                    _session.AlbumImages.Count,
-                    expectedSlots);
-                _session.ExpectedAlbumImageCount = _session.AlbumImages.Count;
+                if (_session.DeclaredAlbumImageCount is int declared &&
+                    declared > 0 &&
+                    _session.AlbumImages.Count < declared)
+                {
+                    _logger.LogWarning(
+                        "Douyin album Complete incomplete images={Have}/{Declared}; not sealing partial",
+                        _session.AlbumImages.Count,
+                        declared);
+                    // Leave Expected at declared so BuildDescriptor fails as incomplete.
+                }
+                else
+                {
+                    _logger.LogInformation(
+                        "Douyin album Complete with no declared total; sealing resolved images={Have}",
+                        _session.AlbumImages.Count);
+                    _session.ExpectedAlbumImageCount = _session.AlbumImages.Count;
+                }
             }
 
             descriptor = BuildDescriptor();
@@ -614,9 +628,13 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                     countEl.TryGetInt32(out var collected) &&
                     collected > 0)
                 {
-                    _session.ExpectedAlbumImageCount = Math.Max(
-                        _session.ExpectedAlbumImageCount ?? 0,
-                        collected);
+                    // Collected URL count is only a floor when no page-declared total exists.
+                    if (_session.DeclaredAlbumImageCount is null or <= 0)
+                    {
+                        _session.ExpectedAlbumImageCount = Math.Max(
+                            _session.ExpectedAlbumImageCount ?? 0,
+                            collected);
+                    }
                 }
 
                 if (root.TryGetProperty("declaredImageCount", out var declaredEl) &&
@@ -627,26 +645,41 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                     _session.DeclaredAlbumImageCount = Math.Max(
                         _session.DeclaredAlbumImageCount ?? 0,
                         declared);
-                    // Prefer declared slots when observation already resolved that many URLs.
-                    if ((_session.ExpectedAlbumImageCount ?? 0) >= declared)
-                        _session.ExpectedAlbumImageCount = declared;
+                    // Page/JSON total wins: seal only when AlbumImages reaches this.
+                    _session.ExpectedAlbumImageCount = Math.Max(
+                        _session.ExpectedAlbumImageCount ?? 0,
+                        _session.DeclaredAlbumImageCount.Value);
                 }
 
                 if (list.Count > 0)
                 {
                     if (_session.CurrentMode != DouyinContentMode.Album)
                         _session.SwitchContent(_session.CurrentContentId, DouyinContentMode.Album);
-                    _session.AlbumImages.Clear();
-                    // Deduplicate by host+path (ignore query noise) keeping first index order.
+
+                    // Merge: keep observation order, then append network-only URLs not in this payload.
+                    var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    var merged = new List<AlbumImageItem>();
                     foreach (var img in list.DistinctBy(i => i.Url.GetLeftPart(UriPartial.Path), StringComparer.OrdinalIgnoreCase))
-                        _session.AlbumImages.Add(img with { Index = _session.AlbumImages.Count });
-                    _session.ExpectedAlbumImageCount = Math.Max(
-                        _session.ExpectedAlbumImageCount ?? 0,
-                        _session.AlbumImages.Count);
-                    if (_session.DeclaredAlbumImageCount is int want &&
-                        want > 0 &&
-                        _session.AlbumImages.Count >= want)
+                    {
+                        var key = img.Url.GetLeftPart(UriPartial.Path);
+                        if (!seen.Add(key)) continue;
+                        merged.Add(img with { Index = merged.Count });
+                    }
+
+                    foreach (var existing in _session.AlbumImages)
+                    {
+                        var key = existing.Url.GetLeftPart(UriPartial.Path);
+                        if (!seen.Add(key)) continue;
+                        merged.Add(existing with { Index = merged.Count });
+                    }
+
+                    _session.AlbumImages.Clear();
+                    _session.AlbumImages.AddRange(merged);
+
+                    if (_session.DeclaredAlbumImageCount is int want && want > 0)
                         _session.ExpectedAlbumImageCount = want;
+                    else
+                        _session.ExpectedAlbumImageCount = _session.AlbumImages.Count;
                 }
             }
 
@@ -738,14 +771,10 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             GuessImageFormat(e.Url),
             EnrichContext(e.RequestContext)));
         // Grow expected toward declared slots as CDN images arrive.
-        if (_session.DeclaredAlbumImageCount is int declared &&
-            declared > 0 &&
-            _session.AlbumImages.Count >= declared)
+        if (_session.DeclaredAlbumImageCount is int declared && declared > 0)
             _session.ExpectedAlbumImageCount = declared;
         else
-            _session.ExpectedAlbumImageCount = Math.Max(
-                _session.ExpectedAlbumImageCount ?? 0,
-                _session.AlbumImages.Count);
+            _session.ExpectedAlbumImageCount = _session.AlbumImages.Count;
     }
 
     private void TryAcceptAlbumNetworkAudio(NormalizedNetworkEvent e)
