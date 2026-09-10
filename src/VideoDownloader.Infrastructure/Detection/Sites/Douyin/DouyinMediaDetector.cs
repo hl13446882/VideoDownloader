@@ -346,13 +346,13 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             // Final seal: if declared slots never all resolved, download the resolved set completely.
             if (_session.CurrentMode == DouyinContentMode.Album &&
                 _session.AlbumImages.Count > 0 &&
-                _session.ExpectedAlbumImageCount is int need &&
-                need > _session.AlbumImages.Count)
+                _session.ExpectedAlbumImageCount is int expectedSlots &&
+                expectedSlots > _session.AlbumImages.Count)
             {
                 _logger.LogWarning(
                     "Douyin album Complete with resolved images={Have} declared/expected={Need}; sealing resolved set",
                     _session.AlbumImages.Count,
-                    need);
+                    expectedSlots);
                 _session.ExpectedAlbumImageCount = _session.AlbumImages.Count;
             }
 
@@ -364,10 +364,10 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                                  _session.VideoCandidates.Any(t =>
                                      t.IsMseTrack || DouyinPlayEvidence.IsMseVideoPath(t.SourceUrl));
                 _failureReason = _session.CurrentMode == DouyinContentMode.Album
-                    ? (_session.ExpectedAlbumImageCount is int need &&
-                       need > 0 &&
-                       _session.AlbumImages.Count < need
-                        ? $"douyin_album_incomplete:{_session.AlbumImages.Count}/{need}"
+                    ? (_session.ExpectedAlbumImageCount is int want &&
+                       want > 0 &&
+                       _session.AlbumImages.Count < want
+                        ? $"douyin_album_incomplete:{_session.AlbumImages.Count}/{want}"
                         : "douyin_album_no_images")
                     : hasMseOnly
                         ? "douyin_mse_only"
