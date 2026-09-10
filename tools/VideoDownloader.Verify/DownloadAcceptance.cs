@@ -59,10 +59,40 @@ public partial class MainWindow
                     variant = variant.WithRequestContext(refreshed);
 
                 // Feed web-prime / webapp-prime playAddr often 403s or is a crumb shell.
-                // Briefly open the detail page in WebView to capture a fresh progressive.
+                // Douyin: briefly open detail in WebView. TikTok: do NOT navigate away from the feed
+                // (bare /video 404s; embed nav breaks subsequent feed swipes) — resolve via yt-dlp embed/v2.
                 var isDouyin = video.PageUrl.Host.Contains("douyin", StringComparison.OrdinalIgnoreCase);
                 var isTikTok = video.PageUrl.Host.Contains("tiktok", StringComparison.OrdinalIgnoreCase);
-                if ((isDouyin || isTikTok) &&
+                if (isTikTok &&
+                    variant.ContentIdentity is { Length: > 3 } ttIdentity &&
+                    ttIdentity.StartsWith("id:", StringComparison.Ordinal) &&
+                    (variant.SourceUrl.Host.Contains("webapp-prime", StringComparison.OrdinalIgnoreCase) ||
+                     variant.SourceUrl.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase) ||
+                     variant.TotalContentLength is > 0 and < 2L * 1024 * 1024))
+                {
+                    var id = ttIdentity[3..];
+                    var embed = new Uri($"https://www.tiktok.com/embed/v2/{Uri.EscapeDataString(id)}");
+                    Log($"LIVE download #{ordinal}: yt-dlp embed resolve {embed} (keep feed)");
+                    var resolvers = _services!.GetServices<IExternalSiteResolver>().Where(r => r.IsAvailable).ToArray();
+                    foreach (var resolver in resolvers)
+                    {
+                        var resolved = await resolver.ResolveAsync(embed, variant.RequestContext, default);
+                        var pick = resolved.SelectMany(v => v.Variants)
+                            .Where(MediaVariantRanking.HasVideo)
+                            .Where(v => !v.SourceUrl.Host.Contains("webapp-prime", StringComparison.OrdinalIgnoreCase) &&
+                                        !v.SourceUrl.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase))
+                            .OrderByDescending(v => v.TotalContentLength ?? 0)
+                            .ThenBy(v => v.SourceUrl.Host.Contains("tiktokcdn", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+                            .FirstOrDefault();
+                        if (pick is not null)
+                        {
+                            variant = pick.WithRequestContext(variant.RequestContext);
+                            Log($"LIVE download #{ordinal}: yt-dlp CDN host={variant.SourceUrl.Host} len={variant.TotalContentLength}");
+                            break;
+                        }
+                    }
+                }
+                else if (isDouyin &&
                     variant.ContentIdentity is { Length: > 3 } identity &&
                     identity.StartsWith("id:", StringComparison.Ordinal) &&
                     (variant.SourceUrl.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase) ||
@@ -70,12 +100,10 @@ public partial class MainWindow
                      variant.TotalContentLength is > 0 and < 2L * 1024 * 1024))
                 {
                     var id = identity[3..];
-                    var detail = isTikTok
-                        ? new Uri($"https://www.tiktok.com/embed/v2/{Uri.EscapeDataString(id)}")
-                        : new Uri($"https://www.douyin.com/video/{Uri.EscapeDataString(id)}");
+                    var detail = new Uri($"https://www.douyin.com/video/{Uri.EscapeDataString(id)}");
                     Log($"LIVE download #{ordinal}: open detail for fresh CDN {detail}");
                     WebView.CoreWebView2.Navigate(detail.AbsoluteUri);
-                    var detailDeadline = DateTime.UtcNow.AddSeconds(isTikTok ? 35 : 50);
+                    var detailDeadline = DateTime.UtcNow.AddSeconds(50);
                     MediaVariant? pick = null;
                     while (DateTime.UtcNow < detailDeadline)
                     {
@@ -95,12 +123,8 @@ public partial class MainWindow
                             .FirstOrDefault();
                         if (pick is not null && pick.TotalContentLength is >= 512L * 1024)
                             break;
-                        // Keep waiting when length is still unknown — CDN headers often arrive late.
                         if (pick is not null && pick.TotalContentLength is null &&
                             DateTime.UtcNow > detailDeadline - TimeSpan.FromSeconds(12))
-                            break;
-                        // TikTok embed often yields durable hosts even without ContentLength yet.
-                        if (isTikTok && pick is not null)
                             break;
                         pick = null;
                     }

@@ -318,18 +318,15 @@ public partial class MainWindow
                             samples.Add("engine-download: "+proof.Note);
                             sampleOk &= proof.Ok;
                             // Detail-nav download leaves the feed; re-land before the next swipe.
-                            if(feed && (uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase) ||
-                                        uri.Host.Contains("tiktok",StringComparison.OrdinalIgnoreCase)))
+                            // TikTok proof no longer navigates away — only Douyin needs re-land.
+                            if(feed && uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase))
                             {
                                 try
                                 {
                                     WebView.CoreWebView2.Navigate(address);
                                     await Task.Delay(3500);
-                                    if(uri.Host.Contains("douyin",StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        Log("Recommendation re-land="+await WebView.CoreWebView2.ExecuteScriptAsync("(()=>{const a=[...document.querySelectorAll('a,button,[role=link]')].find(e=>e.textContent.trim()==='推荐');if(a){a.click();return 'clicked 推荐';}return location.href;})()"));
-                                        await Task.Delay(2500);
-                                    }
+                                    Log("Recommendation re-land="+await WebView.CoreWebView2.ExecuteScriptAsync("(()=>{const a=[...document.querySelectorAll('a,button,[role=link]')].find(e=>e.textContent.trim()==='推荐');if(a){a.click();return 'clicked 推荐';}return location.href;})()"));
+                                    await Task.Delay(2500);
                                     await SkipNonVideoPostsAsync();
                                 }
                                 catch(Exception ex){ Log("feed re-land skipped: "+ex.GetType().Name); }

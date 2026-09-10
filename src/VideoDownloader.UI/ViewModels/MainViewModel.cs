@@ -879,8 +879,18 @@ public sealed partial class MainViewModel : ObservableObject
                 !pageUrl.AbsolutePath.Contains("/video/", StringComparison.OrdinalIgnoreCase) &&
                 !pageUrl.AbsolutePath.Contains("/embed/", StringComparison.OrdinalIgnoreCase))
             {
-                // Bare /video/{id} 404s without @user; embed/v2 is the durable extractor entry.
-                return new Uri($"https://www.tiktok.com/embed/v2/{id}");
+                // Keep the live feed URL. Bare /video/{id} 404s; embed would leave the feed.
+                // Content id stays on mediaSessionKey / BuildPageIdentity stable key.
+                var builder = new UriBuilder(pageUrl);
+                var query = builder.Query.TrimStart('?');
+                var parts = string.IsNullOrWhiteSpace(query)
+                    ? new List<string>()
+                    : query.Split('&', StringSplitOptions.RemoveEmptyEntries)
+                        .Where(p => !p.StartsWith("item_id=", StringComparison.OrdinalIgnoreCase))
+                        .ToList();
+                parts.Add("item_id=" + id);
+                builder.Query = string.Join('&', parts);
+                return builder.Uri;
             }
         }
 
