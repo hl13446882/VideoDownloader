@@ -49,6 +49,24 @@ public class MediaVariantDisplayTests
     }
 
     [Fact]
+    public void ResolveDisplaySize_Ignores_Hls_Playlist_And_Ts_Lengths()
+    {
+        var playlist = new MediaTrack(
+            "hls", MediaTrackKind.Combined, new Uri("https://cdn.example/index.m3u8"),
+            null, "hls", 2_000_000, 123_016, RequestContext.CreateEmpty());
+        var hlsVariant = MediaVariant.FromTracks("media", null, null, 2_000_000, "hls", [playlist]);
+        var (fromPlaylist, _) = MediaVariantDisplay.ResolveDisplaySize(hlsVariant, 100);
+        Assert.Equal(25_000_000, fromPlaylist); // bandwidth × duration only
+
+        var ts = new MediaTrack(
+            "seg", MediaTrackKind.Combined, new Uri("https://cdn.example/1000k_00000.ts"),
+            null, "mp4", null, 2_000_000, RequestContext.CreateEmpty());
+        var tsVariant = MediaVariant.FromTracks("slice", null, null, null, "mp4", [ts]);
+        var (fromTs, _) = MediaVariantDisplay.ResolveDisplaySize(tsVariant, 100);
+        Assert.Null(fromTs);
+    }
+
+    [Fact]
     public void BuildLabel_Uses_Height_Alone_When_Id_Is_Generic()
     {
         var variant = MediaVariant.FromCombinedTrack(

@@ -52,7 +52,9 @@ public interface IManifestResolver
 
 public sealed record ManifestResolutionResult(
     IReadOnlyList<MediaVariant> Variants,
-    bool IsDrmProtected);
+    bool IsDrmProtected,
+    double? DurationSec = null,
+    Uri? FirstSegmentUrl = null);
 
 public interface IRequestMessageFactory
 {

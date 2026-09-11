@@ -47,13 +47,30 @@ public class MediaUrlNormalizerTests
     }
 
     [Fact]
-    public void IsLikelySegment_DoesNotTreatDashBaseUrlAsSegment()
+    public void IsLikelySegment_RecognizesAbrPrefixedTsSlices()
     {
+        Assert.True(MediaUrlNormalizer.IsLikelySegment(
+            new Uri("https://cdn.example.com/20250311/eQ/1000k_00000.ts")));
+        Assert.True(MediaUrlNormalizer.IsLikelySegment(
+            new Uri("https://cdn.example.com/hls/seg-12.ts")));
         Assert.False(MediaUrlNormalizer.IsLikelySegment(
-            new Uri("https://cdn.example.com/upos/encode/item-1080.m4s")));
-        Assert.True(MediaUrlNormalizer.IsLikelySegment(
-            new Uri("https://cdn.example.com/dash/segment/12.m4s")));
-        Assert.True(MediaUrlNormalizer.IsLikelySegment(
-            new Uri("https://cdn.example.com/x/init-000.m4s")));
+            new Uri("https://cdn.example.com/20250311/eQ/index.m3u8")));
+    }
+
+    [Fact]
+    public void TryUnwrapEmbeddedMediaUrl_ExtractsPlayGatewayM3u8()
+    {
+        var shell = new Uri(
+            "https://jiexi.example.com/play/?url=" +
+            Uri.EscapeDataString("https://vv.example.com/20250311/eQ/index.m3u8"));
+        Assert.True(MediaUrlNormalizer.TryUnwrapEmbeddedMediaUrl(shell, out var media));
+        Assert.Equal("https://vv.example.com/20250311/eQ/index.m3u8", media.AbsoluteUri);
+    }
+
+    [Fact]
+    public void TryUnwrapEmbeddedMediaUrl_IgnoresAlreadyManifestUrls()
+    {
+        var manifest = new Uri("https://vv.example.com/a/index.m3u8?token=1");
+        Assert.False(MediaUrlNormalizer.TryUnwrapEmbeddedMediaUrl(manifest, out _));
     }
 }

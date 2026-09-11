@@ -52,6 +52,68 @@ public static class MediaUrlNormalizer
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase))
             return true;
 
+        // HLS MPEG-TS slices: 1000k_00000.ts, index0.ts, seg-12.ts — not whole-file progressive.
+        if (file.EndsWith(".ts", StringComparison.OrdinalIgnoreCase) &&
+            System.Text.RegularExpressions.Regex.IsMatch(file, @"\d+\.ts$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return true;
+
+        return false;
+    }
+
+    /// <summary>
+    /// Player/gateway shells often embed the real stream in <c>?url=</c> (e.g. /play/?url=…m3u8).
+    /// Prefer the embedded absolute media address over probing the HTML wrapper.
+    /// </summary>
+    public static bool TryUnwrapEmbeddedMediaUrl(Uri url, out Uri mediaUrl)
+    {
+        mediaUrl = null!;
+        if (url.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) ||
+            url.AbsolutePath.EndsWith(".mpd", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (!TryReadQueryValue(url, "url", out var raw) &&
+            !TryReadQueryValue(url, "src", out raw))
+            return false;
+
+        raw = Uri.UnescapeDataString(raw.Replace("+", "%20")).Trim().Trim('"');
+        if (raw.StartsWith("//", StringComparison.Ordinal))
+            raw = "https:" + raw;
+        if (!Uri.TryCreate(raw, UriKind.Absolute, out var candidate))
+            return false;
+        if (candidate.Scheme is not ("http" or "https"))
+            return false;
+
+        var path = candidate.AbsolutePath;
+        var looksManifest =
+            path.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) ||
+            path.EndsWith(".mpd", StringComparison.OrdinalIgnoreCase) ||
+            candidate.AbsoluteUri.Contains(".m3u8", StringComparison.OrdinalIgnoreCase) ||
+            candidate.AbsoluteUri.Contains(".mpd", StringComparison.OrdinalIgnoreCase);
+        if (!looksManifest)
+            return false;
+
+        mediaUrl = candidate;
+        return !IsSameMedia(url, candidate);
+    }
+
+    private static bool TryReadQueryValue(Uri url, string key, out string value)
+    {
+        value = string.Empty;
+        var query = url.Query;
+        if (string.IsNullOrEmpty(query))
+            return false;
+
+        foreach (var part in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var idx = part.IndexOf('=');
+            var name = idx >= 0 ? part[..idx] : part;
+            if (!name.Equals(key, StringComparison.OrdinalIgnoreCase))
+                continue;
+            value = idx >= 0 ? part[(idx + 1)..] : string.Empty;
+            return value.Length > 0;
+        }
+
         return false;
     }
 

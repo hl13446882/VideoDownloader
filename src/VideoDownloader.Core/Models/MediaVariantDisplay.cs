@@ -11,13 +11,16 @@ public static class MediaVariantDisplay
         MediaVariant variant,
         double? durationSec)
     {
-        var exact = variant.TotalContentLength;
-        if (exact is > 0)
-            return (exact, false);
+        // Playlist text / MPEG-TS slice lengths are not whole-file sizes.
+        var trustworthy = variant.Tracks.Where(HasTrustworthyContentLength).ToArray();
+        if (trustworthy.Length > 0 && trustworthy.Length == variant.Tracks.Count)
+        {
+            var exact = trustworthy.Sum(t => t.ContentLength!.Value);
+            if (exact > 0)
+                return (exact, false);
+        }
 
-        var known = variant.Tracks
-            .Where(t => t.ContentLength is > 0)
-            .Sum(t => t.ContentLength!.Value);
+        var known = trustworthy.Sum(t => t.ContentLength!.Value);
         if (known > 0)
             return (known, true);
 
@@ -27,6 +30,28 @@ public static class MediaVariantDisplay
             return ((long)(bitrate / 8.0 * durationSec.Value), true);
 
         return (null, false);
+    }
+
+    /// <summary>
+    /// True when <see cref="MediaTrack.ContentLength"/> is a progressive object size, not playlist/segment bytes.
+    /// </summary>
+    public static bool HasTrustworthyContentLength(MediaTrack track)
+    {
+        if (track.ContentLength is null or <= 0)
+            return false;
+
+        if (string.Equals(track.Container, "hls", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(track.Container, "dash", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var path = track.SourceUrl.AbsolutePath;
+        if (path.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) ||
+            path.EndsWith(".mpd", StringComparison.OrdinalIgnoreCase) ||
+            path.EndsWith(".ts", StringComparison.OrdinalIgnoreCase) ||
+            path.EndsWith(".m4s", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        return true;
     }
 
     public static string FormatBytes(long bytes)

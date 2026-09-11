@@ -1,3 +1,4 @@
+using System.Globalization;
 using VideoDownloader.Core.Models;
 
 namespace VideoDownloader.Core.Manifests;
@@ -5,7 +6,9 @@ namespace VideoDownloader.Core.Manifests;
 public sealed record HlsParseResult(
     IReadOnlyList<MediaVariant> Variants,
     bool IsDrmProtected,
-    bool IsMasterPlaylist);
+    bool IsMasterPlaylist,
+    double? DurationSec = null,
+    Uri? FirstSegmentUrl = null);
 
 public static class HlsManifestParser
 {
@@ -31,10 +34,11 @@ public static class HlsManifestParser
             return new HlsParseResult(variants, isDrm, true);
         }
 
-        return new HlsParseResult([ParseMediaPlaylistVariant(content, manifestUrl, context, isDrm)], isDrm, false);
+        var (variant, durationSec, firstSegment) = ParseMediaPlaylistVariant(content, manifestUrl, context, isDrm);
+        return new HlsParseResult([variant], isDrm, false, durationSec, firstSegment);
     }
 
-    private static MediaVariant ParseMediaPlaylistVariant(
+    private static (MediaVariant Variant, double? DurationSec, Uri? FirstSegment) ParseMediaPlaylistVariant(
         string content,
         Uri manifestUrl,
         RequestContext context,
@@ -48,6 +52,7 @@ public static class HlsManifestParser
         var kind = !isDrm && (hls is not null || hasSegments)
             ? MediaTrackKind.Combined
             : MediaTrackKind.Unknown;
+        var (durationSec, firstSegment) = SummarizeMediaSegments(content, manifestUrl);
         var track = new MediaTrack(
             "hls-media",
             kind,
@@ -61,7 +66,54 @@ public static class HlsManifestParser
             Hls = hls,
             IsValidated = kind == MediaTrackKind.Combined
         };
-        return MediaVariant.FromTracks("media", null, null, null, "hls", [track]);
+        return (MediaVariant.FromTracks("media", null, null, null, "hls", [track]), durationSec, firstSegment);
+    }
+
+    /// <summary>Sums EXTINF durations and returns the first media segment URI when present.</summary>
+    internal static (double? DurationSec, Uri? FirstSegment) SummarizeMediaSegments(string content, Uri manifestUrl)
+    {
+        double total = 0;
+        var sawDuration = false;
+        Uri? first = null;
+        var expectSegment = false;
+
+        foreach (var raw in content.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0)
+                continue;
+
+            if (line.StartsWith(ExtInf, StringComparison.OrdinalIgnoreCase))
+            {
+                expectSegment = true;
+                var payload = line[ExtInf.Length..];
+                var comma = payload.IndexOf(',');
+                var number = comma >= 0 ? payload[..comma] : payload;
+                if (double.TryParse(number.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) &&
+                    seconds > 0 &&
+                    double.IsFinite(seconds))
+                {
+                    total += seconds;
+                    sawDuration = true;
+                }
+
+                continue;
+            }
+
+            if (line.StartsWith('#'))
+            {
+                expectSegment = false;
+                continue;
+            }
+
+            if (!expectSegment)
+                continue;
+
+            first ??= new Uri(ManifestParserUtil.CombineUrl(manifestUrl.ToString(), line));
+            expectSegment = false;
+        }
+
+        return (sawDuration && total > 0.5 ? total : null, first);
     }
 
     /// <summary>

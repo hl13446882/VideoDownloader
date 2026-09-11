@@ -19,7 +19,11 @@ public sealed class ManifestResolver : IManifestResolver
     {
         var content = await _fetcher.FetchAsync(manifest.Url, manifest.RequestContext, ct);
         var parsed = HlsManifestParser.Parse(content, manifest.Url, manifest.RequestContext);
-        return new ManifestResolutionResult(parsed.Variants, parsed.IsDrmProtected);
+        return new ManifestResolutionResult(
+            parsed.Variants,
+            parsed.IsDrmProtected,
+            parsed.DurationSec,
+            parsed.FirstSegmentUrl);
     }
 
     public async Task<ManifestResolutionResult> ResolveDashAsync(

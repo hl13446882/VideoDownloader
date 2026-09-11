@@ -113,6 +113,23 @@ public class HlsManifestParserTests
         Assert.Equal(MediaTrackKind.Combined, track.Kind);
         Assert.True(track.IsValidated);
         Assert.Null(track.Hls);
+        Assert.Equal(6.0, result.DurationSec);
+        Assert.Equal(new Uri("http://localhost/hls/seg001.ts"), result.FirstSegmentUrl);
+    }
+
+    [Fact]
+    public void Parse_MasterPlaylist_ExposesResolutionAndBandwidth()
+    {
+        var result = HlsManifestParser.Parse(
+            MasterPlaylist,
+            new Uri("http://localhost/hls/master.m3u8"),
+            RequestContext.CreateEmpty());
+
+        var best = Assert.Single(result.Variants, v => v.Height == 1080);
+        Assert.Equal(5_000_000, best.Bandwidth);
+        Assert.Equal(5_000_000, Assert.Single(best.Tracks).Bandwidth);
+        Assert.Null(result.DurationSec);
+        Assert.Null(result.FirstSegmentUrl);
     }
 
     [Fact]

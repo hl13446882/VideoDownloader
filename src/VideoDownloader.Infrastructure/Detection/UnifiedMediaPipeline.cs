@@ -299,6 +299,16 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             return Task.CompletedTask;
         }
 
+        // HLS MPEG-TS slices are played via MediaResourceType=Media with ~2MB lengths.
+        // Never promote them as progressive cards or spend ffprobe slots on them.
+        if (IsHlsTransportSegment(e.Url, e.MimeType))
+        {
+            RecordDecision(new("network", "video", MediaOwnership.ForPage(page, _observedIdentity),
+                "rejected", "hls_transport_segment", e.Url.Host,
+                $"mime={e.MimeType};length={e.ContentLength}"));
+            return Task.CompletedTask;
+        }
+
         // Generic multi-video: known progressive objects under 2 MiB are invalid teasers.
         var inferredKind = InferKindFromMime(e.MimeType, e.Url);
         if (inferredKind is MediaTrackKind.Video or MediaTrackKind.Combined &&
@@ -758,11 +768,12 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         }
 
         var full = url.AbsoluteUri;
-        // MacCMS parse / qlplayer gateways carry the real stream in ?url=…
+        // MacCMS parse / qlplayer /jiexi /play gateways carry the real stream in ?url=…
         if (System.Text.RegularExpressions.Regex.IsMatch(
                 full,
-                @"/(?:qlplayer|parse|player)[^?\s]*\?[^#]*\burl=",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                @"/(?:qlplayer|parse|player|play)[^?\s]*\?[^#]*\burl=",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase) ||
+            MediaUrlNormalizer.TryUnwrapEmbeddedMediaUrl(url, out _))
             return true;
 
         var queryHint =
@@ -861,6 +872,18 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
     {
         if (url.Scheme is not ("http" or "https"))
             return;
+
+        // Prefer the embedded .m3u8/.mpd over HTML player shells (?url=…).
+        if (MediaUrlNormalizer.TryUnwrapEmbeddedMediaUrl(url, out var embedded))
+        {
+            _logger.LogInformation(
+                "Unwrapped embedded media shell host={Host} -> {EmbeddedHost}",
+                url.Host, embedded.Host);
+            url = embedded;
+            mime = null;
+            knownLength = null;
+            browserObserved = false;
+        }
 
         // Douyin/TikTok: never promote known-tiny MSE slices, even when CDP marked them Media.
         if (IsInsufficientByteDanceDownloadObject(url, knownLength))
@@ -974,6 +997,12 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
     private static Probed FromBrowserObservation(Uri page, BrowserObservedMedia evidence)
     {
         var container = evidence.Mime?.Contains("webm", StringComparison.OrdinalIgnoreCase) == true ? "webm" : "mp4";
+        // Segment / playlist byte lengths must not become "exact file size" in the UI.
+        long? length = evidence.ContentLength;
+        if (IsHlsTransportSegment(evidence.Url, evidence.Mime) ||
+            IsManifestAddress(evidence.Url, evidence.Mime) ||
+            MediaUrlNormalizer.IsLikelySegment(evidence.Url))
+            length = null;
         var track = new MediaTrack(
             "browser-media",
             evidence.KindHint,
@@ -981,7 +1010,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             null,
             container,
             null,
-            evidence.ContentLength,
+            length,
             evidence.Context)
         {
             IsValidated = true,
@@ -989,6 +1018,19 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             Evidence = MediaEvidence.BrowserObserved
         };
         return new Probed(page, track, 0, null);
+    }
+
+    /// <summary>HLS MPEG-TS media slices (not progressive whole files).</summary>
+    private static bool IsHlsTransportSegment(Uri url, string? mime)
+    {
+        if (url.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) ||
+            url.AbsolutePath.EndsWith(".mpd", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (mime?.Contains("mp2t", StringComparison.OrdinalIgnoreCase) == true)
+            return true;
+
+        return url.AbsolutePath.EndsWith(".ts", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsRangedOrVolatileMediaUrl(Uri url)
@@ -1002,6 +1044,15 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
 
     private async Task<Probed?> InspectAsync(Uri url, Uri page, RequestContext context, CancellationToken ct, string? mime = null, bool resolveManifest = true)
     {
+        if (resolveManifest &&
+            MediaUrlNormalizer.TryUnwrapEmbeddedMediaUrl(url, out var embedded))
+        {
+            _logger.LogInformation(
+                "Inspect unwrap shell host={Host} -> {EmbeddedHost}",
+                url.Host, embedded.Host);
+            return await InspectAsync(embedded, page, context, ct, mime: null, resolveManifest: true);
+        }
+
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(25));
         var manifestKind = url.AbsolutePath.EndsWith(".m3u8",StringComparison.OrdinalIgnoreCase) || mime?.Contains("mpegurl",StringComparison.OrdinalIgnoreCase)==true ? "hls" :
@@ -1484,9 +1535,12 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             .Where(v => v.Tracks.Count > 1).ToList();
         var singleTracks = all.SelectMany(a => a.Manifest is null ? new[] { a } :
             a.Manifest.Variants.Where(v => v.Tracks.Count == 1).Select(v => new Probed(a.Page,
-                v.Tracks[0] with { ContentIdentity = a.Track.ContentIdentity ?? v.Tracks[0].ContentIdentity }, 0, v.Height))).ToArray();
+                v.Tracks[0] with { ContentIdentity = a.Track.ContentIdentity ?? v.Tracks[0].ContentIdentity },
+                a.Duration > 0 ? a.Duration : 0,
+                v.Height ?? a.Height))).ToArray();
         var videos = singleTracks.Where(a => a.Track.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
             .Where(a => !IsInsufficientByteDanceDownloadObject(a.Track.SourceUrl, a.Track.ContentLength))
+            .Where(a => !IsHlsTransportSegment(a.Track.SourceUrl, null) && !MediaUrlNormalizer.IsLikelySegment(a.Track.SourceUrl))
             .OrderBy(a => MediaVariantRanking.IsFlvLike(a.Track) ? 1 : 0)
             .ThenByDescending(a => a.Track.Kind == MediaTrackKind.Combined ? 1 : 0)
             .ThenByDescending(a => a.Height ?? 0)
@@ -1494,6 +1548,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             .ToArray();
         var audios = singleTracks.Where(a => a.Track.Kind == MediaTrackKind.Audio)
             .Where(a => !IsInsufficientByteDanceDownloadObject(a.Track.SourceUrl, a.Track.ContentLength))
+            .Where(a => !IsHlsTransportSegment(a.Track.SourceUrl, null) && !MediaUrlNormalizer.IsLikelySegment(a.Track.SourceUrl))
             .OrderBy(a => MediaVariantRanking.IsFlvLike(a.Track) ? 1 : 0)
             .ThenByDescending(a => a.Track.ContentLength ?? a.Track.Bandwidth ?? 0)
             // Progressive Combined can donate audio to a higher video-only sibling.
@@ -1501,6 +1556,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             .Concat(singleTracks.Where(a => a.Track.Kind == MediaTrackKind.Combined)
                 .Where(a => a.Track.Container is not ("hls" or "dash"))
                 .Where(a => !IsInsufficientByteDanceDownloadObject(a.Track.SourceUrl, a.Track.ContentLength))
+                .Where(a => !IsHlsTransportSegment(a.Track.SourceUrl, null) && !MediaUrlNormalizer.IsLikelySegment(a.Track.SourceUrl))
                 .Select(a => a with { Track = a.Track with { Kind = MediaTrackKind.Audio, TrackId = "audio-extract", Codec = null } }))
             .ToArray();
 
@@ -2184,7 +2240,43 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         }
         resolved = resolved with { Variants = variants };
         if (resolved.Variants.Count == 0) return null;
-        return new(page,resolved.Variants[0].Tracks[0],0,resolved.Variants.Max(v=>v.Height),resolved);
+
+        // Media-only playlists lack RESOLUTION — lightly probe the first segment for height only.
+        var height = resolved.Variants.Max(v => v.Height);
+        if (height is null &&
+            kind == "hls" &&
+            resolved.FirstSegmentUrl is { } firstSegment)
+        {
+            try
+            {
+                var segmentProbe = InspectOverride is { } inspect
+                    ? await inspect(firstSegment, page, context, ct)
+                    : await InspectAsync(firstSegment, page, context, ct, resolveManifest: false);
+                if (segmentProbe?.Height is > 0)
+                {
+                    height = segmentProbe.Height;
+                    resolved = resolved with
+                    {
+                        Variants = resolved.Variants
+                            .Select(v => v with
+                            {
+                                Height = v.Height ?? height,
+                                VariantId = v.Height is > 0 || v.VariantId is not ("media" or "default" or "stream")
+                                    ? v.VariantId
+                                    : $"{height}p"
+                            })
+                            .ToArray()
+                    };
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogDebug(ex, "HLS first-segment height probe failed host={Host}", firstSegment.Host);
+            }
+        }
+
+        var duration = resolved.DurationSec ?? 0;
+        return new(page, resolved.Variants[0].Tracks[0], duration, height ?? resolved.Variants.Max(v => v.Height), resolved);
     }
 
     private DetectedVideo StampBrowserObserved(DetectedVideo video)
@@ -2221,6 +2313,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
     {
         var browserVideos = _browserObserved.Values
             .Where(o => !IsManifestAddress(o.Url, o.Mime))
+            .Where(o => !IsHlsTransportSegment(o.Url, o.Mime))
+            .Where(o => !MediaUrlNormalizer.IsLikelySegment(o.Url))
             .Where(o => !IsDouyinLiveStream(o.Url))
             .Where(o => !IsInsufficientByteDanceDownloadObject(o.Url, o.ContentLength))
             .Where(o => o.KindHint is MediaTrackKind.Video or MediaTrackKind.Combined)
