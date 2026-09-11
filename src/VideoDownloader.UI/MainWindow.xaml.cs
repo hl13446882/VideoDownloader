@@ -2,7 +2,9 @@
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.Web.WebView2.Wpf;
 using VideoDownloader.UI.ViewModels;
@@ -26,7 +28,7 @@ public partial class MainWindow : Window
 
         _timer = new DispatcherTimer(DispatcherPriority.Background)
         {
-            Interval = TimeSpan.FromSeconds(1)
+            Interval = TimeSpan.FromMilliseconds(400)
         };
         _timer.Tick += (_, _) => _viewModel.TickDownloads();
         _timer.Start();
@@ -46,24 +48,28 @@ public partial class MainWindow : Window
 
     private void SyncQueueSelectionFromList(ListBox list)
     {
-        var selected = list.SelectedItems.Cast<DownloadJobViewModel>().ToList();
-        var primary = list.SelectedItem as DownloadJobViewModel ?? selected.LastOrDefault();
+        var selected = list.SelectedItems.OfType<DownloadJobViewModel>().ToList();
+        var primary = list.SelectedItem as DownloadJobViewModel
+                      ?? selected.LastOrDefault();
         _viewModel.SetSelectedDownloadJobs(selected, primary);
     }
 
     private void RestoreDownloadQueueSelection(IReadOnlyList<Guid> ids)
     {
-        if (ids.Count == 0)
-            return;
-
         _suppressQueueSelectionSync = true;
         try
         {
             DownloadQueueList.SelectedItems.Clear();
-            DownloadJobViewModel? primary = null;
-            foreach (var vm in _viewModel.DownloadJobs)
+            if (ids.Count == 0)
             {
-                if (!ids.Contains(vm.Job.Id))
+                DownloadQueueList.SelectedItem = null;
+                return;
+            }
+
+            DownloadJobViewModel? primary = null;
+            foreach (var row in _viewModel.QueueRows)
+            {
+                if (row is not DownloadJobViewModel vm || !ids.Contains(vm.Job.Id))
                     continue;
                 DownloadQueueList.SelectedItems.Add(vm);
                 primary = vm;
@@ -82,7 +88,12 @@ public partial class MainWindow : Window
 
     private void OnDownloadQueueContextMenuOpening(object sender, ContextMenuEventArgs e)
     {
-        // Re-sync before CanExecute is queried for menu items.
+        if (QueueRowFromSource(e.OriginalSource) is not DownloadJobViewModel)
+        {
+            e.Handled = true;
+            return;
+        }
+
         SyncQueueSelectionFromList(DownloadQueueList);
         _viewModel.NotifyQueueCommandsPublic();
     }
@@ -96,12 +107,145 @@ public partial class MainWindow : Window
 
     private void OnDownloadQueueDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (sender is not ListBox list ||
-            e.OriginalSource is not DependencyObject source ||
-            ItemsControl.ContainerFromElement(list, source) is not ListBoxItem)
+        switch (QueueRowFromSource(e.OriginalSource))
+        {
+            case QueueGroupViewModel:
+                e.Handled = true;
+                return;
+            case DownloadJobViewModel job:
+                _viewModel.ActivateQueueJob(job);
+                e.Handled = true;
+                return;
+        }
+    }
+
+    private void OnDownloadQueuePreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (QueueRowFromSource(e.OriginalSource) is QueueGroupViewModel group)
+        {
+            if (e.ClickCount >= 2)
+                _viewModel.ToggleQueueGroup(group.Domain);
+            e.Handled = true;
+            return;
+        }
+
+        if (QueueRowFromSource(e.OriginalSource) is not null)
             return;
 
-        PlaySelectedDownloadLikeDoubleClick();
+        if (FindAncestor<ScrollBar>(e.OriginalSource as DependencyObject) is not null)
+            return;
+
+        ClearQueueListSelection();
+    }
+
+    private void OnDownloadQueuePreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not ListBox list)
+            return;
+
+        if (QueueRowFromSource(e.OriginalSource) is not DownloadJobViewModel job)
+        {
+            ClearQueueListSelection();
+            e.Handled = true;
+            return;
+        }
+
+        SelectOnlyQueueRow(list, job);
+        _viewModel.NotifyQueueCommandsPublic();
+    }
+
+    private void OnDownloadQueuePreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key is Key.F2 or Key.Delete or Key.Enter or Key.Return)
+            DownloadQueueList.Focus();
+    }
+
+    private void OnWindowPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.OriginalSource is not DependencyObject source)
+            return;
+        if (FindAncestor(source, DownloadQueueList) is not null)
+            return;
+        if (FindAncestor(source, QueueActionBar) is not null)
+            return;
+        if (FindAncestor<ContextMenu>(source) is not null || FindAncestor<MenuItem>(source) is not null)
+            return;
+
+        ClearQueueListSelection();
+    }
+
+    private void SelectOnlyQueueRow(ListBox list, DownloadJobViewModel job)
+    {
+        _suppressQueueSelectionSync = true;
+        try
+        {
+            list.SelectedItems.Clear();
+            list.SelectedItems.Add(job);
+            list.SelectedItem = job;
+        }
+        finally
+        {
+            _suppressQueueSelectionSync = false;
+        }
+
+        _viewModel.SetSelectedDownloadJobs([job], job);
+        list.Focus();
+    }
+
+    private void ClearQueueListSelection()
+    {
+        if (DownloadQueueList.SelectedItems.Count == 0 && _viewModel.SelectedDownloadJobs.Count == 0)
+            return;
+
+        _suppressQueueSelectionSync = true;
+        try
+        {
+            DownloadQueueList.SelectedItems.Clear();
+            DownloadQueueList.SelectedItem = null;
+        }
+        finally
+        {
+            _suppressQueueSelectionSync = false;
+        }
+
+        _viewModel.ClearQueueSelection();
+    }
+
+    private object? QueueRowFromSource(object source)
+    {
+        if (source is not DependencyObject dep)
+            return null;
+        return ItemsControl.ContainerFromElement(DownloadQueueList, dep) is ListBoxItem item
+            ? item.DataContext
+            : null;
+    }
+
+    private static T? FindAncestor<T>(DependencyObject? current) where T : DependencyObject
+    {
+        while (current is not null)
+        {
+            if (current is T match)
+                return match;
+            current = current is Visual
+                ? VisualTreeHelper.GetParent(current)
+                : LogicalTreeHelper.GetParent(current);
+        }
+
+        return null;
+    }
+
+    private static DependencyObject? FindAncestor(DependencyObject? current, DependencyObject ancestor)
+    {
+        while (current is not null)
+        {
+            if (ReferenceEquals(current, ancestor))
+                return current;
+            current = current is Visual
+                ? VisualTreeHelper.GetParent(current)
+                : LogicalTreeHelper.GetParent(current);
+        }
+
+        return null;
     }
 
     private void OnRenameTextBoxLoaded(object sender, RoutedEventArgs e)
@@ -150,34 +294,6 @@ public partial class MainWindow : Window
             e.Handled = true;
             _viewModel.CancelRename(vm);
         }
-    }
-
-    private void PlaySelectedDownloadLikeDoubleClick()
-    {
-        // Same entry as double-click: system default player via ViewModel.
-        if (_viewModel.PlaySelectedDownloadCommand.CanExecute(null))
-            _viewModel.PlaySelectedDownloadCommand.Execute(null);
-        else
-            _viewModel.OpenSelectedDownloadCommand.Execute(null);
-    }
-
-    private void OnDownloadQueuePreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
-    {
-        if (sender is not ListBox list ||
-            e.OriginalSource is not DependencyObject source ||
-            ItemsControl.ContainerFromElement(list, source) is not ListBoxItem item)
-            return;
-
-        // Explorer-like: right-click unselected row → select only it; already selected → keep multi-select.
-        if (!item.IsSelected)
-        {
-            list.SelectedItems.Clear();
-            item.IsSelected = true;
-        }
-
-        item.Focus();
-        SyncQueueSelectionFromList(list);
-        _viewModel.NotifyQueueCommandsPublic();
     }
 
     private async void OnLoadedAsync(object sender, RoutedEventArgs e)

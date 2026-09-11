@@ -20,6 +20,9 @@ public sealed class UiOptions
 {
     /// <summary>zh-CN or en</summary>
     public string Language { get; set; } = "zh-CN";
+
+    /// <summary>When true, the download queue is grouped by site-folder domain.</summary>
+    public bool QueueGrouped { get; set; }
 }
 
 public sealed class LicenseOptions

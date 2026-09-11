@@ -7,9 +7,11 @@ using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Web.WebView2.Wpf;
 using VideoDownloader.Core.Contracts;
+using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Core.Naming;
 using VideoDownloader.Infrastructure.Browser;
+using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Detection;
 using VideoDownloader.Infrastructure.Diagnostics;
 using VideoDownloader.UI.Localization;
@@ -205,6 +207,22 @@ public sealed partial class DetectedVideoViewModel : ObservableObject
         MatchesMode(variant, "音轨") ? "音轨" : "视频";
 }
 
+public sealed partial class QueueGroupViewModel : ObservableObject
+{
+    public QueueGroupViewModel(string domain, int count, bool isExpanded)
+    {
+        Domain = domain;
+        Count = count;
+        IsExpanded = isExpanded;
+    }
+
+    public string Domain { get; }
+    public int Count { get; }
+    public bool IsExpanded { get; }
+    public string Glyph => IsExpanded ? "▾" : "▸";
+    public string CountText => Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+}
+
 public sealed partial class DownloadJobViewModel : ObservableObject
 {
     private readonly LocalizationService _loc;
@@ -216,9 +234,12 @@ public sealed partial class DownloadJobViewModel : ObservableObject
         _loc = loc;
     }
 
+    public bool IsGrouped { get; set; }
+
     public string DisplayName => Job.DisplayName;
-    public string DisplayNameEllipsized => EllipsizeMiddle(Job.DisplayName, 30);
+    public string DisplayNameEllipsized => Job.DisplayName;
     public string ExtensionLabel => Path.GetExtension(Job.TargetPath);
+    public string GroupDomain => DownloadSiteFolder.Resolve(Job.PageUrl);
 
     [ObservableProperty]
     private bool _isEditing;
@@ -245,29 +266,49 @@ public sealed partial class DownloadJobViewModel : ObservableObject
         EditStem = Job.DisplayName;
     }
 
-    public string Status => Job.Status == DownloadStatus.Completed && !System.IO.File.Exists(Job.TargetPath)
-        ? _loc.T("job.fileDeleted")
-        : Job.Status switch
+    public bool IsFailed => Job.Status == DownloadStatus.Failed;
+
+    public string Status
+    {
+        get
         {
-            DownloadStatus.Removed => _loc.T("job.removed"),
-            DownloadStatus.Completed => _loc.T("job.completed"),
-            DownloadStatus.Muxing => _loc.T("job.muxing"),
-            DownloadStatus.Downloading => _loc.T("job.downloading"),
-            DownloadStatus.Pending => _loc.T("job.pending"),
-            DownloadStatus.Preparing => _loc.T("job.preparing"),
-            DownloadStatus.Paused => _loc.T("job.paused"),
-            DownloadStatus.Cancelled => _loc.T("job.cancelled"),
-            _ => _loc.T("job.failed")
-        };
+            if (Job.Status == DownloadStatus.Completed && !File.Exists(Job.TargetPath))
+                return _loc.T("job.fileDeleted");
+            if (Job.Status == DownloadStatus.Failed)
+            {
+                var reason = ErrorText(Job.LastErrorCode);
+                return string.IsNullOrWhiteSpace(reason)
+                    ? _loc.T("job.failed")
+                    : _loc.T("job.failed") + " · " + reason;
+            }
+
+            return Job.Status switch
+            {
+                DownloadStatus.Removed => _loc.T("job.removed"),
+                DownloadStatus.Completed => _loc.T("job.completed"),
+                DownloadStatus.Muxing => _loc.T("job.muxing"),
+                DownloadStatus.Downloading => _loc.T("job.downloading"),
+                DownloadStatus.Pending => _loc.T("job.pending"),
+                DownloadStatus.Preparing => _loc.T("job.preparing"),
+                DownloadStatus.Paused => _loc.T("job.paused"),
+                DownloadStatus.Cancelled => _loc.T("job.cancelled"),
+                _ => _loc.T("job.failed")
+            };
+        }
+    }
 
     public double ProgressPercent => Job.TotalBytes is > 0
-        ? Math.Min(Job.Status == DownloadStatus.Downloading ? 99 : 100, Job.DownloadedBytes * 100.0 / Job.TotalBytes.Value)
+        ? Math.Min(100, Job.DownloadedBytes * 100.0 / Job.TotalBytes.Value)
         : 0;
+
+    public bool IsProgressIndeterminate =>
+        Job.TotalBytes is null &&
+        Job.Status is DownloadStatus.Downloading or DownloadStatus.Preparing or DownloadStatus.Muxing;
 
     public string ProgressText => Job.Status == DownloadStatus.Completed
         ? $"100% ({FormatBytes(Job.DownloadedBytes)})"
         : Job.TotalBytes is > 0
-            ? $"{ProgressPercent:F0}% ({FormatBytes(Job.DownloadedBytes)} / {FormatBytes(Job.TotalBytes.Value)})"
+            ? $"{ProgressPercent:F0}% ({FormatBytes(Job.DownloadedBytes)} / {FormatBytes(Job.TotalBytes!.Value)})"
             : $"{FormatBytes(Job.DownloadedBytes)}";
 
     public void Refresh()
@@ -275,28 +316,22 @@ public sealed partial class DownloadJobViewModel : ObservableObject
         OnPropertyChanged(nameof(DisplayName));
         OnPropertyChanged(nameof(DisplayNameEllipsized));
         OnPropertyChanged(nameof(ExtensionLabel));
+        OnPropertyChanged(nameof(GroupDomain));
+        OnPropertyChanged(nameof(IsGrouped));
+        OnPropertyChanged(nameof(IsFailed));
         OnPropertyChanged(nameof(Status));
         OnPropertyChanged(nameof(ProgressPercent));
+        OnPropertyChanged(nameof(IsProgressIndeterminate));
         OnPropertyChanged(nameof(ProgressText));
     }
 
-    public static string EllipsizeMiddle(string value, int maxChars)
+    private string ErrorText(string? code)
     {
-        if (string.IsNullOrEmpty(value) || maxChars <= 0)
-            return value ?? string.Empty;
-
-        var info = new System.Globalization.StringInfo(value);
-        if (info.LengthInTextElements <= maxChars)
-            return value;
-
-        if (maxChars == 1)
-            return "*";
-
-        var prefixLength = (maxChars - 1) / 2;
-        var suffixLength = maxChars - 1 - prefixLength;
-        var prefix = info.SubstringByTextElements(0, prefixLength);
-        var suffix = info.SubstringByTextElements(info.LengthInTextElements - suffixLength, suffixLength);
-        return prefix + "*" + suffix;
+        if (string.IsNullOrWhiteSpace(code))
+            return string.Empty;
+        var key = "error." + code;
+        var mapped = _loc.T(key);
+        return string.Equals(mapped, key, StringComparison.Ordinal) ? code : mapped;
     }
 
     private static string FormatBytes(long bytes)
@@ -357,6 +392,10 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly IMediaAggregator _aggregator;
     private readonly SettingsViewModel _settingsViewModel;
     private readonly LocalizationService _loc;
+    private readonly AppOptions _options;
+    private readonly UserSettingsStore _settingsStore;
+    private readonly HashSet<string> _collapsedQueueGroups = new(StringComparer.OrdinalIgnoreCase);
+    private bool _queueGrouped;
     private readonly Dictionary<Guid, DetectedVideoViewModel> _videoMap = new();
     private readonly object _pageSync = new();
     private CancellationTokenSource _probeCts = new();
@@ -424,6 +463,10 @@ public sealed partial class MainViewModel : ObservableObject
     public ObservableCollection<BrowserTabViewModel> Tabs { get; } = new();
     public ObservableCollection<DetectedVideoViewModel> DetectedVideos { get; } = new();
     public ObservableCollection<DownloadJobViewModel> DownloadJobs { get; } = new();
+    public ObservableCollection<object> QueueRows { get; } = new();
+
+    public bool IsQueueGrouped => _queueGrouped;
+    public string QueueGroupToggleLabel => _queueGrouped ? _loc.T("btn.ungroup") : _loc.T("btn.group");
 
     /// <summary>Queue multi-selection (click toggles). Batch ops require every selected row to support them.</summary>
     public IReadOnlyList<DownloadJobViewModel> SelectedDownloadJobs => _selectedDownloadJobs;
@@ -493,6 +536,9 @@ public sealed partial class MainViewModel : ObservableObject
         _aggregator = aggregator;
         _settingsViewModel = settingsViewModel;
         _loc = loc;
+        _options = services.GetRequiredService<AppOptions>();
+        _settingsStore = services.GetRequiredService<UserSettingsStore>();
+        _queueGrouped = _options.Ui.QueueGrouped;
 
         _pipeline.VideoDetected += OnVideoDetected;
         _pipeline.PageProbed += OnPageProbed;
@@ -530,6 +576,7 @@ public sealed partial class MainViewModel : ObservableObject
         foreach (var video in DetectedVideos)
             video.RefreshLocalizedModes();
         OnPropertyChanged(nameof(L));
+        OnPropertyChanged(nameof(QueueGroupToggleLabel));
     }
 
     public async Task InitializeAsync()
@@ -670,6 +717,37 @@ public sealed partial class MainViewModel : ObservableObject
         if (!ReferenceEquals(SelectedDownloadJob, primary))
             SelectedDownloadJob = primary;
         NotifyQueueCommands();
+    }
+
+    public void ClearQueueSelection()
+    {
+        _selectedDownloadJobs.Clear();
+        _selectedDownloadJobIds.Clear();
+        if (SelectedDownloadJob is not null)
+            SelectedDownloadJob = null;
+        NotifyQueueCommands();
+    }
+
+    public void SelectOnlyQueueJob(DownloadJobViewModel job)
+    {
+        SetSelectedDownloadJobs([job], job);
+        RestoreQueueSelection?.Invoke([job.Job.Id]);
+    }
+
+    public void ActivateQueueJob(DownloadJobViewModel job)
+    {
+        SelectOnlyQueueJob(job);
+        if (CanPlaySelected)
+            OpenSelectedDownloadWithSystemPlayer();
+    }
+
+    public void ToggleQueueGroup(string domain)
+    {
+        if (!_collapsedQueueGroups.Add(domain))
+            _collapsedQueueGroups.Remove(domain);
+        RebuildQueueRows();
+        if (_selectedDownloadJobIds.Count > 0)
+            RestoreQueueSelection?.Invoke(_selectedDownloadJobIds);
     }
 
     [RelayCommand]
@@ -1555,8 +1633,24 @@ public sealed partial class MainViewModel : ObservableObject
             return;
 
         var name = DownloadFileNameBuilder.Build(video, variant);
-        await _downloadEngine.EnqueueAsync(variant, name, video.PageUrl);
-        RefreshDownloadJobs();
+        try
+        {
+            var id = await _downloadEngine.EnqueueAsync(variant, name, video.PageUrl);
+            _collapsedQueueGroups.Remove(DownloadSiteFolder.Resolve(video.PageUrl));
+            RefreshDownloadJobs();
+            var created = DownloadJobs.FirstOrDefault(j => j.Job.Id == id);
+            if (created is not null)
+                SelectOnlyQueueJob(created);
+            SetStatusKey("status.enqueued", name);
+        }
+        catch (DownloadException ex)
+        {
+            var reason = _loc.T("error." + ex.ErrorCode);
+            if (string.Equals(reason, "error." + ex.ErrorCode, StringComparison.Ordinal))
+                reason = ex.Message;
+            SetStatusKey("status.enqueueFailed", reason);
+            MessageBox.Show(reason, _loc.DialogTitle, MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     public void RefreshDownloadJobs()
@@ -1568,10 +1662,8 @@ public sealed partial class MainViewModel : ObservableObject
                 : new List<Guid> { SelectedDownloadJob.Job.Id };
         var primaryId = SelectedDownloadJob?.Job.Id;
 
-        var jobs = _downloadEngine.GetActiveJobs();
-        DownloadJobs.Clear();
-        foreach (var job in jobs)
-            DownloadJobs.Add(new DownloadJobViewModel(job, _loc));
+        SyncJobViewModels(_downloadEngine.GetActiveJobs());
+        RebuildQueueRows();
 
         _selectedDownloadJobs.Clear();
         foreach (var id in selectedIds)
@@ -1607,6 +1699,69 @@ public sealed partial class MainViewModel : ObservableObject
         foreach (var job in DownloadJobs)
             job.Refresh();
         NotifyQueueCommands();
+    }
+
+    [RelayCommand]
+    private void ToggleQueueGrouping()
+    {
+        _queueGrouped = !_queueGrouped;
+        _options.Ui.QueueGrouped = _queueGrouped;
+        _settingsStore.Save(_options);
+        OnPropertyChanged(nameof(IsQueueGrouped));
+        OnPropertyChanged(nameof(QueueGroupToggleLabel));
+        RebuildQueueRows();
+        if (_selectedDownloadJobIds.Count > 0)
+            RestoreQueueSelection?.Invoke(_selectedDownloadJobIds);
+        NotifyQueueCommands();
+    }
+
+    private void SyncJobViewModels(IReadOnlyList<DownloadJob> jobs)
+    {
+        var existing = DownloadJobs.ToDictionary(j => j.Job.Id);
+        DownloadJobs.Clear();
+        foreach (var job in jobs)
+        {
+            if (existing.TryGetValue(job.Id, out var vm))
+            {
+                vm.IsGrouped = _queueGrouped;
+                vm.Refresh();
+                DownloadJobs.Add(vm);
+            }
+            else
+            {
+                DownloadJobs.Add(new DownloadJobViewModel(job, _loc) { IsGrouped = _queueGrouped });
+            }
+        }
+    }
+
+    private void RebuildQueueRows()
+    {
+        QueueRows.Clear();
+        if (!_queueGrouped)
+        {
+            foreach (var job in DownloadJobs)
+            {
+                job.IsGrouped = false;
+                job.Refresh();
+                QueueRows.Add(job);
+            }
+            return;
+        }
+
+        foreach (var group in DownloadJobs.GroupBy(j => j.GroupDomain, StringComparer.OrdinalIgnoreCase)
+                     .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            var expanded = !_collapsedQueueGroups.Contains(group.Key);
+            QueueRows.Add(new QueueGroupViewModel(group.Key, group.Count(), expanded));
+            if (!expanded)
+                continue;
+            foreach (var job in group)
+            {
+                job.IsGrouped = true;
+                job.Refresh();
+                QueueRows.Add(job);
+            }
+        }
     }
 
     [RelayCommand(CanExecute = nameof(CanPauseSelected))]
@@ -1671,6 +1826,15 @@ public sealed partial class MainViewModel : ObservableObject
 
         SetStatusKey(deleteFile ? "status.removedBoth" : "status.removedRecord");
         RefreshDownloadJobs();
+    }
+
+    [RelayCommand]
+    private async Task DeleteSelectedQueueAsync()
+    {
+        if (CanCancelSelected)
+            await CancelSelectedAsync();
+        else if (CanRemoveSelected)
+            await RemoveSelectedAsync();
     }
 
     [RelayCommand(CanExecute = nameof(CanRenameSelected))]

@@ -63,7 +63,7 @@ public interface IRequestMessageFactory
 
 public interface IDownloadEngine
 {
-    Task EnqueueAsync(
+    Task<Guid> EnqueueAsync(
         MediaVariant variant,
         string displayName,
         Uri? pageUrl = null,

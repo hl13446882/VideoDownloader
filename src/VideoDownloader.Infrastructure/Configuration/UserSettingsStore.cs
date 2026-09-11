@@ -125,7 +125,8 @@ public sealed class UserSettingsStore
         },
         Ui = new UiOptions
         {
-            Language = source.Ui?.Language ?? "zh-CN"
+            Language = source.Ui?.Language ?? "zh-CN",
+            QueueGrouped = source.Ui?.QueueGrouped ?? false
         }
     };
 }

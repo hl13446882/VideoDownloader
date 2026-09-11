@@ -72,7 +72,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         _failedRetryLoop = Task.Run(() => FailedRetryLoopAsync(_lifetime.Token));
     }
 
-    public async Task EnqueueAsync(
+    public async Task<Guid> EnqueueAsync(
         MediaVariant variant,
         string displayName,
         Uri? pageUrl = null,
@@ -124,6 +124,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         }
         await _repository.SaveAsync(job, ct);
         _ = RunJobAsync(job);
+        return job.Id;
     }
 
     public async Task PauseAsync(Guid jobId, CancellationToken ct = default)
@@ -173,11 +174,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
     }
 
     public IReadOnlyList<DownloadJob> GetActiveJobs() =>
-        _jobs.Values
-            .Where(j => j.Status is not (DownloadStatus.Removed or DownloadStatus.Cancelled))
-            // Incomplete first; then by first UpdatedAt (must not be refreshed on progress).
-            .OrderBy(j => j.Status == DownloadStatus.Completed ? 1 : 0)
-            .ThenByDescending(j => j.UpdatedAt)
+        DownloadQueueOrder.Sort(
+                _jobs.Values.Where(j => j.Status is not (DownloadStatus.Removed or DownloadStatus.Cancelled)))
             .ToList();
 
     public async Task RemoveAsync(Guid jobId, bool deleteFile = false, CancellationToken ct = default)

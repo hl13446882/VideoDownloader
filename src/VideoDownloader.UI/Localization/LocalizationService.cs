@@ -83,6 +83,8 @@ public sealed partial class LocalizationService : ObservableObject
         OnPropertyChanged(nameof(BtnResume));
         OnPropertyChanged(nameof(BtnCancel));
         OnPropertyChanged(nameof(BtnRemove));
+        OnPropertyChanged(nameof(BtnGroup));
+        OnPropertyChanged(nameof(BtnUngroup));
         OnPropertyChanged(nameof(MenuPlay));
         OnPropertyChanged(nameof(MenuRename));
         OnPropertyChanged(nameof(MenuOpenFolder));
@@ -132,6 +134,8 @@ public sealed partial class LocalizationService : ObservableObject
     public string BtnResume => T("btn.resume");
     public string BtnCancel => T("btn.cancel");
     public string BtnRemove => T("btn.remove");
+    public string BtnGroup => T("btn.group");
+    public string BtnUngroup => T("btn.ungroup");
     public string MenuPlay => T("menu.play");
     public string MenuRename => T("menu.rename");
     public string MenuOpenFolder => T("menu.openFolder");
@@ -183,6 +187,8 @@ public sealed partial class LocalizationService : ObservableObject
         ["btn.resume"] = ("恢复", "Resume"),
         ["btn.cancel"] = ("取消", "Cancel"),
         ["btn.remove"] = ("移除", "Remove"),
+        ["btn.group"] = ("分组", "Group"),
+        ["btn.ungroup"] = ("单列", "List"),
         ["menu.play"] = ("播放", "Play"),
         ["menu.rename"] = ("重命名", "Rename"),
         ["menu.openFolder"] = ("打开所在目录", "Open containing folder"),
@@ -251,6 +257,8 @@ public sealed partial class LocalizationService : ObservableObject
         ["status.probeFound"] = ("已发现：{0} 个结果，正在验证", "Found: {0} result(s), validating"),
         ["status.contextWarn"] = ("页面上下文刷新警告：{0}", "Page context refresh warning: {0}"),
         ["status.cancelled"] = ("已取消下载并清理临时文件。", "Download cancelled; temp files cleaned."),
+        ["status.enqueued"] = ("已加入队列：{0}", "Queued: {0}"),
+        ["status.enqueueFailed"] = ("无法开始下载：{0}", "Cannot start download: {0}"),
         ["status.removedBoth"] = ("已移除记录并删除文件。", "Record and file removed."),
         ["status.removedRecord"] = ("已移除下载记录。", "Download record removed."),
         ["status.renameEmpty"] = ("名称不能为空，已取消重命名。", "Name cannot be empty; rename cancelled."),
@@ -281,8 +289,24 @@ public sealed partial class LocalizationService : ObservableObject
         ["job.cancelled"] = ("已取消", "Cancelled"),
         ["job.failed"] = ("失败", "Failed"),
         ["job.fileDeleted"] = ("文件已删除", "File deleted"),
-        ["queue.tooltip"] = ("依次点击可选多行；右键打开任务菜单；双击或右键「播放」用系统默认播放器打开已完成项",
-            "Click rows to multi-select; right-click for menu; double-click or Play opens completed files with the system player"),
+        ["error.NET_TIMEOUT"] = ("网络超时", "Network timeout"),
+        ["error.HTTP_403"] = ("拒绝访问 (403)", "Access denied (403)"),
+        ["error.HTTP_404"] = ("地址不存在 (404)", "Not found (404)"),
+        ["error.RANGE_MISMATCH"] = ("续传校验失败", "Resume mismatch"),
+        ["error.DISK_FULL"] = ("磁盘空间不足", "Disk full"),
+        ["error.LICENSE_DEMO_LIMIT"] = ("DEMO 上限 10 MiB", "DEMO 10 MiB limit"),
+        ["error.FFMPEG_FAILED"] = ("封装失败", "Mux failed"),
+        ["error.FFMPEG_NOT_FOUND"] = ("找不到 ffmpeg", "ffmpeg not found"),
+        ["error.CONTEXT_EXPIRED"] = ("地址已失效，请重新探测", "Address expired; probe again"),
+        ["error.INCOMPLETE_DOWNLOAD"] = ("文件不完整", "Incomplete file"),
+        ["error.FILE_IO"] = ("文件读写失败", "File I/O error"),
+        ["error.PERMISSION_DENIED"] = ("没有写入权限", "Permission denied"),
+        ["error.INVALID_FORMAT"] = ("格式无效", "Invalid format"),
+        ["error.MSE_TRACK_NOT_DOWNLOADABLE"] = ("该地址不是完整视频", "MSE track not downloadable"),
+        ["error.INVALID_SAVE_PATH"] = ("保存目录无效", "Invalid save folder"),
+        ["error.UNEXPECTED_ERROR"] = ("未知错误", "Unexpected error"),
+        ["queue.tooltip"] = ("Ctrl 点击多选；右键只作用于当前行；双击已完成项播放",
+            "Ctrl+click to multi-select; right-click acts on that row; double-click plays a completed file"),
         ["dialog.playIncomplete"] = ("下载尚未完成，无法播放。", "Download not finished; cannot play."),
         ["dialog.fileMissing"] = ("文件不存在或已被删除。", "File missing or deleted."),
         ["tab.new"] = ("新标签页", "New tab"),

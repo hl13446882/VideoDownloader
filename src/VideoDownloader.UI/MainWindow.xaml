@@ -1,6 +1,8 @@
 ﻿<Window x:Class="VideoDownloader.UI.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:VideoDownloader.UI.ViewModels"
+        PreviewMouseLeftButtonDown="OnWindowPreviewMouseLeftButtonDown"
         Title="Video Downloader"
         Icon="pack://application:,,,/Assets/app.ico"
         Height="900"
@@ -190,44 +192,54 @@
 
                 <GroupBox Grid.Row="1" Header="{Binding L.SideQueue}" Margin="0,4,0,4">
                     <ListBox x:Name="DownloadQueueList"
-                             ItemsSource="{Binding DownloadJobs}"
-                             SelectionMode="Multiple"
+                             ItemsSource="{Binding QueueRows}"
+                             SelectionMode="Extended"
                              BorderThickness="0"
                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                              ToolTip="{Binding L.QueueTooltip}"
                              SelectionChanged="OnDownloadQueueSelectionChanged"
                              MouseDoubleClick="OnDownloadQueueDoubleClick"
+                             PreviewMouseLeftButtonDown="OnDownloadQueuePreviewMouseLeftButtonDown"
                              PreviewMouseRightButtonDown="OnDownloadQueuePreviewMouseRightButtonDown"
+                             PreviewKeyDown="OnDownloadQueuePreviewKeyDown"
                              ContextMenuOpening="OnDownloadQueueContextMenuOpening">
-                        <ListBox.ContextMenu>
-                            <!-- DataContext must be PlacementTarget's VM; otherwise Can*/Command bindings stay stale or null. -->
-                            <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}"
-                                         Opened="OnDownloadQueueContextMenuOpened">
-                                <MenuItem Header="{Binding L.MenuPlay}"
-                                          Command="{Binding PlaySelectedDownloadCommand}"/>
-                                <MenuItem Header="{Binding L.MenuRename}"
-                                          Command="{Binding BeginRenameSelectedCommand}"/>
-                                <MenuItem Header="{Binding L.MenuOpenFolder}"
-                                          Command="{Binding OpenSelectedFolderCommand}"/>
-                                <MenuItem Header="{Binding L.MenuOpenUrl}"
-                                          Command="{Binding OpenSelectedPageCommand}"/>
-                                <Separator/>
-                                <MenuItem Header="{Binding L.MenuPause}"
-                                          Command="{Binding PauseSelectedCommand}"/>
-                                <MenuItem Header="{Binding L.MenuResume}"
-                                          Command="{Binding ResumeSelectedCommand}"/>
-                                <MenuItem Header="{Binding L.MenuCancel}"
-                                          Command="{Binding CancelSelectedCommand}"/>
-                                <Separator/>
-                                <MenuItem Header="{Binding L.MenuRemove}"
-                                          Command="{Binding RemoveSelectedCommand}"/>
-                            </ContextMenu>
-                        </ListBox.ContextMenu>
-                        <ListBox.ItemTemplate>
-                            <DataTemplate>
-                                <StackPanel Margin="0,2">
+                        <ListBox.InputBindings>
+                            <KeyBinding Key="F2" Command="{Binding BeginRenameSelectedCommand}"/>
+                            <KeyBinding Key="Delete" Command="{Binding DeleteSelectedQueueCommand}"/>
+                            <KeyBinding Key="Return" Command="{Binding PlaySelectedDownloadCommand}"/>
+                        </ListBox.InputBindings>
+                        <ListBox.Resources>
+                            <DataTemplate DataType="{x:Type vm:QueueGroupViewModel}">
+                                <DockPanel Margin="0,4,0,2" Background="Transparent">
+                                    <TextBlock Text="{Binding Glyph}"
+                                               Width="16"
+                                               FontWeight="SemiBold"
+                                               VerticalAlignment="Center"/>
+                                    <TextBlock DockPanel.Dock="Right"
+                                               Text="{Binding CountText}"
+                                               Margin="8,0,0,0"
+                                               Foreground="#888"
+                                               FontSize="11"
+                                               VerticalAlignment="Center"/>
+                                    <TextBlock Text="{Binding Domain}"
+                                               FontWeight="SemiBold"
+                                               TextTrimming="CharacterEllipsis"/>
+                                </DockPanel>
+                            </DataTemplate>
+                            <DataTemplate DataType="{x:Type vm:DownloadJobViewModel}">
+                                <StackPanel>
+                                    <StackPanel.Style>
+                                        <Style TargetType="StackPanel">
+                                            <Setter Property="Margin" Value="0,2,0,2"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsGrouped}" Value="True">
+                                                    <Setter Property="Margin" Value="16,2,0,2"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </StackPanel.Style>
                                     <Grid>
-                                        <TextBlock Text="{Binding DisplayNameEllipsized}"
+                                        <TextBlock Text="{Binding DisplayName}"
                                                    ToolTip="{Binding DisplayName}"
                                                    TextTrimming="CharacterEllipsis"
                                                    VerticalAlignment="Center">
@@ -265,19 +277,60 @@
                                                      PreviewKeyDown="OnRenameTextBoxPreviewKeyDown"/>
                                         </DockPanel>
                                     </Grid>
+                                    <ProgressBar Height="3"
+                                                 Margin="0,3,0,0"
+                                                 Minimum="0"
+                                                 Maximum="100"
+                                                 Value="{Binding ProgressPercent}"
+                                                 IsIndeterminate="{Binding IsProgressIndeterminate}"/>
                                     <TextBlock Text="{Binding ProgressText}" FontSize="11" Foreground="#555"/>
-                                    <TextBlock Text="{Binding Status}" FontSize="11" Foreground="#666"/>
+                                    <TextBlock Text="{Binding Status}" FontSize="11">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Foreground" Value="#666666"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsFailed}" Value="True">
+                                                        <Setter Property="Foreground" Value="#B45309"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
                                 </StackPanel>
                             </DataTemplate>
-                        </ListBox.ItemTemplate>
+                        </ListBox.Resources>
+                        <ListBox.ContextMenu>
+                            <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}"
+                                         Opened="OnDownloadQueueContextMenuOpened">
+                                <MenuItem Header="{Binding L.MenuPlay}"
+                                          Command="{Binding PlaySelectedDownloadCommand}"/>
+                                <MenuItem Header="{Binding L.MenuRename}"
+                                          Command="{Binding BeginRenameSelectedCommand}"/>
+                                <MenuItem Header="{Binding L.MenuOpenFolder}"
+                                          Command="{Binding OpenSelectedFolderCommand}"/>
+                                <MenuItem Header="{Binding L.MenuOpenUrl}"
+                                          Command="{Binding OpenSelectedPageCommand}"/>
+                                <Separator/>
+                                <MenuItem Header="{Binding L.MenuPause}"
+                                          Command="{Binding PauseSelectedCommand}"/>
+                                <MenuItem Header="{Binding L.MenuResume}"
+                                          Command="{Binding ResumeSelectedCommand}"/>
+                                <MenuItem Header="{Binding L.MenuCancel}"
+                                          Command="{Binding CancelSelectedCommand}"/>
+                                <Separator/>
+                                <MenuItem Header="{Binding L.MenuRemove}"
+                                          Command="{Binding RemoveSelectedCommand}"/>
+                            </ContextMenu>
+                        </ListBox.ContextMenu>
                     </ListBox>
                 </GroupBox>
 
-                <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Center">
-                    <Button Content="{Binding L.BtnPause}" Width="64" Height="28" Margin="0,0,4,0" Command="{Binding PauseSelectedCommand}"/>
-                    <Button Content="{Binding L.BtnResume}" Width="64" Height="28" Margin="0,0,4,0" Command="{Binding ResumeSelectedCommand}"/>
-                    <Button Content="{Binding L.BtnCancel}" Width="64" Height="28" Margin="0,0,4,0" Command="{Binding CancelSelectedCommand}"/>
-                    <Button Content="{Binding L.BtnRemove}" Width="64" Height="28" Command="{Binding RemoveSelectedCommand}"/>
+                <StackPanel x:Name="QueueActionBar" Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Center">
+                    <Button Content="{Binding QueueGroupToggleLabel}" Width="56" Height="28" Margin="0,0,4,0" Command="{Binding ToggleQueueGroupingCommand}"/>
+                    <Button Content="{Binding L.BtnPause}" Width="56" Height="28" Margin="0,0,4,0" Command="{Binding PauseSelectedCommand}"/>
+                    <Button Content="{Binding L.BtnResume}" Width="56" Height="28" Margin="0,0,4,0" Command="{Binding ResumeSelectedCommand}"/>
+                    <Button Content="{Binding L.BtnCancel}" Width="56" Height="28" Margin="0,0,4,0" Command="{Binding CancelSelectedCommand}"/>
+                    <Button Content="{Binding L.BtnRemove}" Width="56" Height="28" Command="{Binding RemoveSelectedCommand}"/>
                 </StackPanel>
             </Grid>
         </Grid>
