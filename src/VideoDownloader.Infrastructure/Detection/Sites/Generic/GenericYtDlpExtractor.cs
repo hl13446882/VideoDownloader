@@ -493,7 +493,7 @@ public sealed class GenericYtDlpExtractor : IExternalSiteResolver
                 TryBuildAudioTrack(preferredAudio, context, out var audioTrack))
             {
                 variants.Add(MediaVariant.FromTracks(
-                    $"{height?.ToString() ?? "video"}p-{FormatId(videoFormat)}",
+                    height is not null ? $"{height}p-{FormatId(videoFormat)}" : FormatId(videoFormat),
                     null,
                     height,
                     SumBitrate(videoTrack.Bandwidth, audioTrack.Bandwidth),
@@ -503,7 +503,7 @@ public sealed class GenericYtDlpExtractor : IExternalSiteResolver
             else
             {
                 variants.Add(MediaVariant.FromTracks(
-                    $"{height?.ToString() ?? "video"}p-{FormatId(videoFormat)}",
+                    height is not null ? $"{height}p-{FormatId(videoFormat)}" : FormatId(videoFormat),
                     null,
                     height,
                     videoTrack.Bandwidth,

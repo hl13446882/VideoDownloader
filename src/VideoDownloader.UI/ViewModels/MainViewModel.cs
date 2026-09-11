@@ -142,38 +142,13 @@ public sealed partial class DetectedVideoViewModel : ObservableObject
             Variants.FirstOrDefault();
     }
 
-    private static VariantItemViewModel FormatVariantItem(MediaVariant variant, DetectedVideo parent)
-    {
-        var label = variant.VariantId;
-        if (variant.Height is not null && !label.Contains($"{variant.Height}p", StringComparison.Ordinal))
-            label = $"{label} · {variant.Height}p";
-        if (variant.Bandwidth is > 1_000)
-            label += $" ({variant.Bandwidth / 1_000.0:F0} kbps)";
-        var size = variant.TotalContentLength;
-        if (size is > 0)
-            label += $" [{FormatVariantBytes(size.Value)}]";
-
-        return new VariantItemViewModel
+    private static VariantItemViewModel FormatVariantItem(MediaVariant variant, DetectedVideo parent) =>
+        new()
         {
             Variant = variant,
-            Label = label,
+            Label = MediaVariantDisplay.BuildLabel(variant, parent.DurationSec),
             Parent = parent
         };
-    }
-
-    private static string FormatVariantBytes(long bytes)
-    {
-        string[] units = ["B", "KB", "MB", "GB"];
-        double size = bytes;
-        var i = 0;
-        while (size >= 1024 && i < units.Length - 1)
-        {
-            size /= 1024;
-            i++;
-        }
-
-        return $"{size:F1} {units[i]}";
-    }
 
     public void ApplyModeFilter()
     {
