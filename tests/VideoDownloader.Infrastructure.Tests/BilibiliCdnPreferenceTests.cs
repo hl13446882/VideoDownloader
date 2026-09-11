@@ -5,6 +5,7 @@ using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Detection.Sites.Bilibili;
+using VideoDownloader.Infrastructure.Download;
 
 namespace VideoDownloader.Infrastructure.Tests;
 
@@ -29,6 +30,36 @@ public class BilibiliCdnPreferenceTests
             new Uri("https://rr1---sn-npoeen66.googlevideo.com/videoplayback"),
             323_944_781,
             323_940_056));
+    }
+
+    [Fact]
+    public void SameDashObjects_True_WhenOnlySignatureAndCdnChange()
+    {
+        var expired = MediaVariant.FromCombinedTrack(
+            "v1",
+            new Uri("https://upos-hz-mirrorakam.akamaized.net/upgcxcode/17/23/41747222317/41747222317-1-30080.m4s?os=akam&deadline=1"),
+            RequestContext.CreateEmpty(),
+            container: "mp4");
+        var fresh = MediaVariant.FromCombinedTrack(
+            "v1",
+            new Uri("https://upos-sz-mirrorbos.bilivideo.com/upgcxcode/17/23/41747222317/41747222317-1-30080.m4s?os=bos&deadline=999"),
+            RequestContext.CreateEmpty(),
+            container: "mp4");
+        var otherQn = MediaVariant.FromCombinedTrack(
+            "v1",
+            new Uri("https://upos-sz-mirrorbos.bilivideo.com/upgcxcode/17/23/41747222317/41747222317-1-30064.m4s?os=bos"),
+            RequestContext.CreateEmpty(),
+            container: "mp4");
+
+        Assert.True(BilibiliCdnPreference.SameDashObjects(expired, fresh));
+        Assert.False(BilibiliCdnPreference.SameDashObjects(expired, otherQn));
+        Assert.False(BilibiliCdnPreference.SameDashObjects(
+            expired,
+            MediaVariant.FromCombinedTrack(
+                "v1",
+                new Uri("https://rr1---sn-npoeen66.googlevideo.com/videoplayback"),
+                RequestContext.CreateEmpty(),
+                container: "mp4")));
     }
 
     [Fact]
@@ -85,6 +116,49 @@ public class BilibiliCdnPreferenceTests
         Assert.NotNull(last);
         Assert.Contains("bilivideo.com", last!.Video!.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("akamai", last.Video.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void IsStaleForAutoRecover_False_ForBilibili_EvenWhenHoursOld()
+    {
+        var job = new DownloadJob
+        {
+            Id = Guid.NewGuid(),
+            DisplayName = "bili",
+            TargetPath = Path.Combine(Path.GetTempPath(), "bili.mp4"),
+            Variant = MediaVariant.FromCombinedTrack(
+                "v1",
+                new Uri("https://upos-hz-mirrorakam.akamaized.net/upgcxcode/17/23/41747222317/41747222317-1-30080.m4s?deadline=1"),
+                RequestContext.CreateEmpty(),
+                container: "mp4"),
+            Status = DownloadStatus.Paused,
+            CreatedAt = DateTimeOffset.UtcNow.AddHours(-3),
+            UpdatedAt = DateTimeOffset.UtcNow.AddHours(-2)
+        };
+
+        Assert.False(DownloadEngine.IsStaleForAutoRecover(job));
+    }
+
+    [Fact]
+    public void IsStaleForAutoRecover_True_ForYouTube_WhenExpireElapsed()
+    {
+        var expire = DateTimeOffset.UtcNow.AddMinutes(-5).ToUnixTimeSeconds();
+        var job = new DownloadJob
+        {
+            Id = Guid.NewGuid(),
+            DisplayName = "yt",
+            TargetPath = Path.Combine(Path.GetTempPath(), "yt.mp4"),
+            Variant = MediaVariant.FromCombinedTrack(
+                "v1",
+                new Uri($"https://rr1---sn-npoeen66.googlevideo.com/videoplayback?expire={expire}"),
+                RequestContext.CreateEmpty(),
+                container: "mp4"),
+            Status = DownloadStatus.Paused,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+
+        Assert.True(DownloadEngine.IsStaleForAutoRecover(job));
     }
 
     private static NormalizedNetworkEvent Evt(Uri page, string mediaUrl, long length, bool observed) =>

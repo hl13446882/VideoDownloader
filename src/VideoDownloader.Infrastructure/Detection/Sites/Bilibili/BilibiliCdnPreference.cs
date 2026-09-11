@@ -1,3 +1,5 @@
+using VideoDownloader.Core.Models;
+
 namespace VideoDownloader.Infrastructure.Detection.Sites.Bilibili;
 
 /// <summary>
@@ -72,6 +74,37 @@ internal static class BilibiliCdnPreference
         if (priorTotal <= 0 || newTotal <= 0)
             return false;
         return Math.Abs(priorTotal - newTotal) <= 64 * 1024;
+    }
+
+    /// <summary>
+    /// Same cid/qn DASH objects with a new signature or CDN. Keep <c>.part</c> after 403 URL renew.
+    /// </summary>
+    public static bool SameDashObjects(MediaVariant previous, MediaVariant next)
+    {
+        if (!IsMediaHost(previous.SourceUrl) || !IsMediaHost(next.SourceUrl))
+            return false;
+
+        var left = previous.Tracks
+            .Select(t => (t.Kind, Key: ObjectKey(t.SourceUrl)))
+            .OrderBy(t => t.Kind)
+            .ThenBy(t => t.Key, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var right = next.Tracks
+            .Select(t => (t.Kind, Key: ObjectKey(t.SourceUrl)))
+            .OrderBy(t => t.Kind)
+            .ThenBy(t => t.Key, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (left.Length == 0 || left.Length != right.Length)
+            return false;
+
+        for (var i = 0; i < left.Length; i++)
+        {
+            if (left[i].Kind != right[i].Kind ||
+                !string.Equals(left[i].Key, right[i].Key, StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+
+        return true;
     }
 
     private static bool HasQueryToken(Uri url, string token) =>

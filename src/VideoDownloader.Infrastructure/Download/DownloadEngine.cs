@@ -8,6 +8,7 @@ using VideoDownloader.Core.Models;
 using VideoDownloader.Core.Naming;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Detection;
+using VideoDownloader.Infrastructure.Detection.Sites.Bilibili;
 using VideoDownloader.Infrastructure.Detection.Sites.Douyin;
 using VideoDownloader.Infrastructure.Diagnostics;
 using VideoDownloader.Infrastructure.Http;
@@ -431,10 +432,14 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             _jobs[job.Id] = job;
             await _repository.SaveAsync(job, ct);
 
-            if (recovered == DownloadStatus.Paused && _options.Download.AutoRecoverDownloads)
+            if (!_options.Download.AutoRecoverDownloads)
+                continue;
+
+            if (recovered == DownloadStatus.Paused)
             {
                 // Stale paused/hung downloads (expired CDN, abandoned YouTube) must not
                 // seize every concurrency slot and leave new enqueues stuck at Pending.
+                // Bilibili is excluded: signed m4s URLs last hours, and restart must resume .part.
                 if (IsStaleForAutoRecover(job))
                 {
                     _stateMachine.Fail(job, ErrorCodes.ContextExpired);
@@ -446,6 +451,11 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                     continue;
                 }
 
+                _ = RunJobAsync(job);
+            }
+            else if (recovered == DownloadStatus.Failed && ShouldRetryBilibiliFailedOnStartup(job))
+            {
+                job.LastErrorCode = null;
                 _ = RunJobAsync(job);
             }
         }
@@ -528,8 +538,11 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         }
     }
 
-    private static bool IsStaleForAutoRecover(DownloadJob job)
+    internal static bool IsStaleForAutoRecover(DownloadJob job)
     {
+        if (BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl))
+            return false;
+
         if (job.UpdatedAt < DateTimeOffset.UtcNow - TimeSpan.FromMinutes(30))
             return true;
 
@@ -553,6 +566,10 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
 
         return false;
     }
+
+    private static bool ShouldRetryBilibiliFailedOnStartup(DownloadJob job) =>
+        BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl) &&
+        string.Equals(job.LastErrorCode, ErrorCodes.ContextExpired, StringComparison.OrdinalIgnoreCase);
 
     private async Task RunJobAsync(DownloadJob job)
     {
@@ -617,8 +634,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                             cts.Token);
                         if (switched is not null)
                         {
-                            job.Variant = switched.WithRequestContext(refreshed);
-                            ResetTransferState(job);
+                            ApplyRenewedVariant(job, switched.WithRequestContext(refreshed));
                             await checkpoint();
                             _logger.LogInformation(
                                 "Switched to alternate media address for job {JobId} host={Host}",
@@ -730,8 +746,9 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                     addressRenewed = true;
                     try
                     {
-                        job.Variant = await MediaAddressRenewal.ResolveAsync(pageUrl, job.Variant, refreshed, _resolvers, cts.Token,
+                        var renewed = await MediaAddressRenewal.ResolveAsync(pageUrl, job.Variant, refreshed, _resolvers, cts.Token,
                             _availability is null ? null : _availability.ValidateAsync);
+                        ApplyRenewedVariant(job, renewed);
                     }
                     catch (Exception recoveryError)
                     {
@@ -739,7 +756,6 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                             VideoDownloader.Infrastructure.Logging.SanitizedLogger.SanitizeMessage(recoveryError.Message));
                         throw;
                     }
-                    ResetTransferState(job);
                     await checkpoint();
                     _logger.LogInformation(
                         "Renewed media address for job {JobId}, context version={Version}",
@@ -1170,6 +1186,25 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                     : t with { RequestContext = context })
                 .ToArray()
         };
+
+    private void ApplyRenewedVariant(DownloadJob job, MediaVariant renewed)
+    {
+        var previous = job.Variant;
+        job.Variant = renewed;
+        if (BilibiliCdnPreference.SameDashObjects(previous, renewed))
+        {
+            job.LastErrorCode = null;
+            _logger.LogInformation(
+                "Bilibili keeping partial progress for {JobId} after URL renew {OldHost} -> {NewHost} object={Object}",
+                job.Id,
+                previous.SourceUrl.Host,
+                renewed.SourceUrl.Host,
+                BilibiliCdnPreference.ObjectKey(renewed.SourceUrl));
+            return;
+        }
+
+        ResetTransferState(job);
+    }
 
     private void ResetTransferState(DownloadJob job)
     {
