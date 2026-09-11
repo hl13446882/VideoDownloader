@@ -323,6 +323,43 @@ public class HttpMediaDownloaderRetryTests
     }
 
     [Fact]
+    public async Task BilibiliAligned206Resume_KeepsProgress_WhenTotalJittersByKilobytes()
+    {
+        var data = ValidMp4();
+        var prefix = data.AsSpan(0, 8192).ToArray();
+        var job = CreateJob();
+        job.Variant = MediaVariant.FromCombinedTrack(
+            "v1",
+            new Uri("https://upos-sz-mirrorbos.bilivideo.com/upgcxcode/a/b/41747222317/41747222317-1-30080.m4s?os=bos"),
+            RequestContext.CreateEmpty(),
+            container: "mp4");
+        await File.WriteAllBytesAsync(job.TargetPath + ".part", prefix);
+        job.DownloadedBytes = prefix.Length;
+        job.TotalBytes = data.Length + 4725;
+
+        var calls = 0;
+        using var client = new HttpClient(new StubHandler(_ =>
+        {
+            calls++;
+            var start = prefix.Length;
+            return Partial(data, start, data.Length - start);
+        }));
+
+        try
+        {
+            await CreateDownloader(client, retryCount: 0).DownloadDirectAsync(job, null, null, CancellationToken.None);
+            Assert.Equal(1, calls);
+            Assert.Equal(data, await File.ReadAllBytesAsync(job.TargetPath));
+            Assert.Equal(data.Length, job.TotalBytes);
+        }
+        finally
+        {
+            if (File.Exists(job.TargetPath)) File.Delete(job.TargetPath);
+            if (File.Exists(job.TargetPath + ".part")) File.Delete(job.TargetPath + ".part");
+        }
+    }
+
+    [Fact]
     public async Task StaleProgressCannotChangeAuthoritativeCompletionCount()
     {
         var job = CreateJob();

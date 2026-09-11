@@ -8,6 +8,7 @@ using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Infrastructure.Configuration;
+using VideoDownloader.Infrastructure.Detection.Sites.Bilibili;
 using VideoDownloader.Infrastructure.Logging;
 using VideoDownloader.Infrastructure.Licensing;
 
@@ -291,13 +292,28 @@ public sealed class HttpMediaDownloader
         var responseTotal = InferTotalBytes(response, offset);
 
         // Length is the hard identity check for resume. ETag/Last-Modified on signed CDNs often
-        // rotate even when the object bytes are unchanged.
+        // rotate even when the object bytes are unchanged. Bilibili upos totals jitter by a few KB
+        // for the same m4s; keep an already-aligned 206 instead of discarding the prefix.
         if (offset > 0 && responseTotal is long known && job.TotalBytes is long prior && known != prior)
         {
-            ResetPart(job, file);
-            throw new DownloadException(
-                ErrorCodes.RangeMismatch,
-                $"Entity length changed ({prior} -> {known}).");
+            var alignedPartial = response.StatusCode == HttpStatusCode.PartialContent &&
+                                 ValidateContentRange(response.Content.Headers.ContentRange, offset);
+            if (alignedPartial &&
+                BilibiliCdnPreference.CanKeepAlignedResume(job.Variant.SourceUrl, prior, known))
+            {
+                _logger.LogInformation(
+                    "Bilibili keeping aligned 206 resume for {JobId} despite length drift {Prior} -> {Known}",
+                    job.Id,
+                    prior,
+                    known);
+            }
+            else
+            {
+                ResetPart(job, file);
+                throw new DownloadException(
+                    ErrorCodes.RangeMismatch,
+                    $"Entity length changed ({prior} -> {known}).");
+            }
         }
 
         var etagDrift = !string.IsNullOrWhiteSpace(job.ETag) && newEtag is not null &&
@@ -308,7 +324,11 @@ public sealed class HttpMediaDownloader
         {
             var alignedPartial = response.StatusCode == HttpStatusCode.PartialContent &&
                                  ValidateContentRange(response.Content.Headers.ContentRange, offset) &&
-                                 (job.TotalBytes is null || responseTotal == job.TotalBytes);
+                                 (job.TotalBytes is null ||
+                                  responseTotal == job.TotalBytes ||
+                                  (responseTotal is long knownTotal &&
+                                   job.TotalBytes is long priorTotal &&
+                                   BilibiliCdnPreference.CanKeepAlignedResume(job.Variant.SourceUrl, priorTotal, knownTotal)));
             if (!alignedPartial)
             {
                 ResetPart(job, file);

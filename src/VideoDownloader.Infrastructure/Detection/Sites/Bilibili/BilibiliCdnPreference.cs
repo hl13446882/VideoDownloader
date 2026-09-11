@@ -51,6 +51,29 @@ internal static class BilibiliCdnPreference
         return string.IsNullOrWhiteSpace(name) ? url.AbsolutePath : name;
     }
 
+    public static bool IsMediaHost(Uri url)
+    {
+        var host = url.Host;
+        return host.Contains("bilivideo", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("hdslb.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("akamaized.net", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("upos", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Bilibili CDNs report Content-Range totals that jitter by a few KB for the same m4s.
+    /// Aligned 206 resumes must keep that prefix instead of restarting from zero.
+    /// </summary>
+    public static bool CanKeepAlignedResume(Uri url, long priorTotal, long newTotal)
+    {
+        if (!IsMediaHost(url))
+            return false;
+        if (priorTotal <= 0 || newTotal <= 0)
+            return false;
+        return Math.Abs(priorTotal - newTotal) <= 64 * 1024;
+    }
+
     private static bool HasQueryToken(Uri url, string token) =>
         url.Query.Contains(token, StringComparison.OrdinalIgnoreCase);
 }

@@ -23,6 +23,12 @@ public class BilibiliCdnPreferenceTests
         Assert.True(BilibiliCdnPreference.Score(bos) > BilibiliCdnPreference.Score(cos));
         Assert.Equal("41747222317-1-30080.m4s", BilibiliCdnPreference.ObjectKey(akam));
         Assert.Equal(BilibiliCdnPreference.ObjectKey(akam), BilibiliCdnPreference.ObjectKey(bos));
+        Assert.True(BilibiliCdnPreference.CanKeepAlignedResume(akam, 323_944_781, 323_940_056));
+        Assert.False(BilibiliCdnPreference.CanKeepAlignedResume(akam, 323_944_781, 200_000_000));
+        Assert.False(BilibiliCdnPreference.CanKeepAlignedResume(
+            new Uri("https://rr1---sn-npoeen66.googlevideo.com/videoplayback"),
+            323_944_781,
+            323_940_056));
     }
 
     [Fact]
