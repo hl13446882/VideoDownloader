@@ -148,10 +148,6 @@ internal static class TikTokObservationScript
             }
             const pathId=(location.pathname.match(/\/video\/(\d{10,})/)||[])[1];
             if(pathId && !explicit) explicit='content:'+pathId;
-            if(!explicit){
-              const wrapId=(document.querySelector('[id^="xgwrapper-"]')?.id||'').match(/xgwrapper-\d+-(\d{10,})/)?.[1];
-              if(wrapId) explicit='content:'+wrapId;
-            }
             if(!explicit) return null;
             const id=explicit.replace(/^content:/,'');
             const record=findItemRecordById(id);

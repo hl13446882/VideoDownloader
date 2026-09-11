@@ -34,7 +34,7 @@ public class TikTokMediaDetectorTests
     }
 
     [Fact]
-    public async Task Late_Network_Tiktokcdn_Replaces_WebappPrime()
+    public async Task Unmatched_Network_Preload_Does_Not_Replace_Current_Work()
     {
         var detector = CreateDetector();
         MediaDescriptor? last = null;
@@ -45,7 +45,7 @@ public class TikTokMediaDetectorTests
         await detector.ProcessPageObservationAsync(
             page,
             "caption",
-            """{"identity":"content:7682788705483984135","media":["https://v16-webapp-prime.tiktok.com/video/tos/alisg/x?signature=dead"]}""",
+            """{"identity":"content:7682788705483984135","media":["https://v16-webapp-prime.tiktok.com/video/tos/alisg/current?signature=dead"]}""",
             RequestContext.CreateEmpty(),
             CancellationToken.None);
         await detector.CompleteAsync(CancellationToken.None);
@@ -53,27 +53,70 @@ public class TikTokMediaDetectorTests
         Assert.Contains("webapp-prime", last!.Video!.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
 
         await detector.ProcessNetworkAsync(
-            new NormalizedNetworkEvent(
-                new Uri("https://v16.tiktokcdn.com/obj/play.mp4"),
-                "GET",
-                206,
-                "video/mp4",
-                8_000_000,
-                "Media",
-                null,
-                page,
-                null,
-                new Dictionary<string, string>(),
-                new Dictionary<string, string>(),
-                RequestContext.CreateEmpty(),
-                DateTimeOffset.UtcNow,
-                NetworkEventSource.Cdp)
-            { SessionId = session },
+            Evt(page, "https://v16.tiktokcdn.com/obj/preload-next.mp4", session, 8_000_000),
+            CancellationToken.None);
+
+        Assert.Contains("webapp-prime", last!.Video!.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("preload-next", last.Video.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Network_Matching_Observed_Path_Can_Keep_Current_Tiktokcdn()
+    {
+        var detector = CreateDetector();
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var page = new Uri("https://www.tiktok.com/@u/video/7682788705483984135");
+        var session = Guid.NewGuid();
+        detector.BeginSession(page, session);
+        await detector.ProcessPageObservationAsync(
+            page,
+            "caption",
+            """{"identity":"content:7682788705483984135","media":["https://v16.tiktokcdn.com/obj/play.mp4"]}""",
+            RequestContext.CreateEmpty(),
+            CancellationToken.None);
+
+        await detector.ProcessNetworkAsync(
+            Evt(page, "https://v16.tiktokcdn.com/obj/play.mp4?token=1", session, 8_000_000),
             CancellationToken.None);
 
         Assert.NotNull(last);
         Assert.Contains("tiktokcdn", last!.Video!.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("/obj/play.mp4", last.Video.SourceUrl.AbsolutePath, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public async Task Anonymous_Network_Before_Identity_Does_Not_Emit()
+    {
+        var detector = CreateDetector();
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var page = new Uri("https://www.tiktok.com/");
+        var session = Guid.NewGuid();
+        detector.BeginSession(page, session);
+        await detector.ProcessNetworkAsync(
+            Evt(page, "https://v16.tiktokcdn.com/obj/preload.mp4", session, 8_000_000),
+            CancellationToken.None);
+        Assert.Null(last);
+    }
+
+    private static NormalizedNetworkEvent Evt(Uri page, string mediaUrl, Guid sessionId, long contentLength) =>
+        new(
+            new Uri(mediaUrl),
+            "GET",
+            206,
+            "video/mp4",
+            contentLength,
+            "Media",
+            null,
+            page,
+            null,
+            new Dictionary<string, string>(),
+            new Dictionary<string, string>(),
+            RequestContext.CreateEmpty(),
+            DateTimeOffset.UtcNow,
+            NetworkEventSource.Cdp)
+        { SessionId = sessionId };
 
     [Fact]
     public void ParseJson_Prefers_Tiktokcdn_Combined_Over_Higher_WebappPrime()

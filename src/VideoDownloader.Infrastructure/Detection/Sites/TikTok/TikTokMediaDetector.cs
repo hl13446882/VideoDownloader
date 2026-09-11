@@ -30,6 +30,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
     private readonly List<MediaTrack> _audios = [];
     private readonly List<MediaVariant> _formats = [];
     private readonly List<AlbumImageItem> _images = [];
+    private readonly HashSet<string> _observedPlayPaths = new(StringComparer.OrdinalIgnoreCase);
     private bool _album;
     private bool _failed;
     private string? _failureReason;
@@ -96,6 +97,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         _audios.Clear();
         _formats.Clear();
         _images.Clear();
+        _observedPlayPaths.Clear();
         _album = false;
         _failed = false;
         _failureReason = null;
@@ -143,6 +145,15 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
             if (_contentId is not null && otherId is not null &&
                 !string.Equals(_contentId, otherId, StringComparison.Ordinal))
                 return Task.CompletedTask;
+            // For You preloads the next item on tiktokcdn with no video id in the URL.
+            // Only keep CDN objects the active player already attributed to this work.
+            if (otherId is null)
+            {
+                if (_contentId is null)
+                    return Task.CompletedTask;
+                if (!IsObservedPlayPath(e.Url))
+                    return Task.CompletedTask;
+            }
 
             var kind = IsAudio(e) ? MediaTrackKind.Audio :
                 IsBrowserPlay(e) || LooksLikePlay(e.Url) ? MediaTrackKind.Combined : MediaTrackKind.Video;
@@ -190,6 +201,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 _audios.Clear();
                 _formats.Clear();
                 _images.Clear();
+                _observedPlayPaths.Clear();
                 _album = false;
                 _failed = false;
                 _failureReason = null;
@@ -429,6 +441,14 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         _videos.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined &&
                          TikTokCdn.IsDurablePlayHost(t.SourceUrl));
 
+    private static string ResourcePath(Uri url) => url.GetLeftPart(UriPartial.Path);
+
+    private bool IsObservedPlayPath(Uri url) =>
+        _observedPlayPaths.Contains(ResourcePath(url));
+
+    private void RememberObservedPlay(Uri url) =>
+        _observedPlayPaths.Add(ResourcePath(url));
+
     private IReadOnlyList<MediaVariant> MergeFormats()
     {
         var list = new List<MediaVariant>(_formats);
@@ -518,6 +538,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                             ContentIdentity = _contentId is null ? null : "id:" + _contentId,
                             ProbeMethod = ProbeMethods.WebData
                         });
+                    if (!audio && !_album)
+                        RememberObservedPlay(url);
                 }
             }
         }
