@@ -16,12 +16,34 @@ internal static class TikTokObservationScript
             const id = u.searchParams.get('item_id') || u.pathname.match(/\/video\/(\d{10,})/)?.[1];
             return u.origin + u.pathname + (id ? JSON.stringify([['id',id]]) : '[]');
           };
+          const playerWorkId=el=>{
+            if(!el) return null;
+            for(let scope=el,i=0;scope&&i<12;i++,scope=scope.parentElement){
+              const vid=scope.getAttribute?.('data-e2e-vid')||scope.getAttribute?.('data-video-id');
+              if(vid && /^\d{10,}$/.test(vid)) return vid;
+              const wrap=(scope.id||'').match(/^xgwrapper-\d+-(\d{10,})$/);
+              if(wrap) return wrap[1];
+            }
+            const wrap=(el.closest?.('[id^="xgwrapper-"]')?.id||'').match(/xgwrapper-\d+-(\d{10,})/);
+            if(wrap) return wrap[1];
+            const card=el.closest?.('[data-e2e="feed-active-video"],[data-e2e="recommend-list-item-container"]');
+            const cardVid=card?.getAttribute('data-e2e-vid')||card?.querySelector('[data-e2e-vid]')?.getAttribute('data-e2e-vid');
+            return (cardVid && /^\d{10,}$/.test(cardVid)) ? cardVid : null;
+          };
+          // Prefer the actually playing visible player; feed-active-video is only a candidate.
           const activePlayer=()=>{
             const preferred=document.querySelector('[data-e2e="feed-active-video"] video,[data-e2e="feed-active-video"] audio');
             const players=[...document.querySelectorAll('video,audio')].filter(e=>visible(e)>0);
-            if(preferred && players.includes(preferred)) return preferred;
+            if(players.length===0) return preferred||null;
             players.sort((a,b)=>Number(!b.paused)-Number(!a.paused)||visible(b)-visible(a));
-            return players[0];
+            const playing=players.find(e=>!e.paused)||players[0];
+            if(preferred && players.includes(preferred)){
+              const prefId=playerWorkId(preferred);
+              const playId=playerWorkId(playing);
+              if(!prefId || !playId || prefId===playId) return preferred;
+              return playing;
+            }
+            return playing;
           };
           const isStrongPlayUrl=v=>{
             if(typeof v!=='string'||!/^https?:/i.test(v)) return false;
@@ -29,19 +51,35 @@ internal static class TikTokObservationScript
             // Prefer durable CDN; still keep webapp-prime as last resort.
             return /tiktokcdn|byteoversea|muscdn|tiktokv\.com|\/video\/tos\//i.test(v);
           };
+          const urlWorkId=value=>{
+            try{
+              const u=new URL(value);
+              return u.searchParams.get('item_id')||u.searchParams.get('aweme_id')||
+                     u.searchParams.get('video_id')||u.searchParams.get('__vid');
+            }catch{ return null; }
+          };
+          const resourcePath=value=>{
+            try{ const u=new URL(value); return u.origin+u.pathname; }catch{ return ''; }
+          };
+          // Cut sticky matched: a sibling object with a different work id is a For You preload — skip it.
           const scavengePlayUrlsFromTree=(root, expectedId)=>{
             const urls=[];
-            if(!root||typeof root!=='object') return urls;
+            if(!root||typeof root!=='object'||!expectedId) return urls;
             const seen=new WeakSet(); let budget=1800;
             const visit=(value,depth,matched)=>{
               if(--budget<0||depth>14||value==null) return;
               if(typeof value==='string'){
-                if(matched && isStrongPlayUrl(value)) urls.push(value);
+                if(matched && isStrongPlayUrl(value)){
+                  const id=urlWorkId(value);
+                  if(!id || id===String(expectedId)) urls.push(value);
+                }
                 return;
               }
               if(typeof value!=='object'||value instanceof Node||seen.has(value)) return;
               seen.add(value);
-              const id=value.id||value.itemId||value.videoId||value.aweme_id||value.awemeId;
+              const id=value.id||value.itemId||value.item_id||value.videoId||value.video_id||value.aweme_id||value.awemeId;
+              if(id!=null && /^\d{10,}$/.test(String(id)) && String(id)!==String(expectedId))
+                return;
               const nextMatched=matched || (!!expectedId && id!=null && String(id)===String(expectedId));
               for(const [key,child] of Object.entries(value)){
                 if(/cover|avatar|thumbnail|subtitle|icon|logo|image/i.test(key)) continue;
@@ -68,12 +106,8 @@ internal static class TikTokObservationScript
             try{
               return performance.getEntriesByType('resource').map(e=>e.name).filter(value=>{
                 if(!isStrongPlayUrl(value)) return false;
-                try{
-                  const u=new URL(value);
-                  const id=u.searchParams.get('item_id')||u.searchParams.get('aweme_id')||
-                           u.searchParams.get('video_id')||u.searchParams.get('__vid');
-                  return !!id && id===String(expectedId);
-                }catch{ return false; }
+                const id=urlWorkId(value);
+                return !!id && id===String(expectedId);
               });
             }catch{ return []; }
           };
@@ -214,13 +248,24 @@ internal static class TikTokObservationScript
             }
             if(!caption) caption=cardCaption(active);
             caption=(caption||'').replace(/(?:展开|收起|See more|See less)\s*$/i,'').trim();
-            const media=[...new Set([
-              ...collectPlayUrls(record),
-              ...scavengePlayUrlsFromPlayer(active, id),
-              ...scavengePlayUrlsFromPerf(id),
-              active.currentSrc, active.src,
-              ...[...active.querySelectorAll('source')].map(e=>e.src)
-            ].filter(u=>/^https?:/i.test(u||'')))];
+            const fromData=collectPlayUrls(record);
+            const fromFiber=scavengePlayUrlsFromPlayer(active, id);
+            const fromPerf=scavengePlayUrlsFromPerf(id);
+            const ownedPaths=new Set([...fromData,...fromFiber,...fromPerf].map(resourcePath).filter(Boolean));
+            const fromPlayer=[active.currentSrc, active.src, ...[...active.querySelectorAll('source')].map(e=>e.src)]
+              .filter(u=>{
+                if(!/^https?:/i.test(u||'')) return false;
+                const urlId=urlWorkId(u);
+                if(urlId) return urlId===String(id);
+                return ownedPaths.has(resourcePath(u)) || isStrongPlayUrl(u);
+              });
+            // Only current work: hydration ladder + player-scoped fiber/perf + owned player src.
+            const media=[...new Set([...fromData, ...fromFiber, ...fromPerf, ...fromPlayer]
+              .filter(u=>/^https?:/i.test(u||''))
+              .filter(u=>{
+                const urlId=urlWorkId(u);
+                return !urlId || urlId===String(id);
+              }))];
             // Prefer durable CDN URLs ahead of blob/webapp-prime crumbs.
             media.sort((a,b)=>Number(isStrongPlayUrl(b))-Number(isStrongPlayUrl(a))
               -Number(/webapp-prime/i.test(b))+Number(/webapp-prime/i.test(a)));

@@ -492,7 +492,9 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
     private IReadOnlyList<MediaVariant> MergeFormats()
     {
         var list = new List<MediaVariant>(_formats);
-        foreach (var track in _videos.Where(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined))
+        // Only surface current-work ladder: yt-dlp formats + owned / browser-play tracks.
+        // Never dump every anonymous DomObserved path as obs-0..N (For You preload surge).
+        foreach (var track in OwnedVideoTracksForFormats())
         {
             if (list.Any(v => string.Equals(
                     v.SourceUrl.GetLeftPart(UriPartial.Path),
@@ -517,13 +519,70 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
             .ToArray();
     }
 
-    private static int ScoreVariant(MediaVariant v)
+    private IEnumerable<MediaTrack> OwnedVideoTracksForFormats()
+    {
+        var videos = _videos
+            .Where(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
+            .Where(BelongsToCurrentWork)
+            .ToList();
+        if (videos.Count == 0)
+            return [];
+
+        var named = videos
+            .Where(t =>
+            {
+                var id = ExtractIdFromQuery(t.SourceUrl);
+                return id is not null &&
+                       _contentId is not null &&
+                       string.Equals(id, _contentId, StringComparison.Ordinal);
+            })
+            .ToList();
+        if (named.Count > 0)
+            return named;
+
+        var browser = videos.Where(t => t.BrowserObserved || t.Evidence == MediaEvidence.BrowserObserved).ToList();
+        if (browser.Count > 0)
+            return browser;
+
+        // DomObserved anonymous ladder from a single-item hydration record (small).
+        // A feed dump of many anonymous paths must not become obs-0..N.
+        var dom = videos.Where(t => t.Evidence == MediaEvidence.DomObserved).ToList();
+        if (dom.Count > MaxAnonymousObservationVideos)
+            return Best(videos) is { } one ? [one] : [];
+
+        if (dom.Count > 0)
+            return dom;
+
+        return Best(videos) is { } best ? [best] : [];
+    }
+
+    private bool BelongsToCurrentWork(MediaTrack track)
+    {
+        var otherId = ExtractIdFromQuery(track.SourceUrl);
+        if (otherId is not null && _contentId is not null &&
+            !string.Equals(otherId, _contentId, StringComparison.Ordinal))
+            return false;
+        return true;
+    }
+
+    private int ScoreVariant(MediaVariant v)
     {
         var score = (v.Height ?? 0) * 10;
         score += TikTokCdn.PlayHostScore(v.SourceUrl);
         score += (int)Math.Min(v.TotalContentLength ?? 0, int.MaxValue) / (1024 * 1024);
+        var track = v.Tracks.FirstOrDefault(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined);
+        if (track is not null)
+        {
+            if (track.BrowserObserved || track.Evidence == MediaEvidence.BrowserObserved)
+                score += 2000;
+            if (FitsObservedDuration(track.ContentLength))
+                score += 200;
+        }
+
         return score;
     }
+
+    private const int MaxAnonymousObservationVideos = 4;
 
     private void ApplyJson(string? json)
     {
@@ -567,11 +626,33 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
             }
             if (root.TryGetProperty("media", out var media) && media.ValueKind == JsonValueKind.Array)
             {
+                var owned = new List<Uri>();
+                var anonymous = new List<Uri>();
                 foreach (var item in media.EnumerateArray())
                 {
                     if (item.ValueKind != JsonValueKind.String) continue;
                     if (!Uri.TryCreate(item.GetString(), UriKind.Absolute, out var url)) continue;
                     if (IsExcludedImage(url) || IsAlbumImage(url, null)) continue;
+                    var urlId = ExtractIdFromQuery(url);
+                    if (urlId is not null && _contentId is not null &&
+                        !string.Equals(urlId, _contentId, StringComparison.Ordinal))
+                        continue;
+                    if (urlId is not null &&
+                        (_contentId is null || string.Equals(urlId, _contentId, StringComparison.Ordinal)))
+                        owned.Add(url);
+                    else
+                        anonymous.Add(url);
+                }
+
+                // Named current-work URLs win; ignore anonymous feed preloads alongside them.
+                IEnumerable<Uri> admit = owned.Count > 0
+                    ? owned
+                    : anonymous.Count > MaxAnonymousObservationVideos
+                        ? [] // For You dump — wait for one browser-play network bind.
+                        : anonymous;
+
+                foreach (var url in admit)
+                {
                     var audio = url.AbsoluteUri.Contains("audio", StringComparison.OrdinalIgnoreCase);
                     Upsert(audio || _album ? _audios : _videos,
                         new MediaTrack(audio ? "audio" : "media",
@@ -622,14 +703,15 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         list.Add(track);
     }
 
-    private static MediaTrack? Best(IEnumerable<MediaTrack> tracks)
+    private MediaTrack? Best(IEnumerable<MediaTrack> tracks)
     {
         var list = tracks
+            .Where(BelongsToCurrentWork)
             .Where(t => t.ContentLength is null or >= MediaResourceSizeFilter.MinProgressiveVideoBytes ||
                         t.BrowserObserved)
             .ToList();
         if (list.Count == 0)
-            list = tracks.ToList();
+            list = tracks.Where(BelongsToCurrentWork).ToList();
         if (list.Count == 0) return null;
         // Douyin-like: when a durable CDN exists, never default to fragile webapp-prime.
         var durable = list
@@ -643,7 +725,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         return list.OrderByDescending(ScoreTrack).FirstOrDefault();
     }
 
-    private static int ScoreTrack(MediaTrack t)
+    private int ScoreTrack(MediaTrack t)
     {
         var score = 0;
         score += TikTokCdn.PlayHostScore(t.SourceUrl) == 500 ? 1000 :
@@ -654,6 +736,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         if (t.ContentLength is >= 1L * 1024 * 1024) score += 50;
         if (t.Evidence == MediaEvidence.DomObserved && t.ContentLength is null) score -= 80;
         if (t.Evidence == MediaEvidence.BrowserObserved) score += 100;
+        if (FitsObservedDuration(t.ContentLength)) score += 50;
         score += (int)Math.Min(t.ContentLength ?? 0, int.MaxValue) / (1024 * 1024);
         return score;
     }
@@ -700,7 +783,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
 
     private static string? ExtractIdFromQuery(Uri url)
     {
-        foreach (var key in new[] { "item_id=", "aweme_id=", "video_id=" })
+        foreach (var key in new[] { "item_id=", "aweme_id=", "video_id=", "__vid=" })
         {
             var idx = url.Query.IndexOf(key, StringComparison.OrdinalIgnoreCase);
             if (idx < 0) continue;

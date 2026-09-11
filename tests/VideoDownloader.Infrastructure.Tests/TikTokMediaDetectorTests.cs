@@ -125,6 +125,60 @@ public class TikTokMediaDetectorTests
         Assert.Null(last);
     }
 
+    [Fact]
+    public async Task Feed_Anonymous_Surge_Does_Not_Become_Obs_Ladder()
+    {
+        var detector = CreateDetector();
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var page = new Uri("https://www.tiktok.com/");
+        var session = Guid.NewGuid();
+        detector.BeginSession(page, session);
+
+        var media = string.Join(",",
+            Enumerable.Range(0, 24).Select(i => $"\"https://v16.tiktokcdn.com/obj/feed-{i}.mp4\""));
+        await detector.ProcessPageObservationAsync(
+            page,
+            "caption",
+            $$"""{"identity":"content:7682788705483984135","media":[{{media}}],"durationSec":12.5}""",
+            RequestContext.CreateEmpty(),
+            CancellationToken.None);
+
+        // Feed dump must not become obs-0..23; wait for one browser-play bind.
+        await detector.ProcessNetworkAsync(
+            Evt(page, "https://v16.tiktokcdn.com/obj/current-play.mp4", session, 4_000_000),
+            CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+
+        Assert.NotNull(last);
+        Assert.Equal("7682788705483984135", last!.MediaId);
+        Assert.Contains("current-play", last.Video!.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+        Assert.True(last.Formats.Count(v => v.VariantId.StartsWith("obs-", StringComparison.Ordinal)) <= 1);
+        Assert.DoesNotContain(last.Formats, v => v.SourceUrl.AbsoluteUri.Contains("feed-0", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Observation_Drops_Foreign_Item_Id_Keeps_Current()
+    {
+        var detector = CreateDetector();
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var page = new Uri("https://www.tiktok.com/@u/video/7682788705483984135");
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(
+            page,
+            "caption",
+            """{"identity":"content:7682788705483984135","media":["https://v16.tiktokcdn.com/obj/other.mp4?item_id=1111111111111111111","https://v16.tiktokcdn.com/obj/current.mp4?item_id=7682788705483984135","https://v16.tiktokcdn.com/obj/anon-preload.mp4"]}""",
+            RequestContext.CreateEmpty(),
+            CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+
+        Assert.NotNull(last);
+        Assert.Contains("current.mp4", last!.Video!.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(last.Formats, v => v.SourceUrl.AbsoluteUri.Contains("other.mp4", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(last.Formats, v => v.SourceUrl.AbsoluteUri.Contains("anon-preload", StringComparison.OrdinalIgnoreCase));
+    }
+
     private static NormalizedNetworkEvent Evt(Uri page, string mediaUrl, Guid sessionId, long contentLength) =>
         new(
             new Uri(mediaUrl),
