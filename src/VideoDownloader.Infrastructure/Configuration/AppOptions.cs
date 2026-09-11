@@ -50,6 +50,17 @@ public sealed class DownloadOptions
     /// Seconds between automatic Resume attempts for Failed queue items. 0 disables.
     /// </summary>
     public int FailedRetryIntervalSeconds { get; set; } = 10;
+
+    /// <summary>
+    /// Parallel Range connections for YouTube/googlevideo progressive objects. 1 disables.
+    /// </summary>
+    public int ParallelConnections { get; set; } = 8;
+
+    /// <summary>Minimum object size before multi-connection Range download kicks in.</summary>
+    public long ParallelMinBytes { get; set; } = 4L * 1024 * 1024;
+
+    /// <summary>When true, multi-track FFmpeg jobs download video and audio tracks concurrently.</summary>
+    public bool ParallelAudioVideoTracks { get; set; } = true;
 }
 
 public sealed class BrowserOptions

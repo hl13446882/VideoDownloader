@@ -143,7 +143,7 @@ public static class ServiceCollectionExtensions
         UseCookies = false,
         AutomaticDecompression = System.Net.DecompressionMethods.All,
         AllowAutoRedirect = false,
-        MaxConnectionsPerServer = 10
+        MaxConnectionsPerServer = 32
     };
 
     private static SocketsHttpHandler CreateIpv4DirectHttpHandler() => new()
@@ -152,7 +152,7 @@ public static class ServiceCollectionExtensions
         UseProxy = false,
         AutomaticDecompression = System.Net.DecompressionMethods.All,
         AllowAutoRedirect = false,
-        MaxConnectionsPerServer = 10,
+        MaxConnectionsPerServer = 32,
         ConnectCallback = ConnectIpv4Async
     };
 

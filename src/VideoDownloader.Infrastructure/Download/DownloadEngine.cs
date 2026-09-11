@@ -1012,74 +1012,165 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         job.DownloadedBytes = 0;
         await checkpoint();
 
-        var completedBytes = 0L;
-        var localTracks = new List<MediaTrack>();
+        var localTracks = new MediaTrack?[tracks.Count];
+        var trackBytes = new long[tracks.Count];
 
+        // Resume: count already-finished track files toward progress.
         for (var i = 0; i < tracks.Count; i++)
         {
-            ct.ThrowIfCancellationRequested();
-
             var track = tracks[i];
             var extension = ResolveTrackExtension(track);
             var trackPath = Path.Combine(tempDir, $"{i:00}-{track.Kind.ToString().ToLowerInvariant()}{extension}");
             if (File.Exists(trackPath) && new FileInfo(trackPath).Length > 0)
             {
                 var existingLength = new FileInfo(trackPath).Length;
-                completedBytes += existingLength;
-                job.DownloadedBytes = completedBytes;
-                await checkpoint();
-                localTracks.Add(track with
+                trackBytes[i] = existingLength;
+                localTracks[i] = track with
                 {
                     SourceUrl = new Uri(trackPath),
                     ContentLength = existingLength,
                     RequestContext = RequestContext.CreateEmpty()
-                });
-                continue;
+                };
             }
-
-            var trackVariant = MediaVariant.FromTracks(
-                track.TrackId,
-                width: null,
-                height: null,
-                bandwidth: track.Bandwidth,
-                container: track.Container,
-                tracks: [track]);
-
-            var trackJob = new DownloadJob
-            {
-                Id = Guid.NewGuid(),
-                DisplayName = $"{job.DisplayName}:{track.TrackId}",
-                Variant = trackVariant,
-                PageUrl = job.PageUrl,
-                TargetPath = trackPath,
-                Status = DownloadStatus.Downloading,
-                // Album image/BGM CDNs lie about Content-Length; let the downloader learn size from the body.
-                TotalBytes = track.Kind is MediaTrackKind.Image or MediaTrackKind.Audio
-                    ? null
-                    : track.ContentLength,
-                CreatedAt = DateTimeOffset.UtcNow,
-                UpdatedAt = DateTimeOffset.UtcNow
-            };
-
-            var progress = new InlineProgress(bytes =>
-            {
-                job.DownloadedBytes = completedBytes + bytes;
-            });
-
-            await _httpDownloader.DownloadDirectAsync(trackJob, progress, checkpoint, ct);
-            completedBytes += new FileInfo(trackPath).Length;
-            job.DownloadedBytes = completedBytes;
-            await checkpoint();
-
-            localTracks.Add(track with
-            {
-                SourceUrl = new Uri(trackPath),
-                ContentLength = new FileInfo(trackPath).Length,
-                RequestContext = RequestContext.CreateEmpty()
-            });
         }
 
-        return (localTracks, tempDir);
+        void PublishProgress()
+        {
+            long sum = 0;
+            for (var i = 0; i < trackBytes.Length; i++)
+                sum += Volatile.Read(ref trackBytes[i]);
+            job.DownloadedBytes = sum;
+        }
+
+        PublishProgress();
+        await checkpoint();
+
+        var parallelAv = _options.Download.ParallelAudioVideoTracks &&
+                         tracks.Count(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Audio or MediaTrackKind.Combined) >= 2 &&
+                         tracks.All(t => t.Kind is not MediaTrackKind.Image);
+
+        if (parallelAv)
+        {
+            var checkpointGate = new SemaphoreSlim(1, 1);
+            async Task SafeCheckpoint()
+            {
+                await checkpointGate.WaitAsync(ct);
+                try
+                {
+                    await checkpoint();
+                }
+                finally
+                {
+                    checkpointGate.Release();
+                }
+            }
+
+            var tasks = new Task[tracks.Count];
+            for (var i = 0; i < tracks.Count; i++)
+            {
+                var index = i;
+                tasks[i] = DownloadOneTrackToTempAsync(
+                    job,
+                    tracks[index],
+                    index,
+                    tempDir,
+                    localTracks,
+                    trackBytes,
+                    PublishProgress,
+                    SafeCheckpoint,
+                    ct);
+            }
+
+            await Task.WhenAll(tasks);
+        }
+        else
+        {
+            for (var i = 0; i < tracks.Count; i++)
+            {
+                await DownloadOneTrackToTempAsync(
+                    job,
+                    tracks[i],
+                    i,
+                    tempDir,
+                    localTracks,
+                    trackBytes,
+                    PublishProgress,
+                    checkpoint,
+                    ct);
+            }
+        }
+
+        PublishProgress();
+        await checkpoint();
+        if (localTracks.Any(t => t is null))
+            throw new DownloadException(ErrorCodes.IncompleteDownload, "One or more media tracks failed to download.");
+        return (localTracks!, tempDir);
+    }
+
+    private async Task DownloadOneTrackToTempAsync(
+        DownloadJob job,
+        MediaTrack track,
+        int index,
+        string tempDir,
+        MediaTrack?[] localTracks,
+        long[] trackBytes,
+        Action publishProgress,
+        Func<Task> checkpoint,
+        CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        if (localTracks[index] is not null)
+            return;
+
+        var extension = ResolveTrackExtension(track);
+        var trackPath = Path.Combine(tempDir, $"{index:00}-{track.Kind.ToString().ToLowerInvariant()}{extension}");
+
+        var trackVariant = MediaVariant.FromTracks(
+            track.TrackId,
+            width: null,
+            height: null,
+            bandwidth: track.Bandwidth,
+            container: track.Container,
+            tracks: [track]);
+
+        var trackJob = new DownloadJob
+        {
+            Id = Guid.NewGuid(),
+            DisplayName = $"{job.DisplayName}:{track.TrackId}",
+            Variant = trackVariant,
+            PageUrl = job.PageUrl,
+            TargetPath = trackPath,
+            Status = DownloadStatus.Downloading,
+            // Album image/BGM CDNs lie about Content-Length; let the downloader learn size from the body.
+            TotalBytes = track.Kind is MediaTrackKind.Image or MediaTrackKind.Audio
+                ? null
+                : track.ContentLength,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+
+        // Audio for YouTube is also googlevideo — keep ContentLength so parallel Range can run.
+        if (HttpMediaDownloader.IsParallelRangeHost(track.SourceUrl) && track.ContentLength is > 0)
+            trackJob.TotalBytes = track.ContentLength;
+
+        var progress = new InlineProgress(bytes =>
+        {
+            Volatile.Write(ref trackBytes[index], bytes);
+            publishProgress();
+        });
+
+        await _httpDownloader.DownloadDirectAsync(trackJob, progress, checkpoint, ct);
+        var length = new FileInfo(trackPath).Length;
+        Volatile.Write(ref trackBytes[index], length);
+        publishProgress();
+
+        localTracks[index] = track with
+        {
+            SourceUrl = new Uri(trackPath),
+            ContentLength = length,
+            RequestContext = RequestContext.CreateEmpty()
+        };
     }
 
     private sealed class InlineProgress(Action<long> report) : IProgress<long>

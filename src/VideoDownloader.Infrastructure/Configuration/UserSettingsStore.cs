@@ -72,7 +72,10 @@ public sealed class UserSettingsStore
             MaxConcurrentDownloads = source.Download.MaxConcurrentDownloads,
             RetryCount = source.Download.RetryCount,
             AutoRecoverDownloads = source.Download.AutoRecoverDownloads,
-            FailedRetryIntervalSeconds = source.Download.FailedRetryIntervalSeconds
+            FailedRetryIntervalSeconds = source.Download.FailedRetryIntervalSeconds,
+            ParallelConnections = source.Download.ParallelConnections,
+            ParallelMinBytes = source.Download.ParallelMinBytes,
+            ParallelAudioVideoTracks = source.Download.ParallelAudioVideoTracks
         },
         Browser = new BrowserOptions
         {

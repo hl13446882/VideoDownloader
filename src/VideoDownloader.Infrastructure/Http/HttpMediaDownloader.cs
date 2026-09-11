@@ -151,8 +151,7 @@ public sealed class HttpMediaDownloader
         HttpClient? client = null)
     {
         var variant = job.Variant;
-        var softMedia = variant.Tracks.Count > 0 &&
-                        variant.Tracks.All(t => t.Kind is MediaTrackKind.Image or MediaTrackKind.Audio);
+        var softMedia = IsSoftMediaJob(job);
         var partPath = job.TargetPath + ".part";
         Directory.CreateDirectory(Path.GetDirectoryName(partPath)!);
 
@@ -164,6 +163,7 @@ public sealed class HttpMediaDownloader
                 File.Delete(partPath);
             if (File.Exists(job.TargetPath))
                 File.Delete(job.TargetPath);
+            ClearChunkDir(partPath);
             job.TotalBytes = null;
             job.DownloadedBytes = 0;
         }
@@ -174,6 +174,38 @@ public sealed class HttpMediaDownloader
         }
 
         job.DownloadedBytes = offset;
+
+        // YouTube/googlevideo: multi-connection Range when starting fresh (or resuming chunk dir).
+        // Keep single-stream resume when a legacy contiguous .part already exists.
+        if (!softMedia &&
+            TryBeginParallelRange(job, partPath, offset, out var parallelTotal))
+        {
+            var ranges = SplitByteRanges(parallelTotal, _options.Download.ParallelConnections);
+            if (ranges.Length > 1)
+            {
+                try
+                {
+                    await DownloadParallelRangesAsync(
+                        job, partPath, parallelTotal, ranges, progress, checkpointAsync, ct, client);
+                    return;
+                }
+                catch (DownloadException ex) when (
+                    ex.ErrorCode is ErrorCodes.RangeMismatch or ErrorCodes.Range416 or
+                        ErrorCodes.IncompleteDownload or ErrorCodes.Http403)
+                {
+                    _logger.LogWarning(
+                        "Parallel Range download failed for {JobId} ({Code}); falling back to single connection",
+                        job.Id,
+                        ex.ErrorCode);
+                    ClearChunkDir(partPath);
+                    if (File.Exists(partPath))
+                        File.Delete(partPath);
+                    offset = 0;
+                    job.DownloadedBytes = 0;
+                }
+            }
+        }
+
         var resource = BuildResource(variant, job);
         var url = variant.SourceUrl;
 
@@ -277,6 +309,325 @@ public sealed class HttpMediaDownloader
             EnsureDownloadLooksComplete(job, offset);
             await FinalizeDownloadAsync(job, partPath, ct);
             return;
+        }
+    }
+
+    private bool TryBeginParallelRange(DownloadJob job, string partPath, long existingOffset, out long totalBytes)
+    {
+        totalBytes = 0;
+        var opts = _options.Download;
+        if (opts.ParallelConnections <= 1)
+            return false;
+        if (!IsParallelRangeHost(job.Variant.SourceUrl))
+            return false;
+        if (TikTokCdn.IsSignedProgressiveHost(job.Variant.SourceUrl))
+            return false;
+
+        var chunkDir = ChunkDir(partPath);
+        var hasChunks = Directory.Exists(chunkDir) &&
+                        Directory.EnumerateFiles(chunkDir).Any();
+
+        // Contiguous single-stream .part already present — do not rewrite with parallel chunks.
+        if (existingOffset > 0 && !hasChunks)
+            return false;
+
+        if (job.TotalBytes is long known && known >= opts.ParallelMinBytes)
+        {
+            totalBytes = known;
+            return true;
+        }
+
+        // Resume a previous parallel attempt even if TotalBytes was cleared from the job row.
+        if (hasChunks && TryReadChunkManifest(chunkDir, out var manifestTotal) &&
+            manifestTotal >= opts.ParallelMinBytes)
+        {
+            totalBytes = manifestTotal;
+            job.TotalBytes = manifestTotal;
+            return true;
+        }
+
+        return false;
+    }
+
+    internal static bool IsParallelRangeHost(Uri url)
+    {
+        var host = url.Host;
+        return host.Contains("googlevideo.com", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("googleusercontent.com", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Album/BGM style objects that often break on Range. YouTube audio is excluded — it Range-resumes well.
+    /// </summary>
+    private static bool IsSoftMediaJob(DownloadJob job) =>
+        job.Variant.Tracks.Count > 0 &&
+        job.Variant.Tracks.All(t => t.Kind is MediaTrackKind.Image or MediaTrackKind.Audio) &&
+        !IsParallelRangeHost(job.Variant.SourceUrl);
+
+    /// <summary>Splits [0, total) into up to <paramref name="connections"/> inclusive byte ranges.</summary>
+    internal static (long Start, long End)[] SplitByteRanges(long totalBytes, int connections)
+    {
+        if (totalBytes <= 0)
+            return [];
+        connections = Math.Clamp(connections, 1, 32);
+        // Keep chunks reasonably large so Range overhead stays low.
+        var maxBySize = (int)Math.Max(1, totalBytes / (256L * 1024));
+        connections = Math.Min(connections, maxBySize);
+        var chunk = totalBytes / connections;
+        var ranges = new (long Start, long End)[connections];
+        long cursor = 0;
+        for (var i = 0; i < connections; i++)
+        {
+            var start = cursor;
+            var end = i == connections - 1 ? totalBytes - 1 : cursor + chunk - 1;
+            ranges[i] = (start, end);
+            cursor = end + 1;
+        }
+
+        return ranges;
+    }
+
+    private async Task DownloadParallelRangesAsync(
+        DownloadJob job,
+        string partPath,
+        long totalBytes,
+        (long Start, long End)[] ranges,
+        IProgress<long>? progress,
+        Func<Task>? checkpointAsync,
+        CancellationToken ct,
+        HttpClient? client)
+    {
+        if (_license?.DownloadLimitBytes is int demoLimit && totalBytes > demoLimit)
+            throw new DownloadException(ErrorCodes.LicenseLimit, "DEMO download limit is 10 MiB.");
+
+        var chunkDir = ChunkDir(partPath);
+        Directory.CreateDirectory(chunkDir);
+        WriteChunkManifest(chunkDir, totalBytes, ranges.Length);
+
+        job.TotalBytes = totalBytes;
+        var http = client ?? _client;
+        var resource = BuildResource(job.Variant, job);
+        var url = job.Variant.SourceUrl;
+
+        long sharedBytes = 0;
+        for (var i = 0; i < ranges.Length; i++)
+        {
+            var path = ChunkPath(chunkDir, i);
+            if (File.Exists(path))
+                sharedBytes += new FileInfo(path).Length;
+        }
+
+        job.DownloadedBytes = sharedBytes;
+        progress?.Report(sharedBytes);
+        if (checkpointAsync is not null)
+            await checkpointAsync();
+
+        _logger.LogInformation(
+            "Parallel Range download job={JobId} connections={Connections} total={Total} host={Host}",
+            job.Id,
+            ranges.Length,
+            totalBytes,
+            url.Host);
+
+        var tasks = new Task[ranges.Length];
+        for (var i = 0; i < ranges.Length; i++)
+        {
+            var index = i;
+            var (start, end) = ranges[i];
+            tasks[i] = Task.Run(async () =>
+            {
+                await DownloadOneRangeChunkAsync(
+                    job,
+                    resource,
+                    url,
+                    http,
+                    chunkDir,
+                    index,
+                    start,
+                    end,
+                    () =>
+                    {
+                        var total = Interlocked.Read(ref sharedBytes);
+                        job.DownloadedBytes = total;
+                        progress?.Report(total);
+                    },
+                    bytes => Interlocked.Add(ref sharedBytes, bytes),
+                    ct);
+            }, ct);
+        }
+
+        await Task.WhenAll(tasks);
+
+        job.DownloadedBytes = totalBytes;
+        progress?.Report(totalBytes);
+        if (checkpointAsync is not null)
+            await checkpointAsync();
+
+        await AssembleChunksAsync(partPath, chunkDir, ranges, ct);
+        ClearChunkDir(partPath);
+        EnsureDownloadLooksComplete(job, totalBytes);
+        await FinalizeDownloadAsync(job, partPath, ct);
+    }
+
+    private async Task DownloadOneRangeChunkAsync(
+        DownloadJob job,
+        MediaResource resource,
+        Uri url,
+        HttpClient client,
+        string chunkDir,
+        int index,
+        long rangeStart,
+        long rangeEnd,
+        Action publishProgress,
+        Action<long> addBytes,
+        CancellationToken ct)
+    {
+        var expected = rangeEnd - rangeStart + 1;
+        var chunkPath = ChunkPath(chunkDir, index);
+        var have = File.Exists(chunkPath) ? new FileInfo(chunkPath).Length : 0L;
+        if (have > expected)
+        {
+            File.Delete(chunkPath);
+            have = 0;
+        }
+
+        if (have == expected)
+            return;
+
+        var from = rangeStart + have;
+        using var request = _requestFactory.Create(resource with { Url = url }, HttpMethod.Get);
+        request.Headers.Range = new RangeHeaderValue(from, rangeEnd);
+        request.Headers.Remove("If-Range");
+        request.Headers.AcceptEncoding.Clear();
+        request.Headers.AcceptEncoding.ParseAdd("identity");
+
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        if (response.StatusCode == HttpStatusCode.Forbidden)
+            throw new DownloadException(ErrorCodes.Http403, "Access denied (403).");
+        if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
+            throw new DownloadException(ErrorCodes.Range416, "Range not satisfiable.");
+        if (response.StatusCode != HttpStatusCode.PartialContent &&
+            !(have == 0 && response.StatusCode == HttpStatusCode.OK && from == 0))
+        {
+            throw new DownloadException(
+                ErrorCodes.RangeMismatch,
+                $"Expected 206 for parallel chunk, got {(int)response.StatusCode}.");
+        }
+
+        if (response.StatusCode == HttpStatusCode.PartialContent)
+        {
+            var range = response.Content.Headers.ContentRange;
+            if (range?.From != from || range.To != rangeEnd)
+                throw new DownloadException(ErrorCodes.RangeMismatch, "Parallel chunk Content-Range mismatch.");
+        }
+
+        await using var file = new FileStream(
+            chunkPath,
+            FileMode.OpenOrCreate,
+            FileAccess.Write,
+            FileShare.Read,
+            1024 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        if (file.Length != have)
+            file.SetLength(have);
+        file.Position = have;
+
+        await using var input = await response.Content.ReadAsStreamAsync(ct);
+        var buffer = new byte[1024 * 1024];
+        int read;
+        long writtenThisSession = 0;
+        while ((read = await input.ReadAsync(buffer, ct)) > 0)
+        {
+            await file.WriteAsync(buffer.AsMemory(0, read), ct);
+            writtenThisSession += read;
+            addBytes(read);
+            if (writtenThisSession % (2L * 1024 * 1024) < read)
+                publishProgress();
+        }
+
+        await file.FlushAsync(ct);
+        publishProgress();
+
+        if (file.Length != expected)
+            throw new DownloadException(
+                ErrorCodes.IncompleteDownload,
+                $"Parallel chunk {index} got {file.Length} of {expected} bytes.");
+    }
+
+    private static async Task AssembleChunksAsync(
+        string partPath,
+        string chunkDir,
+        (long Start, long End)[] ranges,
+        CancellationToken ct)
+    {
+        if (File.Exists(partPath))
+            File.Delete(partPath);
+
+        await using var output = new FileStream(
+            partPath,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.None,
+            1024 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+        for (var i = 0; i < ranges.Length; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            var chunkPath = ChunkPath(chunkDir, i);
+            await using var input = new FileStream(
+                chunkPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                1024 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            await input.CopyToAsync(output, 1024 * 1024, ct);
+        }
+
+        await output.FlushAsync(ct);
+    }
+
+    private static string ChunkDir(string partPath) => partPath + ".chunks";
+
+    private static string ChunkPath(string chunkDir, int index) =>
+        Path.Combine(chunkDir, $"{index:D3}");
+
+    private static void WriteChunkManifest(string chunkDir, long totalBytes, int connections)
+    {
+        var path = Path.Combine(chunkDir, "manifest.txt");
+        File.WriteAllText(path, $"{totalBytes}\n{connections}\n");
+    }
+
+    private static bool TryReadChunkManifest(string chunkDir, out long totalBytes)
+    {
+        totalBytes = 0;
+        var path = Path.Combine(chunkDir, "manifest.txt");
+        if (!File.Exists(path))
+            return false;
+        try
+        {
+            var line = File.ReadLines(path).FirstOrDefault();
+            return long.TryParse(line, out totalBytes) && totalBytes > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void ClearChunkDir(string partPath)
+    {
+        var dir = ChunkDir(partPath);
+        if (!Directory.Exists(dir))
+            return;
+        try
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+        catch
+        {
+            // best-effort
         }
     }
 
@@ -418,8 +769,7 @@ public sealed class HttpMediaDownloader
         }
 
         var received = written - offset;
-        var softMedia = job.Variant.Tracks.Count > 0 &&
-                        job.Variant.Tracks.All(t => t.Kind is MediaTrackKind.Image or MediaTrackKind.Audio);
+        var softMedia = IsSoftMediaJob(job);
         var tiktokSigned = TikTokCdn.IsSignedProgressiveHost(job.Variant.SourceUrl);
         if ((response.Content.Headers.ContentLength is long bodyLength && received != bodyLength) ||
             (response.StatusCode == HttpStatusCode.PartialContent &&
@@ -445,8 +795,7 @@ public sealed class HttpMediaDownloader
     private static void EnsureDownloadLooksComplete(DownloadJob job, long actualLength)
     {
         job.DownloadedBytes = actualLength;
-        var softMedia = job.Variant.Tracks.Count > 0 &&
-                        job.Variant.Tracks.All(t => t.Kind is MediaTrackKind.Image or MediaTrackKind.Audio);
+        var softMedia = IsSoftMediaJob(job);
         var tiktokSigned = TikTokCdn.IsSignedProgressiveHost(job.Variant.SourceUrl);
         if (job.TotalBytes is long expected && actualLength != expected)
         {
@@ -577,6 +926,7 @@ public sealed class HttpMediaDownloader
         var partPath = job.TargetPath + ".part";
         if (file is null && File.Exists(partPath))
             File.Delete(partPath);
+        ClearChunkDir(partPath);
     }
 
     private static bool ValidateContentRange(ContentRangeHeaderValue? range, long offset) =>
@@ -593,7 +943,12 @@ public sealed class HttpMediaDownloader
         var part = job.TargetPath + ".part";
         if (File.Exists(part))
             return new FileInfo(part).Length;
-        return 0;
+        var chunkDir = ChunkDir(part);
+        if (!Directory.Exists(chunkDir))
+            return 0;
+        return Directory.EnumerateFiles(chunkDir)
+            .Where(f => !f.EndsWith("manifest.txt", StringComparison.OrdinalIgnoreCase))
+            .Sum(f => new FileInfo(f).Length);
     }
 
     private bool TryContinueBilibiliTransport(

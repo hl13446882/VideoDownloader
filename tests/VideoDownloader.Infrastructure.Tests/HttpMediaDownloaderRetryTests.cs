@@ -532,11 +532,21 @@ public class HttpMediaDownloaderRetryTests
         public void Report(long value) => report(value);
     }
 
-    private static HttpMediaDownloader CreateDownloader(HttpClient client, int retryCount)
+    private static HttpMediaDownloader CreateDownloader(
+        HttpClient client,
+        int retryCount,
+        int parallelConnections = 1,
+        long parallelMinBytes = 4L * 1024 * 1024)
     {
         var options = Options.Create(new AppOptions
         {
-            Download = new DownloadOptions { RetryCount = retryCount }
+            Download = new DownloadOptions
+            {
+                RetryCount = retryCount,
+                // Keep unit tests on the single-connection path unless a case opts in.
+                ParallelConnections = parallelConnections,
+                ParallelMinBytes = parallelMinBytes
+            }
         });
 
         return new HttpMediaDownloader(
@@ -544,6 +554,69 @@ public class HttpMediaDownloaderRetryTests
             new RequestMessageFactory(),
             options,
             NullLogger<HttpMediaDownloader>.Instance);
+    }
+
+    [Fact]
+    public void SplitByteRanges_CoversFullObjectWithoutGapsOrOverlap()
+    {
+        var ranges = HttpMediaDownloader.SplitByteRanges(8_000_000, 4);
+        Assert.Equal(4, ranges.Length);
+        Assert.Equal(0, ranges[0].Start);
+        Assert.Equal(7_999_999, ranges[^1].End);
+        for (var i = 1; i < ranges.Length; i++)
+            Assert.Equal(ranges[i - 1].End + 1, ranges[i].Start);
+    }
+
+    [Fact]
+    public async Task DownloadDirectAsync_ParallelRanges_AssemblesGoogleVideoObject()
+    {
+        var data = ValidSizedMp4(5 * 1024 * 1024);
+        var rangeHits = 0;
+        var handler = new StubHandler(request =>
+        {
+            Interlocked.Increment(ref rangeHits);
+            Assert.NotNull(request.Headers.Range);
+            var range = request.Headers.Range!.Ranges.Single();
+            var from = (int)range.From!.Value;
+            var to = (int)(range.To ?? data.Length - 1);
+            return Partial(data, from, to - from + 1);
+        });
+
+        var client = new HttpClient(handler);
+        var downloader = CreateDownloader(client, retryCount: 0, parallelConnections: 4, parallelMinBytes: 1024 * 1024);
+        var path = Path.Combine(Path.GetTempPath(), $"vd-par-{Guid.NewGuid():N}.mp4");
+        var job = new DownloadJob
+        {
+            Id = Guid.NewGuid(),
+            DisplayName = "yt-parallel",
+            TargetPath = path,
+            TotalBytes = data.Length,
+            Variant = MediaVariant.FromCombinedTrack(
+                "v1",
+                new Uri("https://rr1---sn-test.googlevideo.com/videoplayback?id=1"),
+                RequestContext.CreateEmpty(),
+                container: "mp4",
+                contentLength: data.Length),
+            Status = DownloadStatus.Downloading,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+
+        try
+        {
+            await downloader.DownloadDirectAsync(job, null, null, CancellationToken.None);
+            Assert.True(File.Exists(job.TargetPath));
+            Assert.Equal(data.Length, new FileInfo(job.TargetPath).Length);
+            Assert.True(rangeHits >= 4);
+            Assert.False(Directory.Exists(job.TargetPath + ".part.chunks"));
+        }
+        finally
+        {
+            if (File.Exists(job.TargetPath)) File.Delete(job.TargetPath);
+            if (File.Exists(job.TargetPath + ".part")) File.Delete(job.TargetPath + ".part");
+            var chunks = job.TargetPath + ".part.chunks";
+            if (Directory.Exists(chunks)) Directory.Delete(chunks, true);
+        }
     }
 
     private static DownloadJob CreateJob()
