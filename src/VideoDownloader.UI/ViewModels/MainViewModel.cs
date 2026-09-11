@@ -267,6 +267,7 @@ public sealed partial class DownloadJobViewModel : ObservableObject
     }
 
     public bool IsFailed => Job.Status == DownloadStatus.Failed;
+    public bool IsCompleted => Job.Status == DownloadStatus.Completed;
 
     public string Status
     {
@@ -319,6 +320,7 @@ public sealed partial class DownloadJobViewModel : ObservableObject
         OnPropertyChanged(nameof(GroupDomain));
         OnPropertyChanged(nameof(IsGrouped));
         OnPropertyChanged(nameof(IsFailed));
+        OnPropertyChanged(nameof(IsCompleted));
         OnPropertyChanged(nameof(Status));
         OnPropertyChanged(nameof(ProgressPercent));
         OnPropertyChanged(nameof(IsProgressIndeterminate));

@@ -282,7 +282,18 @@
                                                  Minimum="0"
                                                  Maximum="100"
                                                  Value="{Binding ProgressPercent, Mode=OneWay}"
-                                                 IsIndeterminate="{Binding IsProgressIndeterminate, Mode=OneWay}"/>
+                                                 IsIndeterminate="{Binding IsProgressIndeterminate, Mode=OneWay}">
+                                        <ProgressBar.Style>
+                                            <Style TargetType="ProgressBar">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsCompleted}" Value="True">
+                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </ProgressBar.Style>
+                                    </ProgressBar>
                                     <TextBlock Text="{Binding ProgressText}" FontSize="11" Foreground="#555"/>
                                     <TextBlock Text="{Binding Status}" FontSize="11">
                                         <TextBlock.Style>
