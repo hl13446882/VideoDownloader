@@ -360,6 +360,9 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
         var title = root.TryGetProperty("title", out var t) ? t.GetString() ?? "Video" : "Video";
         var id = root.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
         var metadata = ExtractMetadata(root);
+        var durationSec = JsonNumber.TryDoubleProp(root, "duration", out var dur) && dur > 0
+            ? dur
+            : (double?)null;
 
         if (!root.TryGetProperty("formats", out var formats) || formats.ValueKind != JsonValueKind.Array)
             return [];
@@ -565,6 +568,9 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                 ProbeSource.SiteAdapter,
                 "yt-dlp",
                 metadata)
+            {
+                DurationSec = durationSec
+            }
         ];
     }
 

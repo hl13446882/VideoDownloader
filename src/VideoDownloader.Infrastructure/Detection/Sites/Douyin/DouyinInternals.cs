@@ -381,6 +381,8 @@ internal sealed class DouyinDetectionSession
     public string? Caption { get; set; }
     /// <summary>Active player duration in seconds from page observation (when known).</summary>
     public double? ObservedDurationSec { get; set; }
+    /// <summary>Active player videoHeight from page observation (when known).</summary>
+    public int? ObservedHeight { get; set; }
     public RequestContext Context { get; set; } = RequestContext.CreateEmpty();
     public CancellationTokenSource Lifetime { get; private set; } = new();
 
@@ -427,6 +429,7 @@ internal sealed class DouyinDetectionSession
         {
             Caption = null;
             ObservedDurationSec = null;
+            ObservedHeight = null;
         }
         CurrentContentId = contentId ?? CurrentContentId;
         if (mode != DouyinContentMode.Unknown)
@@ -458,6 +461,7 @@ internal sealed class DouyinDetectionSession
         CurrentMode = DouyinContentMode.Unknown;
         Caption = null;
         ObservedDurationSec = null;
+        ObservedHeight = null;
         Context = RequestContext.CreateEmpty();
         VideoCandidates.Clear();
         AudioCandidates.Clear();

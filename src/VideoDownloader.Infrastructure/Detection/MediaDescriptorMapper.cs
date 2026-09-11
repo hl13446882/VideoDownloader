@@ -22,6 +22,12 @@ public static class MediaDescriptorMapper
     public static DetectedVideo ToDetectedVideo(MediaDescriptor descriptor, Guid sessionId)
     {
         var variants = BuildVariants(descriptor);
+        if (descriptor.VideoHeight is > 0)
+        {
+            variants = variants
+                .Select(v => v.Height is > 0 ? v : v with { Height = descriptor.VideoHeight })
+                .ToArray();
+        }
         var family = descriptor.ContentType switch
         {
             MediaContentType.Album => MediaFamily.DirectMp4,
@@ -61,6 +67,7 @@ public static class MediaDescriptorMapper
             Availability = variants.Count > 0
                 ? MediaAvailabilityKind.Complete
                 : MediaAvailabilityKind.Unavailable,
+            DurationSec = descriptor.DurationSec is > 0 ? descriptor.DurationSec : null,
             Metadata = descriptor.Author is null
                 ? null
                 : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -196,7 +203,7 @@ public static class MediaDescriptorMapper
             list.Add(MediaVariant.FromTracks(
                 "视频",
                 null,
-                null,
+                descriptor.VideoHeight is > 0 ? descriptor.VideoHeight : null,
                 null,
                 "mkv",
                 [descriptor.Video, descriptor.Audio]) with
@@ -215,6 +222,7 @@ public static class MediaDescriptorMapper
                 "视频",
                 track.SourceUrl,
                 track.RequestContext,
+                height: descriptor.VideoHeight is > 0 ? descriptor.VideoHeight : null,
                 container: track.Container ?? "mp4",
                 contentLength: track.ContentLength) with
             {

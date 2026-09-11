@@ -600,11 +600,27 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                     {
                         if (!candidate.TryGetProperty("url", out var address) || !Uri.TryCreate(address.GetString(), UriKind.Absolute, out var url)) continue;
                         if (LooksLikeJunkPath(url) || LooksLikeImageCdn(url) || !IsCandidate(url, null))
+                        {
+                            _logger.LogInformation(
+                                "Skipped response candidate host={Host} path={Path} junk={Junk} image={Image} isCand={IsCand}",
+                                url.Host,
+                                url.AbsolutePath,
+                                LooksLikeJunkPath(url),
+                                LooksLikeImageCdn(url),
+                                IsCandidate(url, null));
                             continue;
+                        }
                         var owner = candidate.TryGetProperty("contentIdentity", out var identityValue) ? identityValue.GetString() : null;
                         if (owner is not null) _owners[MediaUrlNormalizer.Normalize(url)] = owner;
                         var currentOwner = MediaOwnership.ForPage(pageUrl, _observedIdentity);
-                        if (owner is not null && currentOwner is not null && owner != currentOwner) continue;
+                        if (owner is not null && currentOwner is not null && owner != currentOwner)
+                        {
+                            _logger.LogInformation(
+                                "Skipped response candidate owner mismatch urlHost={Host} owner={Owner} current={Current}",
+                                url.Host, owner, currentOwner);
+                            continue;
+                        }
+                        _logger.LogInformation("Queuing response candidate host={Host} primary={Primary}", url.Host, owner is not null && owner == currentOwner);
                         Queue(url, pageUrl, context, null, ct, primary: owner is not null && owner == currentOwner);
                     }
 
@@ -742,6 +758,13 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         }
 
         var full = url.AbsoluteUri;
+        // MacCMS parse / qlplayer gateways carry the real stream in ?url=…
+        if (System.Text.RegularExpressions.Regex.IsMatch(
+                full,
+                @"/(?:qlplayer|parse|player)[^?\s]*\?[^#]*\burl=",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return true;
+
         var queryHint =
             full.Contains("mime=video", StringComparison.OrdinalIgnoreCase) ||
             full.Contains("mime=audio", StringComparison.OrdinalIgnoreCase) ||
@@ -1629,6 +1652,11 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             : MediaFamily.DirectMp4;
 
         var id = new Guid(SHA256.HashData(Encoding.UTF8.GetBytes("page:" + page.AbsoluteUri)).AsSpan(0, 16));
+        var durationSec = _media.Values
+            .Where(p => p.Duration > 0 && double.IsFinite(p.Duration))
+            .Select(p => p.Duration)
+            .DefaultIfEmpty(0)
+            .Max();
         return new DetectedVideo(
             id,
             "generic",
@@ -1641,7 +1669,10 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             ProbeSource.Generic,
             Metadata: string.IsNullOrWhiteSpace(_author)
                 ? null
-                : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["author"] = _author });
+                : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["author"] = _author })
+        {
+            DurationSec = durationSec > 0 ? durationSec : null
+        };
     }
 
     /// <summary>

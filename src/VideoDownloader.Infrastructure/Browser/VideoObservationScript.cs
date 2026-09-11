@@ -302,7 +302,8 @@ internal static class VideoObservationScript
             if(!stablePage && !explicit) return null;
             const identity = stablePage ? base : location.host + ':' + explicit;
             const durationSec=(Number.isFinite(active.duration)&&active.duration>0)?active.duration:null;
-            return { type:'vd-video-identity', identity, caption, href:location.href, durationSec,
+            const videoHeight=(Number.isFinite(active.videoHeight)&&active.videoHeight>0)?active.videoHeight:null;
+            return { type:'vd-video-identity', identity, caption, href:location.href, durationSec, videoHeight,
               media:[...new Set([active.currentSrc,active.src,...[...active.querySelectorAll('source')].map(e=>e.src)].filter(u=>/^https?:/i.test(u||'')))] };
           };
           const findItemById = id => {
@@ -410,14 +411,22 @@ internal static class VideoObservationScript
                   observation.caption=String(player.vod_data.vod_name).trim();
                 if(!observation.identity && player.id)
                   observation.identity=location.host+':content:'+player.id;
-                for(const key of ['url']){
+                for(const key of ['url','url_next','link']){
                   const u=player[key];
-                  if(typeof u==='string' && /\.(m3u8|mpd|mp4|webm|m4a|mp3)([?#]|$)/i.test(u)) observation.media.push(u);
+                  // Encrypted MacCMS urls often lack .m3u8 — still surface for parse/iframe follow-up.
+                  if(typeof u==='string' && u.trim().length>8) observation.media.push(u.trim());
                 }
               }
               if(window.MacPlayer){
-                if(typeof MacPlayer.PlayUrl==='string' && /\.(m3u8|mpd|mp4|webm|m4a|mp3)([?#]|$)/i.test(MacPlayer.PlayUrl))
-                  observation.media.push(MacPlayer.PlayUrl);
+                if(typeof MacPlayer.PlayUrl==='string' && MacPlayer.PlayUrl.trim())
+                  observation.media.push(MacPlayer.PlayUrl.trim());
+                if(typeof MacPlayer.Parse==='string' && MacPlayer.Parse.trim() && typeof MacPlayer.PlayUrl==='string')
+                  observation.media.push(String(MacPlayer.Parse)+String(MacPlayer.PlayUrl));
+              }
+              for(const frame of Array.from(document.querySelectorAll('iframe,frame')).slice(0,16)){
+                const src=frame.getAttribute('src')||frame.src||'';
+                if(src && /(?:qlplayer|parse|player)/i.test(src) && /[?&]url=/i.test(src))
+                  observation.media.push(src);
               }
             }catch{}
             // DPlayer + hls.js (MSE/blob): harvest playlist URL only, never page copy.

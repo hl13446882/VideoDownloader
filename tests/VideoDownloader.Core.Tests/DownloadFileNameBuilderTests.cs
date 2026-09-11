@@ -9,49 +9,53 @@ public class DownloadFileNameBuilderTests
     [InlineData("mp4")]
     [InlineData("mkv")]
     [InlineData("mka")]
-    public void Build_UsesCaptionAndResolution_Only_NoSizeOrContainer(string container)
+    public void Build_UsesCaptionAndMetaSuffix_TitleWithin30(string container)
     {
         foreach (var title in new[] { "短标题", new string('长', 80) })
         {
-            var video = CreateVideo(SiteIds.Generic, null, title, new Uri("https://example.com/watch"), null);
+            var video = CreateVideo(SiteIds.Generic, null, title, new Uri("https://example.com/watch"), null,
+                durationSec: 185, contentLength: 256 * 1024 * 1024);
             var variant = video.Variants[0] with { Container = container };
             var name = DownloadFileNameBuilder.Build(video, variant);
-            Assert.EndsWith("_1080p", name);
-            Assert.DoesNotContain("100B", name, StringComparison.OrdinalIgnoreCase);
+            Assert.EndsWith("_3分_1080P_256MB", name);
             Assert.DoesNotContain(container, name, StringComparison.OrdinalIgnoreCase);
-            Assert.True(new System.Globalization.StringInfo(name).LengthInTextElements <= DownloadFileNameBuilder.MaxStemLength);
+            DownloadFileNameBuilder.TrySplitMetaSuffix(name, out var head, out _);
+            Assert.True(new System.Globalization.StringInfo(head).LengthInTextElements
+                        <= DownloadFileNameBuilder.MaxStemLength);
         }
     }
 
     [Fact]
-    public void Build_UsesDetectedCopyAndResolution_Within30Chars()
+    public void Build_UsesDetectedCopyAndMeta_MetaOutside30Budget()
     {
         var video = CreateVideo(
             SiteIds.YouTube,
             "abc123",
             "Useful Clip",
             new Uri("https://www.youtube.com/watch?v=abc123"),
-            new Dictionary<string, string> { ["channel"] = "Creator Name" });
+            new Dictionary<string, string> { ["channel"] = "Creator Name" },
+            durationSec: 90,
+            contentLength: 50L * 1024 * 1024);
 
         var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
 
         Assert.DoesNotContain("CreatorName", name);
         Assert.DoesNotContain("abc123", name);
         Assert.Contains("UsefulClip", name);
-        Assert.EndsWith("_1080p", name);
-        Assert.DoesNotContain("mp4", name, StringComparison.OrdinalIgnoreCase);
-        Assert.True(name.Length <= DownloadFileNameBuilder.MaxStemLength);
+        Assert.Equal("UsefulClip_2分_1080P_50MB", name);
     }
 
     [Fact]
-    public void Build_StripsHashtags_AndHardCapsAt30()
+    public void Build_StripsHashtags_AndHardCapsTitleAt30()
     {
         var video = CreateVideo(
             SiteIds.Douyin,
             "aweme42",
             "山歌追上云朵夫妻版 #舞蹈 #藏族舞 #月月舞蹈夫妇原创 #山歌追上云朵 #零基础学舞蹈",
             new Uri("https://www.douyin.com/video/aweme42"),
-            new Dictionary<string, string> { ["author"] = "发布者" });
+            new Dictionary<string, string> { ["author"] = "发布者" },
+            durationSec: 60,
+            contentLength: 12L * 1024 * 1024);
 
         var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
 
@@ -59,9 +63,10 @@ public class DownloadFileNameBuilderTests
         Assert.DoesNotContain("发布者", name);
         Assert.Contains("山歌追上云朵夫妻版", name);
         Assert.DoesNotContain("舞蹈", name); // topics still stripped when caption remains
-        Assert.True(new System.Globalization.StringInfo(name).LengthInTextElements
+        Assert.EndsWith("_1分_1080P_12MB", name);
+        DownloadFileNameBuilder.TrySplitMetaSuffix(name, out var head, out _);
+        Assert.True(new System.Globalization.StringInfo(head).LengthInTextElements
                     <= DownloadFileNameBuilder.MaxStemLength);
-        Assert.EndsWith("_1080p", name);
     }
 
     [Fact]
@@ -72,16 +77,16 @@ public class DownloadFileNameBuilderTests
             "aweme-topic-only",
             "#舞蹈 #藏族舞 #月月舞蹈夫妇原创",
             new Uri("https://www.douyin.com/video/aweme-topic-only"),
-            null);
+            null,
+            durationSec: 30,
+            contentLength: 8L * 1024 * 1024);
 
         var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
 
         Assert.DoesNotContain("#", name);
         Assert.Contains("舞蹈", name);
         Assert.DoesNotContain("douyin.com", name, StringComparison.OrdinalIgnoreCase);
-        Assert.True(new System.Globalization.StringInfo(name).LengthInTextElements
-                    <= DownloadFileNameBuilder.MaxStemLength);
-        Assert.EndsWith("_1080p", name);
+        Assert.EndsWith("_1分_1080P_8MB", name);
     }
 
     [Fact]
@@ -92,15 +97,15 @@ public class DownloadFileNameBuilderTests
             "aweme1",
             "蓝天白云下听蒙语鸿雁太治愈了 9.8MB mp4",
             new Uri("https://www.douyin.com/video/1"),
-            null);
+            null,
+            durationSec: 120,
+            contentLength: 10L * 1024 * 1024);
 
         var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
 
         Assert.DoesNotContain("9.8MB", name, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("mp4", name, StringComparison.OrdinalIgnoreCase);
-        Assert.True(new System.Globalization.StringInfo(name).LengthInTextElements
-                    <= DownloadFileNameBuilder.MaxStemLength);
-        Assert.EndsWith("_1080p", name);
+        Assert.EndsWith("_2分_1080P_10MB", name);
     }
 
     [Fact]
@@ -111,7 +116,9 @@ public class DownloadFileNameBuilderTests
             null,
             "Before:Illegal*Characters/Are?RemovedAndTheTailRemains",
             new Uri("http://localhost:5088/"),
-            null);
+            null,
+            durationSec: 600,
+            contentLength: 2L * 1024 * 1024 * 1024);
 
         var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
 
@@ -119,9 +126,7 @@ public class DownloadFileNameBuilderTests
         Assert.DoesNotContain('*', name);
         Assert.DoesNotContain('/', name);
         Assert.Contains("\uFF0A", name);
-        Assert.EndsWith("_1080p", name);
-        Assert.True(new System.Globalization.StringInfo(name).LengthInTextElements
-                    <= DownloadFileNameBuilder.MaxStemLength);
+        Assert.EndsWith("_10分_1080P_2GB", name);
     }
 
     [Fact]
@@ -132,18 +137,18 @@ public class DownloadFileNameBuilderTests
             null,
             "public.mp4",
             new Uri("https://ally.trytcrae.cc/archives/274269/"),
-            null);
+            null,
+            durationSec: 240,
+            contentLength: 100L * 1024 * 1024);
 
         var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
         var day = DateTimeOffset.Now.ToString("yyyyMMdd");
 
         Assert.Contains(day, name);
-        Assert.EndsWith("_1080p", name);
+        Assert.EndsWith("_4分_1080P_100MB", name);
         Assert.DoesNotContain("archives", name);
         Assert.DoesNotContain("public.mp4", name);
-        Assert.DoesNotContain("mp4", name, StringComparison.OrdinalIgnoreCase);
-        Assert.True(new System.Globalization.StringInfo(name).LengthInTextElements
-                    <= DownloadFileNameBuilder.MaxStemLength);
+        Assert.DoesNotContain(".mp4", name, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -154,12 +159,32 @@ public class DownloadFileNameBuilderTests
             null,
             "凤凰娇探 - 在线观看",
             new Uri("https://www.xmfyy.com/index.php/vod/play/id/1.html"),
-            null);
+            null,
+            durationSec: null,
+            contentLength: null,
+            height: 720);
 
         var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
         Assert.Contains("凤凰娇探", name);
-        Assert.EndsWith("_1080p", name);
+        Assert.EndsWith("_720P", name);
         Assert.DoesNotContain("xmfyy", name, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Build_OmitsMissingMetaParts()
+    {
+        var video = CreateVideo(
+            SiteIds.Generic,
+            null,
+            "仅标题",
+            new Uri("https://example.com/a"),
+            null,
+            durationSec: 45,
+            contentLength: null,
+            height: null);
+
+        var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
+        Assert.Equal("仅标题_1分", name);
     }
 
     [Fact]
@@ -170,20 +195,29 @@ public class DownloadFileNameBuilderTests
             new Uri("https://www.example.com/a/b?x=1"),
             height: 720,
             now: stamp);
-        Assert.Equal("example.com_20260908_720p", name);
+        Assert.Equal("example.com_20260908", name);
     }
 
     [Fact]
-    public void WithCollisionSuffix_StaysWithin30()
+    public void WithSequenceSuffix_PreservesMetaOutsideTitleBudget()
     {
-        var name = DownloadFileNameBuilder.WithCollisionSuffix("山歌追上云朵夫妻版_1080p", "abcd1234");
-        Assert.True(new System.Globalization.StringInfo(name).LengthInTextElements
-                    <= DownloadFileNameBuilder.MaxStemLength);
-        Assert.EndsWith("abcd1234", name);
+        var name = DownloadFileNameBuilder.WithSequenceSuffix("短标题_3分_1080P_256MB", 2);
+        Assert.Equal("短标题_2_3分_1080P_256MB", name);
     }
 
     [Fact]
-    public void WithSequenceSuffix_IsReadableAndStaysWithin30()
+    public void WithCollisionSuffix_PreservesMeta()
+    {
+        var name = DownloadFileNameBuilder.WithCollisionSuffix("山歌追上云朵夫妻版_1080P_12MB", "abcd1234");
+        Assert.EndsWith("_abcd1234_1080P_12MB", name);
+        DownloadFileNameBuilder.TrySplitMetaSuffix(name, out var head, out var meta);
+        Assert.Equal("_1080P_12MB", meta);
+        Assert.True(new System.Globalization.StringInfo(head).LengthInTextElements
+                    <= DownloadFileNameBuilder.MaxStemLength);
+    }
+
+    [Fact]
+    public void WithSequenceSuffix_IsReadableAndStaysWithin30ForTitle()
     {
         var name = DownloadFileNameBuilder.WithSequenceSuffix("A creator title that is deliberately long", 12);
         Assert.EndsWith("_12", name);
@@ -205,6 +239,17 @@ public class DownloadFileNameBuilderTests
     }
 
     [Fact]
+    public void FinalizeEnqueueStem_DoesNotFoldMetaInto30()
+    {
+        var longTitle = new string('长', 40) + "_5分_1080P_1.5GB";
+        var name = DownloadFileNameBuilder.FinalizeEnqueueStem(longTitle);
+        Assert.EndsWith("_5分_1080P_1.5GB", name);
+        DownloadFileNameBuilder.TrySplitMetaSuffix(name, out var head, out _);
+        Assert.True(new System.Globalization.StringInfo(head).LengthInTextElements
+                    <= DownloadFileNameBuilder.MaxStemLength);
+    }
+
+    [Fact]
     public void FilterLiveInput_StripsIllegalCharacters()
     {
         var filtered = DownloadFileNameBuilder.FilterLiveInput(@"a<>:""/\|?*b");
@@ -218,20 +263,32 @@ public class DownloadFileNameBuilderTests
         Assert.Equal("CON_file", DownloadFileNameBuilder.NormalizeRenameStem("CON", ".mp4"));
     }
 
+    [Theory]
+    [InlineData(100L * 1024 * 1024, "100MB")]
+    [InlineData(1536L * 1024 * 1024, "1.5GB")]
+    [InlineData(10L * 1024 * 1024 * 1024, "10GB")]
+    public void FormatSizeLabel_UsesMbBelow1Gb(long bytes, string expected)
+    {
+        Assert.Equal(expected, DownloadFileNameBuilder.FormatSizeLabel(bytes));
+    }
+
     private static DetectedVideo CreateVideo(
         string siteId,
         string? contentId,
         string title,
         Uri pageUrl,
-        IReadOnlyDictionary<string, string>? metadata)
+        IReadOnlyDictionary<string, string>? metadata,
+        double? durationSec = 180,
+        long? contentLength = 100,
+        int? height = 1080)
     {
         var variant = MediaVariant.FromCombinedTrack(
-            "1080p",
+            height is > 0 ? $"{height}p" : "default",
             new Uri("https://cdn.example.test/video.mp4"),
             RequestContext.CreateEmpty(),
-            height: 1080,
+            height: height,
             container: "mp4",
-            contentLength: 100);
+            contentLength: contentLength);
 
         return new DetectedVideo(
             Guid.NewGuid(),
@@ -242,6 +299,9 @@ public class DownloadFileNameBuilderTests
             MediaFamily.DirectMp4,
             [variant],
             false,
-            Metadata: metadata);
+            Metadata: metadata)
+        {
+            DurationSec = durationSec
+        };
     }
 }

@@ -94,8 +94,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         var saveDir = DownloadSiteFolder.CombineSaveDirectory(rootSaveDir, pageUrl);
         Directory.CreateDirectory(saveDir);
 
-        // Clamp again to the shared filename limit before reserving the target path.
-        var stem = DownloadFileNameBuilder.ClampStem(SanitizeFileName(displayName));
+        // Title stays within MaxStemLength; duration/resolution/size meta is preserved.
+        var stem = DownloadFileNameBuilder.FinalizeEnqueueStem(SanitizeFileName(displayName));
         var extension = ResolveDownloadExtension(variant);
         DownloadJob job;
         lock (_targetPathSync)
@@ -105,7 +105,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             while (File.Exists(targetPath) || _jobs.Values.Any(job =>
                        string.Equals(job.TargetPath, targetPath, StringComparison.OrdinalIgnoreCase)))
             {
-                stem = DownloadFileNameBuilder.WithSequenceSuffix(displayName, sequence++);
+                stem = DownloadFileNameBuilder.WithSequenceSuffix(stem, sequence++);
                 targetPath = Path.Combine(saveDir, stem + extension);
             }
 

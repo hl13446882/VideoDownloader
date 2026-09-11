@@ -55,4 +55,10 @@ public sealed record MediaDescriptor(
     /// Pre-built format ladder (e.g. yt-dlp heights). When set, mapper prefers these over Video/Audio.
     /// </summary>
     public IReadOnlyList<MediaVariant> Formats { get; init; } = [];
+
+    /// <summary>Content duration in seconds when known (player observation / extractor).</summary>
+    public double? DurationSec { get; init; }
+
+    /// <summary>Observed player height when format ladder lacks per-variant Height.</summary>
+    public int? VideoHeight { get; init; }
 }

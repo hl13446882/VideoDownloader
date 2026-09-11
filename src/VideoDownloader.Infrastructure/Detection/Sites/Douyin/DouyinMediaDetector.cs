@@ -379,6 +379,10 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             if (durationSec is > 0)
                 _session.ObservedDurationSec = durationSec;
 
+            var videoHeight = TryReadVideoHeight(pageScriptJson);
+            if (videoHeight is > 0)
+                _session.ObservedHeight = videoHeight;
+
             // Matching observation for the active aweme — unlocks binding of id-less CDN progressive.
             if (contentId is not null &&
                 string.Equals(contentId, _session.CurrentContentId, StringComparison.Ordinal))
@@ -554,7 +558,8 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 Confidence: 0.9,
                 DisplayTitle: _session.Caption)
             {
-                SessionId = _session.SessionId
+                SessionId = _session.SessionId,
+                DurationSec = _session.ObservedDurationSec is > 0 ? _session.ObservedDurationSec : null
             };
         }
 
@@ -605,7 +610,9 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             DisplayTitle: _session.Caption)
         {
             SessionId = _session.SessionId,
-            Formats = formats
+            Formats = formats,
+            DurationSec = _session.ObservedDurationSec is > 0 ? _session.ObservedDurationSec : null,
+            VideoHeight = _session.ObservedHeight is > 0 ? _session.ObservedHeight : null
         };
     }
 
@@ -632,7 +639,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             list.Add(new MediaVariant(
                 track.TrackId,
                 null,
-                null,
+                _session.ObservedHeight is > 0 ? _session.ObservedHeight : null,
                 null,
                 track.Container,
                 [track])
@@ -1295,6 +1302,27 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 double.TryParse(d.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out sec) &&
                 double.IsFinite(sec) && sec > 0)
                 return sec;
+        }
+        catch (JsonException)
+        {
+        }
+        return null;
+    }
+
+    private static int? TryReadVideoHeight(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("videoHeight", out var h))
+                return null;
+            if (h.ValueKind == JsonValueKind.Number && h.TryGetInt32(out var height) && height > 0)
+                return height;
+            if (h.ValueKind == JsonValueKind.String &&
+                int.TryParse(h.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out height) &&
+                height > 0)
+                return height;
         }
         catch (JsonException)
         {

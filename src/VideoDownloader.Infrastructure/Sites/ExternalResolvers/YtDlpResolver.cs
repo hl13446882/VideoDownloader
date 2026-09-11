@@ -200,7 +200,15 @@ public sealed class YtDlpResolver : IExternalSiteResolver
             psi.ArgumentList.Add(extractorArgs);
         }
 
-        if (!string.IsNullOrWhiteSpace(context.UserAgent))
+        // TikTok blocks plain TLS fingerprints; --impersonate is the common fix (yt-dlp #14473).
+        // Hardcoded User-Agent fights impersonate headers — omit UA when impersonating.
+        var impersonateTikTok = siteId == SiteIds.TikTok;
+        if (impersonateTikTok)
+        {
+            psi.ArgumentList.Add("--impersonate");
+            psi.ArgumentList.Add("chrome");
+        }
+        else if (!string.IsNullOrWhiteSpace(context.UserAgent))
         {
             psi.ArgumentList.Add("--user-agent");
             psi.ArgumentList.Add(context.UserAgent);
@@ -415,6 +423,9 @@ public sealed class YtDlpResolver : IExternalSiteResolver
         var title = root.TryGetProperty("title", out var t) ? t.GetString() ?? "Video" : "Video";
         var id = root.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
         var metadata = ExtractMetadata(root);
+        var durationSec = JsonNumber.TryDoubleProp(root, "duration", out var dur) && dur > 0
+            ? dur
+            : (double?)null;
 
         if (!root.TryGetProperty("formats", out var formats) || formats.ValueKind != JsonValueKind.Array)
             return [];
@@ -620,6 +631,9 @@ public sealed class YtDlpResolver : IExternalSiteResolver
                 ProbeSource.SiteAdapter,
                 "yt-dlp",
                 metadata)
+            {
+                DurationSec = durationSec
+            }
         ];
     }
 

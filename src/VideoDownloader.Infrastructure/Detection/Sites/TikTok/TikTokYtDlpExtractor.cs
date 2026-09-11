@@ -202,11 +202,10 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
             psi.ArgumentList.Add(extractorArgs);
         }
 
-        if (!string.IsNullOrWhiteSpace(context.UserAgent))
-        {
-            psi.ArgumentList.Add("--user-agent");
-            psi.ArgumentList.Add(context.UserAgent);
-        }
+        // TikTok blocks non-browser TLS; --impersonate is the common fix (yt-dlp #14473).
+        // Do not combine with a hardcoded User-Agent — it fights impersonate headers.
+        psi.ArgumentList.Add("--impersonate");
+        psi.ArgumentList.Add("chrome");
 
         if (!string.IsNullOrWhiteSpace(context.Referer) &&
             siteId is not SiteIds.YouTube)
@@ -381,6 +380,9 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
         var title = root.TryGetProperty("title", out var t) ? t.GetString() ?? "Video" : "Video";
         var id = root.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
         var metadata = ExtractMetadata(root);
+        var durationSec = JsonNumber.TryDoubleProp(root, "duration", out var dur) && dur > 0
+            ? dur
+            : (double?)null;
 
         if (!root.TryGetProperty("formats", out var formats) || formats.ValueKind != JsonValueKind.Array)
             return [];
@@ -586,6 +588,9 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
                 ProbeSource.SiteAdapter,
                 "yt-dlp",
                 metadata)
+            {
+                DurationSec = durationSec
+            }
         ];
     }
 
