@@ -31,6 +31,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
     private readonly List<MediaVariant> _formats = [];
     private readonly List<AlbumImageItem> _images = [];
     private readonly HashSet<string> _observedPlayPaths = new(StringComparer.OrdinalIgnoreCase);
+    private double? _observedDurationSec;
+    private bool _boundAnonymousProgressive;
     private bool _album;
     private bool _failed;
     private string? _failureReason;
@@ -98,6 +100,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         _formats.Clear();
         _images.Clear();
         _observedPlayPaths.Clear();
+        _observedDurationSec = null;
+        _boundAnonymousProgressive = false;
         _album = false;
         _failed = false;
         _failureReason = null;
@@ -146,12 +150,13 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 !string.Equals(_contentId, otherId, StringComparison.Ordinal))
                 return Task.CompletedTask;
             // For You preloads the next item on tiktokcdn with no video id in the URL.
-            // Only keep CDN objects the active player already attributed to this work.
+            // Keep the active work's observed objects; allow one browser-play fallback
+            // only when observation has identity but no http play URL (blob currentSrc).
             if (otherId is null)
             {
                 if (_contentId is null)
                     return Task.CompletedTask;
-                if (!IsObservedPlayPath(e.Url))
+                if (!IsObservedPlayPath(e.Url) && !TryBindAnonymousPlay(e))
                     return Task.CompletedTask;
             }
 
@@ -202,6 +207,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 _formats.Clear();
                 _images.Clear();
                 _observedPlayPaths.Clear();
+                _observedDurationSec = null;
+                _boundAnonymousProgressive = false;
                 _album = false;
                 _failed = false;
                 _failureReason = null;
@@ -217,7 +224,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 _caption = pageTitle.Trim();
             ApplyJson(pageScriptJson);
             enriched = _context;
-            if (HasDurableVideoUnlocked())
+            if (HasDurableObservedVideoUnlocked())
                 early = Build(out winMethod);
         }
 
@@ -236,8 +243,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         {
             if (!_ytdlp.IsAvailable)
                 return;
-            // Durable CDN from the live player beats a later webapp-prime from yt-dlp.
-            if (HasDurableVideoUnlocked())
+            // Only skip yt-dlp when the active player's hydration already named a durable CDN.
+            if (HasDurableObservedVideoUnlocked())
                 return;
             // One yt-dlp pass per work. Observation tracks are allowed alongside, but do not relaunch.
             if (_formats.Count > 0)
@@ -441,6 +448,39 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         _videos.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined &&
                          TikTokCdn.IsDurablePlayHost(t.SourceUrl));
 
+    private bool HasDurableObservedVideoUnlocked() =>
+        _videos.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined &&
+                         t.Evidence == MediaEvidence.DomObserved &&
+                         TikTokCdn.IsDurablePlayHost(t.SourceUrl));
+
+    private bool TryBindAnonymousPlay(NormalizedNetworkEvent e)
+    {
+        if (!IsBrowserPlay(e) || IsAudio(e))
+            return false;
+        // Observation already named this work's play objects — extra CDNs are the next-item preload.
+        if (_observedPlayPaths.Count > 0)
+            return false;
+        if (_boundAnonymousProgressive)
+            return false;
+        if (!FitsObservedDuration(e.ContentLength))
+            return false;
+        _boundAnonymousProgressive = true;
+        RememberObservedPlay(e.Url);
+        return true;
+    }
+
+    private bool FitsObservedDuration(long? contentLength)
+    {
+        if (_observedDurationSec is null or < 1.0)
+            return true;
+        if (contentLength is null or <= 0)
+            return true;
+        if (contentLength < 50_000)
+            return false;
+        var bitsPerSec = contentLength.Value * 8.0 / _observedDurationSec.Value;
+        return bitsPerSec is >= 250_000 and <= 18_000_000;
+    }
+
     private static string ResourcePath(Uri url) => url.GetLeftPart(UriPartial.Path);
 
     private bool IsObservedPlayPath(Uri url) =>
@@ -500,6 +540,11 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                     (string.IsNullOrWhiteSpace(_caption) || _caption is "视频" || text.Length > _caption.Length))
                     _caption = text;
             }
+            if (root.TryGetProperty("durationSec", out var dur) &&
+                dur.ValueKind is JsonValueKind.Number &&
+                dur.TryGetDouble(out var seconds) &&
+                seconds > 0)
+                _observedDurationSec = seconds;
             if (root.TryGetProperty("album", out var a) && a.ValueKind is JsonValueKind.True)
                 _album = true;
             if (root.TryGetProperty("images", out var images) && images.ValueKind == JsonValueKind.Array)

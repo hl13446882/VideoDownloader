@@ -29,6 +29,54 @@ internal static class TikTokObservationScript
             // Prefer durable CDN; still keep webapp-prime as last resort.
             return /tiktokcdn|byteoversea|muscdn|tiktokv\.com|\/video\/tos\//i.test(v);
           };
+          const scavengePlayUrlsFromTree=(root, expectedId)=>{
+            const urls=[];
+            if(!root||typeof root!=='object') return urls;
+            const seen=new WeakSet(); let budget=1800;
+            const visit=(value,depth,matched)=>{
+              if(--budget<0||depth>14||value==null) return;
+              if(typeof value==='string'){
+                if(matched && isStrongPlayUrl(value)) urls.push(value);
+                return;
+              }
+              if(typeof value!=='object'||value instanceof Node||seen.has(value)) return;
+              seen.add(value);
+              const id=value.id||value.itemId||value.videoId||value.aweme_id||value.awemeId;
+              const nextMatched=matched || (!!expectedId && id!=null && String(id)===String(expectedId));
+              for(const [key,child] of Object.entries(value)){
+                if(/cover|avatar|thumbnail|subtitle|icon|logo|image/i.test(key)) continue;
+                visit(child,depth+1,nextMatched);
+              }
+            };
+            visit(root,0,false);
+            return [...new Set(urls)];
+          };
+          const scavengePlayUrlsFromPlayer=(active, expectedId)=>{
+            const urls=[];
+            if(!active||!expectedId) return urls;
+            for(let el=active,i=0;el&&i<16;el=el.parentElement,i++){
+              for(const key of Object.keys(el)){
+                let props=null;
+                if(key.startsWith('__reactProps$')) props=el[key];
+                else if(key.startsWith('__reactFiber$')) props=el[key]?.memoizedProps||el[key]?.pendingProps||el[key];
+                for(const u of scavengePlayUrlsFromTree(props, expectedId)) urls.push(u);
+              }
+            }
+            return [...new Set(urls)];
+          };
+          const scavengePlayUrlsFromPerf=expectedId=>{
+            try{
+              return performance.getEntriesByType('resource').map(e=>e.name).filter(value=>{
+                if(!isStrongPlayUrl(value)) return false;
+                try{
+                  const u=new URL(value);
+                  const id=u.searchParams.get('item_id')||u.searchParams.get('aweme_id')||
+                           u.searchParams.get('video_id')||u.searchParams.get('__vid');
+                  return !!id && id===String(expectedId);
+                }catch{ return false; }
+              });
+            }catch{ return []; }
+          };
           const pushPlay=(urls,v)=>{
             if(typeof v==='string' && /^https?:/i.test(v) && !/\.(jpg|jpeg|png|webp|gif)([?#]|$)/i.test(v))
               urls.push(v);
@@ -148,6 +196,15 @@ internal static class TikTokObservationScript
             }
             const pathId=(location.pathname.match(/\/video\/(\d{10,})/)||[])[1];
             if(pathId && !explicit) explicit='content:'+pathId;
+            if(!explicit){
+              const wrap=(active.closest('[id^="xgwrapper-"]')?.id||'').match(/xgwrapper-\d+-(\d{10,})/);
+              if(wrap) explicit='content:'+wrap[1];
+            }
+            if(!explicit){
+              const card=active.closest('[data-e2e="feed-active-video"],[data-e2e="recommend-list-item-container"]');
+              const vid=card?.getAttribute('data-e2e-vid')||card?.querySelector('[data-e2e-vid]')?.getAttribute('data-e2e-vid');
+              if(vid && /^\d{10,}$/.test(vid)) explicit='content:'+vid;
+            }
             if(!explicit) return null;
             const id=explicit.replace(/^content:/,'');
             const record=findItemRecordById(id);
@@ -159,6 +216,8 @@ internal static class TikTokObservationScript
             caption=(caption||'').replace(/(?:展开|收起|See more|See less)\s*$/i,'').trim();
             const media=[...new Set([
               ...collectPlayUrls(record),
+              ...scavengePlayUrlsFromPlayer(active, id),
+              ...scavengePlayUrlsFromPerf(id),
               active.currentSrc, active.src,
               ...[...active.querySelectorAll('source')].map(e=>e.src)
             ].filter(u=>/^https?:/i.test(u||'')))];

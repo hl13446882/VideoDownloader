@@ -86,6 +86,31 @@ public class TikTokMediaDetectorTests
     }
 
     [Fact]
+    public async Task Empty_Observation_Allows_One_Browser_Play_For_Current_Work()
+    {
+        var detector = CreateDetector();
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var page = new Uri("https://www.tiktok.com/");
+        var session = Guid.NewGuid();
+        detector.BeginSession(page, session);
+        await detector.ProcessPageObservationAsync(
+            page,
+            "caption",
+            """{"identity":"content:7682788705483984135","media":[],"durationSec":12.5}""",
+            RequestContext.CreateEmpty(),
+            CancellationToken.None);
+
+        await detector.ProcessNetworkAsync(
+            Evt(page, "https://v16.tiktokcdn.com/obj/current-play.mp4", session, 4_000_000),
+            CancellationToken.None);
+
+        Assert.NotNull(last);
+        Assert.Contains("current-play", last!.Video!.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("7682788705483984135", last.MediaId);
+    }
+
+    [Fact]
     public async Task Anonymous_Network_Before_Identity_Does_Not_Emit()
     {
         var detector = CreateDetector();
