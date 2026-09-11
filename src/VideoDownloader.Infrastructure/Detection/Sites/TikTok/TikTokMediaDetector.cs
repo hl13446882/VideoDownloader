@@ -34,6 +34,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
     private bool _failed;
     private string? _failureReason;
     private bool _externalAttempted;
+    private bool _externalFinished;
+    private Task? _resolveTask;
     private CancellationTokenSource _lifetime = new();
 
     public TikTokMediaDetector(
@@ -98,6 +100,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         _failed = false;
         _failureReason = null;
         _externalAttempted = false;
+        _externalFinished = false;
+        _resolveTask = null;
     }
 
     public Task ProcessNetworkAsync(NormalizedNetworkEvent e, CancellationToken ct)
@@ -155,7 +159,6 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         Uri pageUrl, string? pageTitle, string? pageScriptJson, RequestContext context, CancellationToken ct)
     {
         string? contentId;
-        Uri resolveUrl;
         RequestContext enriched;
         lock (_gate)
         {
@@ -165,6 +168,10 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
             var id = ExtractVideoId(pageUrl) ?? ReadIdentityId(pageScriptJson);
             if (id is not null && !string.Equals(id, _contentId, StringComparison.Ordinal))
             {
+                try { _lifetime.Cancel(); }
+                catch (ObjectDisposedException) { }
+                _lifetime.Dispose();
+                _lifetime = new CancellationTokenSource();
                 _videos.Clear();
                 _audios.Clear();
                 _formats.Clear();
@@ -174,6 +181,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 _failureReason = null;
                 _contentId = id;
                 _externalAttempted = false;
+                _externalFinished = false;
+                _resolveTask = null;
             }
             _contentId ??= id;
             contentId = _contentId;
@@ -181,45 +190,61 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 (string.IsNullOrWhiteSpace(_caption) || _caption is "视频"))
                 _caption = pageTitle.Trim();
             ApplyJson(pageScriptJson);
-            // Prefer embed/v2/{id} for yt-dlp — bare /video/{id} redirects to TikTok 404.
-            resolveUrl = contentId is null
-                ? _pageUrl
-                : new Uri($"https://www.tiktok.com/embed/v2/{contentId}");
             enriched = _context;
         }
 
         if (string.IsNullOrWhiteSpace(contentId))
             return;
 
-        var hasCookies = enriched.Cookies.Count > 0;
+        Task? resolve;
         lock (_gate)
         {
-            if (!_ytdlp.IsAvailable || _externalAttempted)
+            if (!_ytdlp.IsAvailable)
                 return;
-            _externalAttempted = true;
+            // One yt-dlp pass per work. Observation tracks are allowed alongside, but do not relaunch.
+            if (_formats.Count > 0)
+                return;
+            if (_resolveTask is { IsCompleted: false })
+                resolve = _resolveTask;
+            else if (_externalAttempted && _externalFinished)
+                return;
+            else
+            {
+                _externalAttempted = true;
+                _externalFinished = false;
+                var token = _lifetime.Token;
+                resolve = ResolveExternalAsync(contentId, enriched, token);
+                _resolveTask = resolve;
+            }
         }
 
+        try { await resolve.WaitAsync(ct); }
+        catch (OperationCanceledException) { }
+    }
+
+    private async Task ResolveExternalAsync(string contentId, RequestContext enriched, CancellationToken ct)
+    {
         try
         {
-            // Internal URL fallback only — not peer ledger methods (same TikTok extractor).
+            // Prefer /@tiktok/video/{id}: embed/v2 is often "Unsupported URL" on current yt-dlp.
             Uri[] resolveAttempts =
             [
-                new Uri($"https://www.tiktok.com/embed/v2/{contentId}"),
-                new Uri($"https://www.tiktok.com/@tiktok/video/{contentId}")
+                new Uri($"https://www.tiktok.com/@tiktok/video/{contentId}"),
+                new Uri($"https://www.tiktok.com/embed/v2/{contentId}")
             ];
             IReadOnlyList<DetectedVideo> videos = [];
             foreach (var attempt in resolveAttempts)
             {
+                ct.ThrowIfCancellationRequested();
                 videos = await _ytdlp.ResolveAsync(attempt, enriched, ct);
                 if (videos.Count > 0)
                     break;
             }
 
+            MediaDescriptor? emit = null;
+            string? winMethod = null;
             lock (_gate)
             {
-                if (videos.Count == 0 && !hasCookies)
-                    _externalAttempted = false;
-
                 foreach (var v in videos.Where(v =>
                              string.IsNullOrWhiteSpace(_contentId) ||
                              string.Equals(v.SiteContentId, _contentId, StringComparison.OrdinalIgnoreCase) ||
@@ -258,22 +283,42 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 {
                     _failed = false;
                     _failureReason = null;
+                    emit = Build(out winMethod);
+                    if (emit is not null && !string.IsNullOrWhiteSpace(winMethod))
+                        _probeStats.Record(SiteIds.TikTok, winMethod!, true);
                 }
             }
+
+            if (emit is not null)
+                DescriptorsReady?.Invoke(this, [emit]);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
             _logger.LogInformation(ex, "TikTok exclusive yt-dlp resolve failed (no Generic fallback)");
+        }
+        finally
+        {
             lock (_gate)
-            {
-                if (!hasCookies)
-                    _externalAttempted = false;
-            }
+                _externalFinished = true;
         }
     }
 
-    public Task CompleteAsync(CancellationToken ct)
+    public async Task CompleteAsync(CancellationToken ct)
     {
+        Task? pending;
+        lock (_gate)
+            pending = _resolveTask is { IsCompleted: false } ? _resolveTask : null;
+        if (pending is not null)
+        {
+            try { await pending.WaitAsync(ct); }
+            catch (OperationCanceledException) { }
+            catch (Exception) { }
+        }
+
         MediaDescriptor? d;
         string? winMethod = null;
         lock (_gate)
@@ -286,7 +331,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 _logger.LogWarning("TikTokMediaDetector Failed reason={Reason} (no Generic fallback)", _failureReason);
                 if (_externalAttempted)
                     _probeStats.Record(SiteIds.TikTok, ProbeMethods.YtDlp, false);
-                return Task.CompletedTask;
+                return;
             }
 
             _failed = false;
@@ -295,7 +340,6 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 _probeStats.Record(SiteIds.TikTok, winMethod!, true);
         }
         DescriptorsReady?.Invoke(this, [d]);
-        return Task.CompletedTask;
     }
 
     private MediaDescriptor? Build() => Build(out _);

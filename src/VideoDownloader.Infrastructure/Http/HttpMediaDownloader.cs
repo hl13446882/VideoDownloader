@@ -9,6 +9,7 @@ using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Detection.Sites.Bilibili;
+using VideoDownloader.Infrastructure.Detection.Sites.TikTok;
 using VideoDownloader.Infrastructure.Logging;
 using VideoDownloader.Infrastructure.Licensing;
 
@@ -185,10 +186,22 @@ public sealed class HttpMediaDownloader
 
             if (!softMedia)
             {
-                request.Headers.Range = new RangeHeaderValue(offset, null);
-                request.Headers.Remove("If-Range");
-                if (offset > 0)
-                    RequestMessageFactory.ApplyIfRange(request, job.ETag, job.LastModified);
+                // TikTok signed progressive CDNs 403 on `Range: bytes=0-`. Other sites keep Range.
+                var skipTikTokInitialRange = offset == 0 &&
+                    TikTokCdn.IsSignedProgressiveHost(job.Variant.SourceUrl);
+                if (skipTikTokInitialRange)
+                {
+                    request.Headers.Range = null;
+                    request.Headers.Remove("Range");
+                    request.Headers.Remove("If-Range");
+                }
+                else
+                {
+                    request.Headers.Range = new RangeHeaderValue(offset, null);
+                    request.Headers.Remove("If-Range");
+                    if (offset > 0)
+                        RequestMessageFactory.ApplyIfRange(request, job.ETag, job.LastModified);
+                }
             }
 
             request.Headers.AcceptEncoding.Clear();
@@ -407,19 +420,22 @@ public sealed class HttpMediaDownloader
         var received = written - offset;
         var softMedia = job.Variant.Tracks.Count > 0 &&
                         job.Variant.Tracks.All(t => t.Kind is MediaTrackKind.Image or MediaTrackKind.Audio);
+        var tiktokSigned = TikTokCdn.IsSignedProgressiveHost(job.Variant.SourceUrl);
         if ((response.Content.Headers.ContentLength is long bodyLength && received != bodyLength) ||
             (response.StatusCode == HttpStatusCode.PartialContent &&
              written != response.Content.Headers.ContentRange!.To!.Value + 1))
         {
             // Douyin/TikTok album CDNs often advertise inflated Content-Length then close early.
             // Accept a non-empty image/audio body rather than failing the whole slideshow.
-            if (!(softMedia && received >= 1024))
+            // TikTok signed progressive hosts also RST after a usable MP4 body.
+            if (!((softMedia && received >= 1024) ||
+                  (tiktokSigned && received >= 256L * 1024)))
                 throw new DownloadException(ErrorCodes.IncompleteDownload, "Response body length does not match its range.");
             _logger.LogWarning(
-                "Soft-media download length mismatch (got {Got}, declared {Declared}); accepting track kind={Kind}",
+                "Soft-media download length mismatch (got {Got}, declared {Declared}); accepting host={Host}",
                 received,
                 response.Content.Headers.ContentLength,
-                job.Variant.Tracks[0].Kind);
+                job.Variant.SourceUrl.Host);
             job.TotalBytes = written;
         }
         job.DownloadedBytes = file.Length;
@@ -431,9 +447,11 @@ public sealed class HttpMediaDownloader
         job.DownloadedBytes = actualLength;
         var softMedia = job.Variant.Tracks.Count > 0 &&
                         job.Variant.Tracks.All(t => t.Kind is MediaTrackKind.Image or MediaTrackKind.Audio);
+        var tiktokSigned = TikTokCdn.IsSignedProgressiveHost(job.Variant.SourceUrl);
         if (job.TotalBytes is long expected && actualLength != expected)
         {
-            if (softMedia && actualLength >= 1024)
+            if ((softMedia && actualLength >= 1024) ||
+                (tiktokSigned && actualLength >= 256L * 1024))
             {
                 job.TotalBytes = actualLength;
             }
@@ -444,7 +462,9 @@ public sealed class HttpMediaDownloader
             }
         }
 
-        var minBytes = job.Variant.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
+        var minBytes = tiktokSigned
+            ? 256L * 1024
+            : job.Variant.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
             ? MediaResourceSizeFilter.MinProgressiveVideoBytes
             : softMedia
                 ? 1024

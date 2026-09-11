@@ -4,6 +4,7 @@ using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Core.Sites;
 using VideoDownloader.Infrastructure.Diagnostics;
+using VideoDownloader.Infrastructure.Detection.Sites.TikTok;
 
 namespace VideoDownloader.Infrastructure.Detection;
 
@@ -361,7 +362,7 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
             SiteKind.YouTube => IdsEqual(ExtractYouTubeId(previous), ExtractYouTubeId(next), ordinalIgnoreCase: false),
             SiteKind.Bilibili => IdsEqual(ExtractBilibiliId(previous), ExtractBilibiliId(next), ordinalIgnoreCase: true),
             SiteKind.Douyin => SameDigitOrPage(previous, next),
-            SiteKind.TikTok => SameDigitOrPage(previous, next),
+            SiteKind.TikTok => TikTokCdn.IsSameWork(previous, next),
             _ => string.Equals(previous.AbsoluteUri, next.AbsoluteUri, StringComparison.OrdinalIgnoreCase)
         };
     }

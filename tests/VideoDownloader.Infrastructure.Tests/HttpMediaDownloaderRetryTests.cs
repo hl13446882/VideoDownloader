@@ -127,9 +127,11 @@ public class HttpMediaDownloaderRetryTests
     }
 
     // Minimal box fixture: these transport tests validate structure, not decoding.
-    private static byte[] ValidMp4()
+    private static byte[] ValidMp4() => ValidSizedMp4(600 * 1024);
+
+    private static byte[] ValidSizedMp4(int length)
     {
-        var data = new byte[600 * 1024];
+        var data = new byte[length];
         System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(data.AsSpan(0, 4), 12);
         "moov"u8.CopyTo(data.AsSpan(4));
         System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(data.AsSpan(12, 4), data.Length - 12);
@@ -397,6 +399,109 @@ public class HttpMediaDownloaderRetryTests
             Assert.True(calls >= 2);
             Assert.Equal(data, await File.ReadAllBytesAsync(job.TargetPath));
             Assert.Equal(data.Length, job.DownloadedBytes);
+        }
+        finally
+        {
+            if (File.Exists(job.TargetPath)) File.Delete(job.TargetPath);
+            if (File.Exists(job.TargetPath + ".part")) File.Delete(job.TargetPath + ".part");
+        }
+    }
+
+    [Fact]
+    public async Task TikTokSignedCdn_FirstGet_OmitsRangeHeader()
+    {
+        var data = ValidMp4();
+        var job = CreateJob();
+        job.Variant = MediaVariant.FromCombinedTrack(
+            "v1",
+            new Uri("https://v16-webapp-prime.tiktok.com/video/tos/alisg/x.mp4"),
+            RequestContext.CreateEmpty(),
+            container: "mp4");
+
+        RangeHeaderValue? seenRange = new(0, 1);
+        using var client = new HttpClient(new StubHandler(request =>
+        {
+            seenRange = request.Headers.Range;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(data)
+            };
+        }));
+
+        try
+        {
+            await CreateDownloader(client, retryCount: 0).DownloadDirectAsync(job, null, null, CancellationToken.None);
+            Assert.Null(seenRange);
+            Assert.Equal(data, await File.ReadAllBytesAsync(job.TargetPath));
+        }
+        finally
+        {
+            if (File.Exists(job.TargetPath)) File.Delete(job.TargetPath);
+            if (File.Exists(job.TargetPath + ".part")) File.Delete(job.TargetPath + ".part");
+        }
+    }
+
+    [Fact]
+    public async Task TikTokSignedCdn_AcceptsTruncatedBody_WhenAtLeast256KiB()
+    {
+        var prefix = ValidSizedMp4(300 * 1024);
+        var job = CreateJob();
+        job.Variant = MediaVariant.FromCombinedTrack(
+            "v1",
+            new Uri("https://v16-webapp-prime.tiktok.com/video/tos/alisg/x.mp4"),
+            RequestContext.CreateEmpty(),
+            container: "mp4");
+
+        using var client = new HttpClient(new StubHandler(_ =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(prefix)
+            };
+            response.Content.Headers.ContentLength = prefix.Length * 2;
+            return response;
+        }));
+
+        try
+        {
+            await CreateDownloader(client, retryCount: 0).DownloadDirectAsync(job, null, null, CancellationToken.None);
+            Assert.Equal(prefix, await File.ReadAllBytesAsync(job.TargetPath));
+            Assert.Equal(prefix.Length, job.DownloadedBytes);
+        }
+        finally
+        {
+            if (File.Exists(job.TargetPath)) File.Delete(job.TargetPath);
+            if (File.Exists(job.TargetPath + ".part")) File.Delete(job.TargetPath + ".part");
+        }
+    }
+
+    [Fact]
+    public async Task DouyinHostTruncatedBody_StillFails()
+    {
+        var data = ValidMp4();
+        var prefix = data.AsSpan(0, 300 * 1024).ToArray();
+        var job = CreateJob();
+        job.Variant = MediaVariant.FromCombinedTrack(
+            "v1",
+            new Uri("https://v3-dy-o.zjcdn.com/video/tos/cn/x.mp4"),
+            RequestContext.CreateEmpty(),
+            container: "mp4");
+
+        using var client = new HttpClient(new StubHandler(_ =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(prefix)
+            };
+            response.Content.Headers.ContentLength = data.Length;
+            return response;
+        }));
+
+        try
+        {
+            var ex = await Assert.ThrowsAsync<DownloadException>(() =>
+                CreateDownloader(client, retryCount: 0).DownloadDirectAsync(job, null, null, CancellationToken.None));
+            Assert.Equal(ErrorCodes.IncompleteDownload, ex.ErrorCode);
         }
         finally
         {

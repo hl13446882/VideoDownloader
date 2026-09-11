@@ -10,6 +10,7 @@ using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Detection;
 using VideoDownloader.Infrastructure.Detection.Sites.Bilibili;
 using VideoDownloader.Infrastructure.Detection.Sites.Douyin;
+using VideoDownloader.Infrastructure.Detection.Sites.TikTok;
 using VideoDownloader.Infrastructure.Diagnostics;
 using VideoDownloader.Infrastructure.Http;
 using VideoDownloader.Infrastructure.Licensing;
@@ -647,8 +648,20 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                         }
                     }
 
-                    // Prefer cookie retry once for WebView-sourced URLs — skip fragile signed CDNs
-                    // that already 403'd (web-prime); refreshing cookies rarely unlocks them.
+                    // Prefer cookie retry once for WebView-sourced URLs — skip fragile Douyin
+                    // signed CDNs that already 403'd (web-prime). TikTok webapp-prime still needs
+                    // the live jar; Range-less GET with cookies is the working path.
+                    if (!cookieRetried && TikTokCdn.IsSignedProgressiveHost(job.Variant.SourceUrl))
+                    {
+                        cookieRetried = true;
+                        job.Variant = job.Variant.WithRequestContext(refreshed);
+                        _logger.LogInformation(
+                            "Retrying TikTok signed CDN for job {JobId} with refreshed cookies version={Version}",
+                            job.Id,
+                            refreshed.Version);
+                        continue;
+                    }
+
                     if (browserObserved && !cookieRetried && !fragileSigned)
                     {
                         cookieRetried = true;
@@ -708,9 +721,11 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                     }
 
                     // Douyin has no yt-dlp renewer: reopen the detail page in WebView and re-detect.
+                    // Do not run this on TikTok — webapp-prime is also "fragile signed" but the
+                    // rediscoverer is Douyin-only and restarts the exclusive detector.
                     if (!browserRediscovered &&
                         _rediscoverer is not null &&
-                        (fragileSigned || IsDouyinRecoveryPage(pageUrl)))
+                        IsDouyinRecoveryPage(pageUrl))
                     {
                         browserRediscovered = true;
                         try
