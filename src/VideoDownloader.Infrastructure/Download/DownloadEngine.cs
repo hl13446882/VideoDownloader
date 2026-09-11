@@ -622,12 +622,13 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
 
                     var browserObserved = job.Variant.Tracks.Any(t => t.BrowserObserved);
                     var fragileSigned = MediaAddressRenewal.IsFragileSignedHost(job.Variant.SourceUrl);
+                    var tiktokFragile = TikTokCdn.IsFragilePlayHost(job.Variant.SourceUrl);
                     var refreshed = await _contextProvider.RefreshContextAsync(
                         pageUrl,
                         job.Variant.SourceUrl,
                         job.Variant.RequestContext,
                         cts.Token,
-                        forceCookies: browserObserved || !cookieRetried);
+                        forceCookies: browserObserved || !cookieRetried || tiktokFragile);
 
                     // Rejected address: try sibling formats / other hosts before retrying the same URL.
                     if (!alternatesTried && job.Variant.Alternatives.Count > 0)
@@ -649,9 +650,11 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                     }
 
                     // Prefer cookie retry once for WebView-sourced URLs — skip fragile Douyin
-                    // signed CDNs that already 403'd (web-prime). TikTok webapp-prime still needs
-                    // the live jar; Range-less GET with cookies is the working path.
-                    if (!cookieRetried && TikTokCdn.IsSignedProgressiveHost(job.Variant.SourceUrl))
+                    // signed CDNs that already 403'd (web-prime). TikTok webapp-prime signatures
+                    // are bound to the browser play session: retrying the same URL never helps.
+                    if (!cookieRetried &&
+                        TikTokCdn.IsSignedProgressiveHost(job.Variant.SourceUrl) &&
+                        !tiktokFragile)
                     {
                         cookieRetried = true;
                         job.Variant = job.Variant.WithRequestContext(refreshed);
@@ -660,6 +663,14 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                             job.Id,
                             refreshed.Version);
                         continue;
+                    }
+
+                    if (!cookieRetried && tiktokFragile)
+                    {
+                        cookieRetried = true;
+                        _logger.LogInformation(
+                            "Skipping same-URL cookie retry for TikTok webapp-prime job {JobId}; renewing address",
+                            job.Id);
                     }
 
                     if (browserObserved && !cookieRetried && !fragileSigned)
@@ -842,7 +853,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         job.Variant = EnsureDownloadContext(job);
         RejectMseOrdinaryDownload(job.Variant);
 
-        if (job.Variant.Tracks.Any(t => t.BrowserObserved) &&
+        if ((job.Variant.Tracks.Any(t => t.BrowserObserved) ||
+             TikTokCdn.IsSignedProgressiveHost(job.Variant.SourceUrl)) &&
             job.Variant.RequestContext.Cookies.Count == 0)
         {
             var pageUrl = ResolvePageUrl(job);
@@ -1273,8 +1285,9 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                 // Browser-observed downloads may carry cookies from a one-shot jar read
                 // even when CaptureCookies is off for general browsing.
                 var browserObserved = variant.Tracks.Any(t => t.BrowserObserved);
+                var tiktokSigned = TikTokCdn.IsSignedProgressiveHost(variant.SourceUrl);
                 if (cookies.Count == 0 && fresh.Cookies.Count > 0 &&
-                    (_options.Browser.CaptureCookies || browserObserved))
+                    (_options.Browser.CaptureCookies || browserObserved || tiktokSigned))
                 {
                     cookies = fresh.Cookies;
                     changed = true;

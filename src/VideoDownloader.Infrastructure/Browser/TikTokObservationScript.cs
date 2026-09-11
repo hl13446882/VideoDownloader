@@ -73,6 +73,14 @@ internal static class TikTokObservationScript
           };
           const findItemRecordById=expectedId=>{
             if(!expectedId) return null;
+            try{
+              const module=window.SIGI_STATE?.ItemModule?.[expectedId];
+              if(module && (module.video||module.playAddr||module.play_addr)) return module;
+            }catch{}
+            try{
+              const detail=window.__UNIVERSAL_DATA_FOR_REHYDRATION__?.__DEFAULT_SCOPE__?.['webapp.video-detail']?.itemInfo?.itemStruct;
+              if(detail && String(detail.id||detail.itemId||'')===expectedId) return detail;
+            }catch{}
             const roots=[];
             const push=v=>{if(v&&typeof v==='object')roots.push(v);};
             try{ const el=document.getElementById('SIGI_STATE')||document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__'); if(el?.textContent) push(JSON.parse(el.textContent)); }catch{}

@@ -106,6 +106,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
 
     public Task ProcessNetworkAsync(NormalizedNetworkEvent e, CancellationToken ct)
     {
+        MediaDescriptor? emit = null;
+        string? winMethod = null;
         lock (_gate)
         {
             // Do not drop late CDN after a failed Complete — late-retry must still accept media.
@@ -151,6 +153,16 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 _failed = false;
                 _failureReason = null;
             }
+
+            if (kind != MediaTrackKind.Audio && TikTokCdn.IsDurablePlayHost(e.Url))
+                emit = Build(out winMethod);
+        }
+
+        if (emit is not null)
+        {
+            if (!string.IsNullOrWhiteSpace(winMethod))
+                _probeStats.Record(SiteIds.TikTok, winMethod, true);
+            DescriptorsReady?.Invoke(this, [emit]);
         }
         return Task.CompletedTask;
     }
@@ -160,6 +172,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
     {
         string? contentId;
         RequestContext enriched;
+        MediaDescriptor? early = null;
+        string? winMethod = null;
         lock (_gate)
         {
             if (_pageUrl is null) BeginSession(pageUrl, _sessionId == Guid.Empty ? Guid.NewGuid() : _sessionId);
@@ -191,6 +205,15 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 _caption = pageTitle.Trim();
             ApplyJson(pageScriptJson);
             enriched = _context;
+            if (HasDurableVideoUnlocked())
+                early = Build(out winMethod);
+        }
+
+        if (early is not null)
+        {
+            if (!string.IsNullOrWhiteSpace(winMethod))
+                _probeStats.Record(SiteIds.TikTok, winMethod, true);
+            DescriptorsReady?.Invoke(this, [early]);
         }
 
         if (string.IsNullOrWhiteSpace(contentId))
@@ -200,6 +223,9 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         lock (_gate)
         {
             if (!_ytdlp.IsAvailable)
+                return;
+            // Durable CDN from the live player beats a later webapp-prime from yt-dlp.
+            if (HasDurableVideoUnlocked())
                 return;
             // One yt-dlp pass per work. Observation tracks are allowed alongside, but do not relaunch.
             if (_formats.Count > 0)
@@ -363,7 +389,10 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 .Where(v => v.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined))
                 .OrderByDescending(v => ScoreVariant(v))
                 .FirstOrDefault();
-            if (best is not null)
+            var network = Best(_videos);
+            if (best is not null &&
+                (network is null || !TikTokCdn.IsDurablePlayHost(network.SourceUrl) ||
+                 TikTokCdn.PlayHostScore(best.SourceUrl) >= TikTokCdn.PlayHostScore(network.SourceUrl)))
             {
                 winningMethod = ProbeMethods.YtDlp;
                 return new MediaDescriptor(SiteIds.TikTok, _pageUrl, _contentId, MediaContentType.Video,
@@ -372,7 +401,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                     [], _context, 0.95, _caption)
                 {
                     SessionId = _sessionId,
-                    Formats = _formats.ToArray()
+                    Formats = MergeFormats()
                 };
             }
         }
@@ -387,21 +416,51 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 : video.BrowserObserved
                     ? ProbeMethods.VideoElement
                     : ProbeMethods.NetworkMedia;
+        var formats = MergeFormats();
         return new MediaDescriptor(SiteIds.TikTok, _pageUrl, _contentId, MediaContentType.Video,
             video, audio, [], _context, video.BrowserObserved ? 0.95 : 0.75, _caption)
-        { SessionId = _sessionId };
+        {
+            SessionId = _sessionId,
+            Formats = formats
+        };
+    }
+
+    private bool HasDurableVideoUnlocked() =>
+        _videos.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined &&
+                         TikTokCdn.IsDurablePlayHost(t.SourceUrl));
+
+    private IReadOnlyList<MediaVariant> MergeFormats()
+    {
+        var list = new List<MediaVariant>(_formats);
+        foreach (var track in _videos.Where(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined))
+        {
+            if (list.Any(v => string.Equals(
+                    v.SourceUrl.GetLeftPart(UriPartial.Path),
+                    track.SourceUrl.GetLeftPart(UriPartial.Path),
+                    StringComparison.OrdinalIgnoreCase)))
+                continue;
+            list.Add(MediaVariant.FromTracks(
+                "obs-" + list.Count,
+                null,
+                null,
+                track.Bandwidth,
+                track.Container,
+                [track]) with
+            {
+                ContentIdentity = track.ContentIdentity ?? (_contentId is null ? null : "id:" + _contentId),
+                RecoveryPageUrl = _pageUrl
+            });
+        }
+
+        return list
+            .OrderByDescending(ScoreVariant)
+            .ToArray();
     }
 
     private static int ScoreVariant(MediaVariant v)
     {
-        var host = v.SourceUrl.Host;
         var score = (v.Height ?? 0) * 10;
-        if (host.Contains("webapp-prime", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("web-prime", StringComparison.OrdinalIgnoreCase))
-            score -= 900;
-        if (host.Contains("tiktokcdn", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("byteoversea", StringComparison.OrdinalIgnoreCase))
-            score += 500;
+        score += TikTokCdn.PlayHostScore(v.SourceUrl);
         score += (int)Math.Min(v.TotalContentLength ?? 0, int.MaxValue) / (1024 * 1024);
         return score;
     }
@@ -507,8 +566,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         if (list.Count == 0) return null;
         // Douyin-like: when a durable CDN exists, never default to fragile webapp-prime.
         var durable = list
-            .Where(t => !t.SourceUrl.Host.Contains("webapp-prime", StringComparison.OrdinalIgnoreCase) &&
-                        !t.SourceUrl.Host.Contains("web-prime", StringComparison.OrdinalIgnoreCase))
+            .Where(t => TikTokCdn.IsDurablePlayHost(t.SourceUrl))
             .ToList();
         if (durable.Count > 0)
             list = durable;
@@ -521,14 +579,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
     private static int ScoreTrack(MediaTrack t)
     {
         var score = 0;
-        var host = t.SourceUrl.Host;
-        if (host.Contains("tiktokcdn", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("byteoversea", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("muscdn", StringComparison.OrdinalIgnoreCase))
-            score += 1000;
-        if (host.Contains("webapp-prime", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("web-prime", StringComparison.OrdinalIgnoreCase))
-            score -= 900;
+        score += TikTokCdn.PlayHostScore(t.SourceUrl) == 500 ? 1000 :
+            TikTokCdn.IsFragilePlayHost(t.SourceUrl) ? -900 : 0;
         if (t.BrowserObserved) score += 500;
         if (t.Kind == MediaTrackKind.Combined) score += 800;
         if (t.ContentLength is >= MediaResourceSizeFilter.MinProgressiveVideoBytes) score += 200;

@@ -216,6 +216,10 @@ internal static class MediaAddressRenewal
     {
         var host = variant.SourceUrl.Host;
         if (host.Contains("zjcdn", StringComparison.OrdinalIgnoreCase)) return 300;
+        if (host.Contains("tiktokcdn", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("byteoversea", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("muscdn", StringComparison.OrdinalIgnoreCase))
+            return 250;
         if (host.Contains("bytecdn", StringComparison.OrdinalIgnoreCase) ||
             host.Contains("byteicdn", StringComparison.OrdinalIgnoreCase)) return 200;
         if (host.Contains("web-prime", StringComparison.OrdinalIgnoreCase) ||

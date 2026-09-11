@@ -564,7 +564,8 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
         variants = variants
             .GroupBy(v => string.Join("|", v.Tracks.Select(t => t.SourceUrl.AbsoluteUri)), StringComparer.OrdinalIgnoreCase)
             .Select(g => g.First())
-            .OrderByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
+            .OrderByDescending(v => TikTokCdn.PlayHostScore(v.SourceUrl))
+            .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
             .ThenByDescending(v => v.Height ?? 0)
             .ToList();
 
@@ -654,7 +655,8 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
             query = query.Where(f => StringPropertyEquals(f, "ext", "mp4"));
 
         return query
-            .OrderByDescending(f => JsonNumber.TryInt32Prop(f, "height", out var hv) ? hv : 0)
+            .OrderByDescending(f => TikTokCdn.PlayHostScore(GetFormatUrl(f)))
+            .ThenByDescending(f => JsonNumber.TryInt32Prop(f, "height", out var hv) ? hv : 0)
             .ThenByDescending(f => JsonNumber.TryDoubleProp(f, "tbr", out var tb) ? tb : 0)
             .FirstOrDefault();
     }
@@ -670,7 +672,8 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
                         ac.ValueKind == JsonValueKind.String &&
                         ac.GetString() is not "none" and not null)
             .Where(f => TryGetSize(f) is null or >= MediaResourceSizeFilter.MinProgressiveVideoBytes)
-            .OrderByDescending(f => JsonNumber.TryInt32Prop(f, "height", out var hv) ? hv : 0)
+            .OrderByDescending(f => TikTokCdn.PlayHostScore(GetFormatUrl(f)))
+            .ThenByDescending(f => JsonNumber.TryInt32Prop(f, "height", out var hv) ? hv : 0)
             .ThenByDescending(f => TryGetSize(f) ?? 0)
             .ThenByDescending(f => JsonNumber.TryDoubleProp(f, "tbr", out var tb) ? tb : 0)
             .FirstOrDefault();
@@ -702,13 +705,15 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
                         HasCodec(f, "acodec", allowNone: true))
             .GroupBy(f => JsonNumber.TryInt32Prop(f, "height", out var height) ? height : 0)
             .Select(group => group
-                .OrderByDescending(f => HasUsableFormatUrl(f, directOnly: true))
+                .OrderByDescending(f => TikTokCdn.PlayHostScore(GetFormatUrl(f)))
+                .ThenByDescending(f => HasUsableFormatUrl(f, directOnly: true))
                 .ThenByDescending(f => StringPropertyEquals(f, "ext", "mp4"))
                 .ThenByDescending(f => TryGetSize(f) ?? 0)
                 .ThenByDescending(f => TryGetBitrate(f) ?? 0)
                 .First())
             .Where(f => TryGetSize(f) is null or >= MediaResourceSizeFilter.MinProgressiveVideoBytes)
-            .OrderByDescending(f => JsonNumber.TryInt32Prop(f, "height", out var height) ? height : 0)
+            .OrderByDescending(f => TikTokCdn.PlayHostScore(GetFormatUrl(f)))
+            .ThenByDescending(f => JsonNumber.TryInt32Prop(f, "height", out var height) ? height : 0)
             .ThenByDescending(f => TryGetSize(f) ?? 0)
             .ThenByDescending(f => TryGetBitrate(f) ?? 0)
             .Take(12);

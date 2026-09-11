@@ -1,5 +1,6 @@
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Infrastructure.Detection.Sites.TikTok;
 
 namespace VideoDownloader.Infrastructure.Browser;
 
@@ -24,7 +25,12 @@ public sealed class RequestContextProvider : IRequestContextProvider
         bool forceCookies = false)
     {
         var host = _locator.Active;
-        if (host is null || host.CurrentPageUrl != pageUrl)
+        if (host is null)
+            return previousContext ?? RequestContext.CreateEmpty();
+        // TikTok For You stays on "/" while 403 recovery rewrites the page to /@i/video/{id}.
+        // Other sites still require an exact tab match.
+        if (host.CurrentPageUrl != pageUrl &&
+            (pageUrl is null || !TikTokCdn.IsLiveCookieTab(host.CurrentPageUrl, pageUrl)))
             return previousContext ?? RequestContext.CreateEmpty();
 
         await host.RefreshContextSnapshotAsync(ct, forceCookies);
