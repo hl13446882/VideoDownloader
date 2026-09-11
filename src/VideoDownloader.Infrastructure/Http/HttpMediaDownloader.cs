@@ -56,6 +56,7 @@ public sealed class HttpMediaDownloader
     {
         var maxAttempts = Math.Max(1, _options.Download.RetryCount + 1);
         Exception? lastError = null;
+        var lastPartBytes = PartLength(job);
 
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
@@ -92,20 +93,49 @@ public sealed class HttpMediaDownloader
             {
                 ResetPart(job);
                 lastError = ex;
+                lastPartBytes = 0;
                 _logger.LogWarning(
                     "Range resume reset for {JobId}, attempt {Attempt}: {Reason}",
                     job.Id,
                     attempt,
                     SanitizedLogger.SanitizeMessage(ex.Message));
             }
-            catch (HttpRequestException ex) when (attempt < maxAttempts)
-            {
-                lastError = ex;
-                await DelayRetryAsync(attempt, ct);
-            }
             catch (IOException ex) when (IsDiskFull(ex))
             {
                 throw new DownloadException(ErrorCodes.DiskFull, "Disk full.");
+            }
+            catch (IOException ex) when (
+                IsTransientTransport(ex) &&
+                BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl))
+            {
+                lastError = ex;
+                if (!TryContinueBilibiliTransport(job, ex, ref lastPartBytes, ref attempt, maxAttempts))
+                    throw;
+                await DelayRetryAsync(Math.Max(1, attempt), ct);
+            }
+            catch (DownloadException ex) when (
+                ex.ErrorCode == ErrorCodes.IncompleteDownload &&
+                BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl))
+            {
+                lastError = ex;
+                if (!TryContinueBilibiliTransport(job, ex, ref lastPartBytes, ref attempt, maxAttempts))
+                    throw;
+                await DelayRetryAsync(Math.Max(1, attempt), ct);
+            }
+            catch (HttpRequestException ex) when (
+                attempt < maxAttempts ||
+                BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl))
+            {
+                lastError = ex;
+                if (BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl))
+                {
+                    if (!TryContinueBilibiliTransport(job, ex, ref lastPartBytes, ref attempt, maxAttempts))
+                        throw;
+                    await DelayRetryAsync(Math.Max(1, attempt), ct);
+                    continue;
+                }
+
+                await DelayRetryAsync(attempt, ct);
             }
         }
 
@@ -536,6 +566,66 @@ public sealed class HttpMediaDownloader
     {
         var total = response.Content.Headers.ContentRange?.Length;
         return total.HasValue && localLength == total.Value;
+    }
+
+    private static long PartLength(DownloadJob job)
+    {
+        var part = job.TargetPath + ".part";
+        if (File.Exists(part))
+            return new FileInfo(part).Length;
+        return 0;
+    }
+
+    private bool TryContinueBilibiliTransport(
+        DownloadJob job,
+        Exception ex,
+        ref long lastPartBytes,
+        ref int attempt,
+        int maxAttempts)
+    {
+        var now = PartLength(job);
+        var progressed = now > lastPartBytes;
+        if (progressed)
+        {
+            lastPartBytes = now;
+            attempt = 0;
+        }
+        else if (attempt >= maxAttempts)
+            return false;
+
+        _logger.LogWarning(
+            "Bilibili transport reset for {JobId} after {Bytes} bytes (progressed={Progressed}); Range-retrying. {Reason}",
+            job.Id,
+            now,
+            progressed,
+            SanitizedLogger.SanitizeMessage(ex.Message));
+        return true;
+    }
+
+    private static bool IsTransientTransport(Exception ex)
+    {
+        for (Exception? current = ex; current is not null; current = current.InnerException)
+        {
+            if (current is SocketException socketError && socketError.SocketErrorCode is
+                SocketError.ConnectionReset or
+                SocketError.ConnectionAborted or
+                SocketError.TimedOut or
+                SocketError.Shutdown or
+                SocketError.NetworkReset)
+                return true;
+
+            if (string.Equals(current.GetType().Name, "HttpIOException", StringComparison.Ordinal))
+                return true;
+
+            var message = current.Message;
+            if (message.Contains("forcibly closed", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("强迫关闭", StringComparison.Ordinal) ||
+                message.Contains("prematurely", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("transport connection", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
     }
 
     private static bool IsDiskFull(IOException ex) =>

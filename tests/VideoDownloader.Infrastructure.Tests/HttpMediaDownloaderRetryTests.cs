@@ -360,6 +360,52 @@ public class HttpMediaDownloaderRetryTests
     }
 
     [Fact]
+    public async Task BilibiliConnectionReset_ResumesFromPart_WithoutRestart()
+    {
+        var data = ValidMp4();
+        var resetAfter = 8192;
+        var job = CreateJob();
+        job.Variant = MediaVariant.FromCombinedTrack(
+            "v1",
+            new Uri("https://upos-sz-mirrorcosov.bilivideo.com/upgcxcode/a/b/41747222317/41747222317-1-30080.m4s?os=cosovbv"),
+            RequestContext.CreateEmpty(),
+            container: "mp4");
+
+        var calls = 0;
+        using var client = new HttpClient(new StubHandler(request =>
+        {
+            calls++;
+            var start = (int)(request.Headers.Range?.Ranges.Single().From ?? 0);
+            if (calls == 1)
+            {
+                Assert.Equal(0, start);
+                var response = new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StreamContent(new ConnectionResetStream(data, resetAfter))
+                };
+                response.Content.Headers.ContentLength = data.Length;
+                return response;
+            }
+
+            Assert.Equal(resetAfter, start);
+            return Partial(data, start, data.Length - start);
+        }));
+
+        try
+        {
+            await CreateDownloader(client, retryCount: 0).DownloadDirectAsync(job, null, null, CancellationToken.None);
+            Assert.True(calls >= 2);
+            Assert.Equal(data, await File.ReadAllBytesAsync(job.TargetPath));
+            Assert.Equal(data.Length, job.DownloadedBytes);
+        }
+        finally
+        {
+            if (File.Exists(job.TargetPath)) File.Delete(job.TargetPath);
+            if (File.Exists(job.TargetPath + ".part")) File.Delete(job.TargetPath + ".part");
+        }
+    }
+
+    [Fact]
     public async Task StaleProgressCannotChangeAuthoritativeCompletionCount()
     {
         var job = CreateJob();
@@ -424,6 +470,47 @@ public class HttpMediaDownloaderRetryTests
             HttpRequestMessage request,
             CancellationToken cancellationToken) =>
             Task.FromResult(_factory(request));
+    }
+
+    private sealed class ConnectionResetStream : MemoryStream
+    {
+        private readonly int _resetAfter;
+        private int _consumed;
+
+        public ConnectionResetStream(byte[] data, int resetAfter) : base(data, writable: false)
+        {
+            _resetAfter = resetAfter;
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (_consumed >= _resetAfter)
+            {
+                throw new IOException(
+                    "Unable to read data from the transport connection: An existing connection was forcibly closed by the remote host.",
+                    new System.Net.Sockets.SocketException(10054));
+            }
+
+            var capped = Math.Min(count, _resetAfter - _consumed);
+            var n = base.Read(buffer, offset, capped);
+            _consumed += n;
+            return n;
+        }
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (_consumed >= _resetAfter)
+            {
+                throw new IOException(
+                    "Unable to read data from the transport connection: An existing connection was forcibly closed by the remote host.",
+                    new System.Net.Sockets.SocketException(10054));
+            }
+
+            var capped = Math.Min(buffer.Length, _resetAfter - _consumed);
+            var n = await base.ReadAsync(buffer[..capped], cancellationToken);
+            _consumed += n;
+            return n;
+        }
     }
 
 }

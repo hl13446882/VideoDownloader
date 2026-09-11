@@ -19,10 +19,16 @@ public class BilibiliCdnPreferenceTests
         var bos = new Uri("https://upos-sz-mirrorbos.bilivideo.com/upgcxcode/17/23/41747222317/41747222317-1-30080.m4s?os=bos");
         var cos = new Uri("https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/17/23/41747222317/41747222317-1-30080.m4s?os=cos");
 
+        var cosov = new Uri("https://upos-sz-mirrorcosov.bilivideo.com/upgcxcode/17/23/41747222317/41747222317-1-30080.m4s?os=cosovbv");
+
         Assert.True(BilibiliCdnPreference.IsFragile(akam));
+        Assert.True(BilibiliCdnPreference.IsFragile(cosov));
         Assert.False(BilibiliCdnPreference.IsFragile(bos));
+        Assert.False(BilibiliCdnPreference.IsFragile(cos));
         Assert.True(BilibiliCdnPreference.Score(bos) > BilibiliCdnPreference.Score(akam));
         Assert.True(BilibiliCdnPreference.Score(bos) > BilibiliCdnPreference.Score(cos));
+        Assert.True(BilibiliCdnPreference.Score(cos) > BilibiliCdnPreference.Score(cosov));
+        Assert.True(BilibiliCdnPreference.Score(bos) > BilibiliCdnPreference.Score(cosov));
         Assert.Equal("41747222317-1-30080.m4s", BilibiliCdnPreference.ObjectKey(akam));
         Assert.Equal(BilibiliCdnPreference.ObjectKey(akam), BilibiliCdnPreference.ObjectKey(bos));
         Assert.True(BilibiliCdnPreference.CanKeepAlignedResume(akam, 323_944_781, 323_940_056));
@@ -90,6 +96,34 @@ public class BilibiliCdnPreferenceTests
         Assert.Equal(SiteIds.Bilibili, last!.Site);
         Assert.Contains("bilivideo.com", last.Video!.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("akamai", last.Video.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Detector_Picks_Domestic_Upos_Over_Overseas_Cos()
+    {
+        var detector = new BilibiliMediaDetector(
+            NullLogger<BilibiliMediaDetector>.Instance,
+            new BilibiliYtDlpExtractor(
+                Options.Create(new AppOptions { ExternalResolvers = new() { Enabled = false } }),
+                NullLogger<BilibiliYtDlpExtractor>.Instance),
+            Substitute.For<IProbeMethodStats>());
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+
+        var page = new Uri("https://www.bilibili.com/video/BV1xx411c7mD");
+        detector.BeginSession(page, Guid.NewGuid());
+
+        await detector.ProcessNetworkAsync(
+            Evt(page, "https://upos-sz-mirrorcosov.bilivideo.com/upgcxcode/a/b/41747222317/41747222317-1-30080.m4s?os=cosovbv", 799_648_171, observed: true),
+            CancellationToken.None);
+        await detector.ProcessNetworkAsync(
+            Evt(page, "https://upos-sz-mirrorbos.bilivideo.com/upgcxcode/a/b/41747222317/41747222317-1-30080.m4s?os=bos", 799_648_171, observed: false),
+            CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+
+        Assert.NotNull(last);
+        Assert.Contains("mirrorbos", last!.Video!.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("cosov", last.Video.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

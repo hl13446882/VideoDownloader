@@ -4,7 +4,8 @@ namespace VideoDownloader.Infrastructure.Detection.Sites.Bilibili;
 
 /// <summary>
 /// Bilibili-only CDN ranking. Domestic upos/bilivideo hosts are preferred over Akamai
-/// (<c>os=akam</c> / <c>akamaized.net</c>), which frequently reset large m4s transfers.
+/// (<c>os=akam</c> / <c>akamaized.net</c>) and overseas COS/HW (<c>mirrorcosov</c> /
+/// <c>os=cosovbv</c>), which frequently reset large m4s transfers.
 /// Not used by other exclusive detectors.
 /// </summary>
 internal static class BilibiliCdnPreference
@@ -13,7 +14,8 @@ internal static class BilibiliCdnPreference
     {
         var host = url.Host;
         if (host.Contains("akamai", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("mirrorakam", StringComparison.OrdinalIgnoreCase))
+            host.Contains("mirrorakam", StringComparison.OrdinalIgnoreCase) ||
+            IsOverseasMirror(url))
             return true;
         return HasQueryToken(url, "os=akam");
     }
@@ -28,6 +30,7 @@ internal static class BilibiliCdnPreference
         {
             if (host.Contains("mirrorbos", StringComparison.OrdinalIgnoreCase) || HasQueryToken(url, "os=bos"))
                 return 90;
+            // Check domestic COS after overseas (mirrorcosov contains "mirrorcos").
             if (host.Contains("mirrorcos", StringComparison.OrdinalIgnoreCase) || HasQueryToken(url, "os=cos"))
                 return 85;
             if (host.Contains("mirrorhw", StringComparison.OrdinalIgnoreCase) || HasQueryToken(url, "os=hw"))
@@ -107,6 +110,62 @@ internal static class BilibiliCdnPreference
         return true;
     }
 
-    private static bool HasQueryToken(Uri url, string token) =>
-        url.Query.Contains(token, StringComparison.OrdinalIgnoreCase);
+    /// <summary>
+    /// Overseas COS/HW mirrors (<c>cosov</c> / <c>os=cosovbv</c>) share the "cos" substring
+    /// with domestic COS and must not inherit that score.
+    /// </summary>
+    private static bool IsOverseasMirror(Uri url)
+    {
+        var host = url.Host;
+        if (host.Contains("cosov", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("hwov", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("aliov", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var os = GetQueryValue(url, "os");
+        return os is not null && os.Contains("ov", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool HasQueryToken(Uri url, string token)
+    {
+        var query = url.Query;
+        if (query.Length <= 1)
+            return false;
+
+        var rest = query.AsSpan(1);
+        while (rest.Length > 0)
+        {
+            var amp = rest.IndexOf('&');
+            var part = amp < 0 ? rest : rest[..amp];
+            if (part.Equals(token, StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (amp < 0)
+                break;
+            rest = rest[(amp + 1)..];
+        }
+
+        return false;
+    }
+
+    private static string? GetQueryValue(Uri url, string key)
+    {
+        var query = url.Query;
+        if (query.Length <= 1)
+            return null;
+
+        var rest = query.AsSpan(1);
+        while (rest.Length > 0)
+        {
+            var amp = rest.IndexOf('&');
+            var part = amp < 0 ? rest : rest[..amp];
+            var eq = part.IndexOf('=');
+            if (eq > 0 && part[..eq].Equals(key, StringComparison.OrdinalIgnoreCase))
+                return part[(eq + 1)..].ToString();
+            if (amp < 0)
+                break;
+            rest = rest[(amp + 1)..];
+        }
+
+        return null;
+    }
 }
