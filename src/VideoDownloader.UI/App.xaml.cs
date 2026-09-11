@@ -14,6 +14,7 @@ namespace VideoDownloader.UI;
 public partial class App : Application
 {
     private ServiceProvider? _services;
+    private Mutex? _instanceMutex;
 
     static App()
     {
@@ -63,6 +64,18 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        _instanceMutex = new Mutex(true, @"Local\VideoDownloader.SingleInstance", out var createdNew);
+        if (!createdNew)
+        {
+            MessageBox.Show(
+                "客户端已在运行。请关闭已打开的窗口后再试，不要重复启动（会抢占同一份续传文件）。",
+                "Video Downloader",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            Shutdown(0);
+            return;
+        }
+
         try
         {
             _services = AppServiceComposition.Build();
@@ -106,6 +119,9 @@ public partial class App : Application
             asyncDisposable.DisposeAsync().AsTask().GetAwaiter().GetResult();
         else
             _services?.Dispose();
+
+        try { _instanceMutex?.ReleaseMutex(); } catch (ApplicationException) { }
+        _instanceMutex?.Dispose();
 
         base.OnExit(e);
     }

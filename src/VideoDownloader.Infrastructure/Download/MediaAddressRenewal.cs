@@ -3,6 +3,7 @@ using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Infrastructure.Detection;
+using VideoDownloader.Infrastructure.Detection.Sites.Bilibili;
 
 namespace VideoDownloader.Infrastructure.Download;
 
@@ -33,14 +34,15 @@ internal static class MediaAddressRenewal
             try { videos = await resolver.ResolveAsync(page, context, timeout.Token); }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex) { errors.Add("resolve:" + ex.GetType().Name); continue; }
-            var matches = videos.Where(v => !v.IsDrmProtected &&
-                    (previous.ContentIdentity is not null && v.SiteContentId is not null
-                        ? previous.ContentIdentity == "id:" + v.SiteContentId : v.PageUrl == page))
+            var matches = videos.Where(v => !v.IsDrmProtected && SameDetectedContent(previous, v, page))
                 .SelectMany(v => v.Variants)
-                .Where(v => Compatible(previous, v) &&
+                .Where(v => (Compatible(previous, v) ||
+                             BilibiliCdnPreference.SameDashObjects(previous, v) ||
+                             SameYoutubePlayback(previous, v)) &&
                     !IsKnownUndersizedVideo(v) &&
                     (validate is not null || !v.Tracks.Select(t => t.SourceUrl).SequenceEqual(previous.Tracks.Select(t => t.SourceUrl))))
-                .OrderByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
+                .OrderByDescending(v => BilibiliCdnPreference.SameDashObjects(previous, v) || SameYoutubePlayback(previous, v) ? 1 : 0)
+                .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
                 .ThenByDescending(DurableHostScore)
                 .Take(8);
             foreach (var match in matches)
@@ -123,6 +125,81 @@ internal static class MediaAddressRenewal
         // Douyin format siblings (often height=null) remain usable after a rejected CDN.
         (a.Height is null || b.Height is null || a.Height == b.Height) &&
         a.Tracks.Select(t => t.Kind).Order().SequenceEqual(b.Tracks.Select(t => t.Kind).Order());
+
+    /// <summary>
+    /// yt-dlp Bilibili id is often the numeric aid while the job stored BV; YouTube ids also
+    /// appear in the watch URL. Exact <c>id:</c> equality is too strict for 403 URL renew.
+    /// </summary>
+    internal static bool SameDetectedContent(MediaVariant previous, DetectedVideo video, Uri page)
+    {
+        var identity = previous.ContentIdentity;
+        if (identity?.StartsWith("id:", StringComparison.Ordinal) == true)
+            identity = identity[3..];
+
+        if (!string.IsNullOrWhiteSpace(identity) &&
+            !string.IsNullOrWhiteSpace(video.SiteContentId) &&
+            string.Equals(identity, video.SiteContentId, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (!string.IsNullOrWhiteSpace(identity) &&
+            (ContainsToken(page, identity) || ContainsToken(video.PageUrl, identity)))
+            return true;
+
+        if (!string.IsNullOrWhiteSpace(video.SiteContentId) &&
+            (ContainsToken(page, video.SiteContentId) || ContainsToken(previous.RecoveryPageUrl, video.SiteContentId)))
+            return true;
+
+        return previous.RecoveryPageUrl is not null &&
+               string.Equals(video.PageUrl.AbsolutePath, previous.RecoveryPageUrl.AbsolutePath, StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static bool SameYoutubePlayback(MediaVariant previous, MediaVariant next)
+    {
+        if (!previous.Tracks.All(t => IsYouTubePlayback(t.SourceUrl)) ||
+            !next.Tracks.All(t => IsYouTubePlayback(t.SourceUrl)))
+            return false;
+
+        var left = previous.Tracks
+            .Select(t => (t.Kind, Id: QueryValue(t.SourceUrl, "id"), Itag: QueryValue(t.SourceUrl, "itag")))
+            .OrderBy(t => t.Kind)
+            .ToArray();
+        var right = next.Tracks
+            .Select(t => (t.Kind, Id: QueryValue(t.SourceUrl, "id"), Itag: QueryValue(t.SourceUrl, "itag")))
+            .OrderBy(t => t.Kind)
+            .ToArray();
+        if (left.Length == 0 || left.Length != right.Length)
+            return false;
+        for (var i = 0; i < left.Length; i++)
+        {
+            if (left[i].Kind != right[i].Kind ||
+                !string.Equals(left[i].Id, right[i].Id, StringComparison.Ordinal) ||
+                !string.Equals(left[i].Itag, right[i].Itag, StringComparison.Ordinal))
+                return false;
+        }
+
+        return true;
+    }
+
+    internal static bool IsYouTubePlayback(Uri url) =>
+        url.Host.Contains("googlevideo.com", StringComparison.OrdinalIgnoreCase);
+
+    private static bool ContainsToken(Uri? url, string token) =>
+        url is not null && url.OriginalString.Contains(token, StringComparison.OrdinalIgnoreCase);
+
+    private static string? QueryValue(Uri url, string key)
+    {
+        foreach (var part in url.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var eq = part.IndexOf('=');
+            if (eq <= 0)
+                continue;
+            if (!part.AsSpan(0, eq).Equals(key, StringComparison.OrdinalIgnoreCase))
+                continue;
+            return Uri.UnescapeDataString(part[(eq + 1)..]);
+        }
+
+        return null;
+    }
 
     internal static bool SameContent(MediaVariant a, MediaVariant b)
     {

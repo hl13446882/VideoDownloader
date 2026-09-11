@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NSubstitute;
 using VideoDownloader.Core.Contracts;
+using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Detection.Sites.Bilibili;
@@ -158,7 +159,56 @@ public class BilibiliCdnPreferenceTests
             UpdatedAt = DateTimeOffset.UtcNow
         };
 
-        Assert.True(DownloadEngine.IsStaleForAutoRecover(job));
+        Assert.False(DownloadEngine.IsStaleForAutoRecover(job));
+    }
+
+    [Fact]
+    public void SameDetectedContent_Matches_BilibiliBvJob_ToYtDlpAid()
+    {
+        var page = new Uri("https://www.bilibili.com/video/BV1toYN6LETy/?spm_id_from=333.1007");
+        var previous = MediaVariant.FromCombinedTrack(
+            "v1",
+            new Uri("https://upos-hz-mirrorakam.akamaized.net/upgcxcode/17/23/41747222317/41747222317-1-30080.m4s"),
+            RequestContext.CreateEmpty(),
+            container: "mp4") with
+        {
+            ContentIdentity = "id:BV1toYN6LETy",
+            RecoveryPageUrl = page
+        };
+        var video = new DetectedVideo(
+            Guid.NewGuid(),
+            SiteIds.Bilibili,
+            "11347222317",
+            "title",
+            page,
+            MediaFamily.Dash,
+            [previous],
+            false);
+
+        Assert.True(MediaAddressRenewal.SameDetectedContent(previous, video, page));
+    }
+
+    [Fact]
+    public void SameYoutubePlayback_True_WhenIdAndItagMatch()
+    {
+        var expired = MediaVariant.FromCombinedTrack(
+            "v1",
+            new Uri("https://rr1---sn-npoeen66.googlevideo.com/videoplayback?id=o-abc&itag=137&expire=1"),
+            RequestContext.CreateEmpty(),
+            container: "mp4");
+        var fresh = MediaVariant.FromCombinedTrack(
+            "v1",
+            new Uri("https://rr2---sn-npoe7ne7.googlevideo.com/videoplayback?id=o-abc&itag=137&expire=999"),
+            RequestContext.CreateEmpty(),
+            container: "mp4");
+        var otherItag = MediaVariant.FromCombinedTrack(
+            "v1",
+            new Uri("https://rr2---sn-npoe7ne7.googlevideo.com/videoplayback?id=o-abc&itag=136&expire=999"),
+            RequestContext.CreateEmpty(),
+            container: "mp4");
+
+        Assert.True(MediaAddressRenewal.SameYoutubePlayback(expired, fresh));
+        Assert.False(MediaAddressRenewal.SameYoutubePlayback(expired, otherItag));
     }
 
     private static NormalizedNetworkEvent Evt(Uri page, string mediaUrl, long length, bool observed) =>

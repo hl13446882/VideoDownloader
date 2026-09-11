@@ -540,7 +540,10 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
 
     internal static bool IsStaleForAutoRecover(DownloadJob job)
     {
-        if (BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl))
+        // Signed CDN jobs must attempt Range resume after restart. A 30-minute wall clock
+        // (or a parsed expire= token) used to fail them as CONTEXT_EXPIRED without trying.
+        if (BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl) ||
+            MediaAddressRenewal.IsYouTubePlayback(job.Variant.SourceUrl))
             return false;
 
         if (job.UpdatedAt < DateTimeOffset.UtcNow - TimeSpan.FromMinutes(30))
@@ -568,7 +571,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
     }
 
     private static bool ShouldRetryBilibiliFailedOnStartup(DownloadJob job) =>
-        BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl) &&
+        (BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl) ||
+         MediaAddressRenewal.IsYouTubePlayback(job.Variant.SourceUrl)) &&
         string.Equals(job.LastErrorCode, ErrorCodes.ContextExpired, StringComparison.OrdinalIgnoreCase);
 
     private async Task RunJobAsync(DownloadJob job)
@@ -1191,15 +1195,15 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
     {
         var previous = job.Variant;
         job.Variant = renewed;
-        if (BilibiliCdnPreference.SameDashObjects(previous, renewed))
+        if (BilibiliCdnPreference.SameDashObjects(previous, renewed) ||
+            MediaAddressRenewal.SameYoutubePlayback(previous, renewed))
         {
             job.LastErrorCode = null;
             _logger.LogInformation(
-                "Bilibili keeping partial progress for {JobId} after URL renew {OldHost} -> {NewHost} object={Object}",
+                "Keeping partial progress for {JobId} after URL renew {OldHost} -> {NewHost}",
                 job.Id,
                 previous.SourceUrl.Host,
-                renewed.SourceUrl.Host,
-                BilibiliCdnPreference.ObjectKey(renewed.SourceUrl));
+                renewed.SourceUrl.Host);
             return;
         }
 
