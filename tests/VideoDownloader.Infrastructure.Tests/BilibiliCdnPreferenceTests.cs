@@ -30,7 +30,9 @@ public class BilibiliCdnPreferenceTests
     {
         var detector = new BilibiliMediaDetector(
             NullLogger<BilibiliMediaDetector>.Instance,
-            new BilibiliYtDlpExtractor(Options.Create(new AppOptions()), NullLogger<BilibiliYtDlpExtractor>.Instance),
+            new BilibiliYtDlpExtractor(
+                Options.Create(new AppOptions { ExternalResolvers = new() { Enabled = false } }),
+                NullLogger<BilibiliYtDlpExtractor>.Instance),
             Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
@@ -49,6 +51,33 @@ public class BilibiliCdnPreferenceTests
         Assert.NotNull(last);
         Assert.Equal(SiteIds.Bilibili, last!.Site);
         Assert.Contains("bilivideo.com", last.Video!.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("akamai", last.Video.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Detector_Observation_Playinfo_Picks_Bilivideo_Over_Akamai()
+    {
+        var detector = new BilibiliMediaDetector(
+            NullLogger<BilibiliMediaDetector>.Instance,
+            new BilibiliYtDlpExtractor(
+                Options.Create(new AppOptions { ExternalResolvers = new() { Enabled = false } }),
+                NullLogger<BilibiliYtDlpExtractor>.Instance),
+            Substitute.For<IProbeMethodStats>());
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+
+        var page = new Uri("https://www.bilibili.com/video/BV1xx411c7mD");
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(
+            page,
+            "标题",
+            """{"identity":"content:BV1xx411c7mD","caption":"标题","media":["https://upos-hz-mirrorakam.akamaized.net/upgcxcode/a/b/41747222317/41747222317-1-30080.m4s?os=akam","https://upos-sz-mirrorbos.bilivideo.com/upgcxcode/a/b/41747222317/41747222317-1-30080.m4s?os=bos"]}""",
+            RequestContext.CreateEmpty(),
+            CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+
+        Assert.NotNull(last);
+        Assert.Contains("bilivideo.com", last!.Video!.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("akamai", last.Video.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
     }
 

@@ -14,10 +14,7 @@ internal static class BilibiliObservationScript
             caption=caption.replace(/\s*[_|].*哔哩哔哩.*$/u,'').replace(/\s*[_-]\s*bilibili.*$/i,'').trim();
             const active=[...document.querySelectorAll('video')].find(e=>{const r=e.getBoundingClientRect();return r.width>80&&r.height>80;});
             const durationSec=(active&&Number.isFinite(active.duration)&&active.duration>0)?active.duration:null;
-            return { type:'vd-video-identity', identity:location.host+':content:'+bvid, caption, href:location.href, media:[], durationSec };
-          };
-          window.__vdProbe=()=>{
-            const observation=window.__vdObserve(); if(!observation) return null;
+            const media=[];
             try{
               const playinfo=window.__playinfo__?.data||window.__playinfo__||
                 window.__INITIAL_STATE__?.videoData?.playInfo||window.__INITIAL_STATE__?.vp?.dash;
@@ -27,7 +24,7 @@ internal static class BilibiliObservationScript
                 for(const item of list.slice(0,16)){
                   const add=u=>{
                     if(typeof u==='string' && /\.(m3u8|mpd|mp4|webm|m4a|mp3|m4s)([?#]|$)/i.test(u))
-                      observation.media.push(u);
+                      media.push(u);
                   };
                   add(item?.baseUrl||item?.base_url);
                   const backups=item?.backupUrl||item?.backup_url;
@@ -37,9 +34,9 @@ internal static class BilibiliObservationScript
               };
               if(dash){ pushDash(dash.video); pushDash(dash.audio); }
             }catch{}
-            observation.media=[...new Set(observation.media||[])];
-            return observation;
+            return { type:'vd-video-identity', identity:location.host+':content:'+bvid, caption, href:location.href, media:[...new Set(media)], durationSec };
           };
+          window.__vdProbe=()=>window.__vdObserve();
           let scheduled=false;
           const scan=()=>{ if(scheduled) return; scheduled=true; queueMicrotask(()=>{ scheduled=false; const r=window.__vdObserve(); if(r){ try{ chrome.webview.postMessage(r);}catch{}} }); };
           new MutationObserver(scan).observe(document,{childList:true,subtree:true});

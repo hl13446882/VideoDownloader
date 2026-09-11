@@ -602,6 +602,14 @@ public sealed class BilibiliYtDlpExtractor : IExternalSiteResolver
         return null;
     }
 
+    private static int FormatCdnScore(JsonElement format)
+    {
+        var url = GetFormatUrl(format);
+        return Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            ? BilibiliCdnPreference.Score(uri)
+            : 0;
+    }
+
     private static long? TryGetSize(JsonElement format)
     {
         if (JsonNumber.TryInt64Prop(format, "filesize", out var fsv))
@@ -623,6 +631,7 @@ public sealed class BilibiliYtDlpExtractor : IExternalSiteResolver
 
         return query
             .OrderByDescending(f => JsonNumber.TryInt32Prop(f, "height", out var hv) ? hv : 0)
+            .ThenByDescending(FormatCdnScore)
             .ThenByDescending(f => JsonNumber.TryDoubleProp(f, "tbr", out var tb) ? tb : 0)
             .FirstOrDefault();
     }
@@ -639,6 +648,7 @@ public sealed class BilibiliYtDlpExtractor : IExternalSiteResolver
                         ac.GetString() is not "none" and not null)
             .Where(f => TryGetSize(f) is null or >= MediaResourceSizeFilter.MinProgressiveVideoBytes)
             .OrderByDescending(f => JsonNumber.TryInt32Prop(f, "height", out var hv) ? hv : 0)
+            .ThenByDescending(FormatCdnScore)
             .ThenByDescending(f => TryGetSize(f) ?? 0)
             .ThenByDescending(f => JsonNumber.TryDoubleProp(f, "tbr", out var tb) ? tb : 0)
             .FirstOrDefault();
@@ -660,6 +670,7 @@ public sealed class BilibiliYtDlpExtractor : IExternalSiteResolver
 
         return query
             .OrderByDescending(f => JsonNumber.TryDoubleProp(f, "abr", out var ab) ? ab : 0)
+            .ThenByDescending(FormatCdnScore)
             .FirstOrDefault();
     }
 
@@ -671,6 +682,7 @@ public sealed class BilibiliYtDlpExtractor : IExternalSiteResolver
             .GroupBy(f => JsonNumber.TryInt32Prop(f, "height", out var height) ? height : 0)
             .Select(group => group
                 .OrderByDescending(f => HasUsableFormatUrl(f, directOnly: true))
+                .ThenByDescending(FormatCdnScore)
                 .ThenByDescending(f => StringPropertyEquals(f, "ext", "mp4"))
                 .ThenByDescending(f => TryGetSize(f) ?? 0)
                 .ThenByDescending(f => TryGetBitrate(f) ?? 0)
@@ -687,6 +699,7 @@ public sealed class BilibiliYtDlpExtractor : IExternalSiteResolver
                         HasCodec(f, "acodec", allowNone: false) &&
                         HasCodec(f, "vcodec", allowNone: true))
             .OrderByDescending(f => HasUsableFormatUrl(f, directOnly: true))
+            .ThenByDescending(FormatCdnScore)
             .ThenByDescending(f => StringPropertyEquals(f, "ext", "m4a") || StringPropertyEquals(f, "ext", "mp4"))
             .ThenByDescending(f => TryGetBitrate(f) ?? 0)
             .Take(4);
