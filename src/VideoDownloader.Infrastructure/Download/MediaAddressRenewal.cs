@@ -153,6 +153,11 @@ internal static class MediaAddressRenewal
                string.Equals(video.PageUrl.AbsolutePath, previous.RecoveryPageUrl.AbsolutePath, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// True when both variants are googlevideo tracks for the same YouTube object/quality.
+    /// Do not compare the <c>id=</c> query: that is a per-request playback session token and
+    /// changes on every URL renew — matching it would discard .part and restart from zero.
+    /// </summary>
     internal static bool SameYoutubePlayback(MediaVariant previous, MediaVariant next)
     {
         if (!previous.Tracks.All(t => IsYouTubePlayback(t.SourceUrl)) ||
@@ -160,11 +165,17 @@ internal static class MediaAddressRenewal
             return false;
 
         var left = previous.Tracks
-            .Select(t => (t.Kind, Id: QueryValue(t.SourceUrl, "id"), Itag: QueryValue(t.SourceUrl, "itag")))
+            .Select(t => (
+                t.Kind,
+                Itag: QueryValue(t.SourceUrl, "itag"),
+                Clen: QueryValue(t.SourceUrl, "clen") ?? t.ContentLength?.ToString()))
             .OrderBy(t => t.Kind)
             .ToArray();
         var right = next.Tracks
-            .Select(t => (t.Kind, Id: QueryValue(t.SourceUrl, "id"), Itag: QueryValue(t.SourceUrl, "itag")))
+            .Select(t => (
+                t.Kind,
+                Itag: QueryValue(t.SourceUrl, "itag"),
+                Clen: QueryValue(t.SourceUrl, "clen") ?? t.ContentLength?.ToString()))
             .OrderBy(t => t.Kind)
             .ToArray();
         if (left.Length == 0 || left.Length != right.Length)
@@ -172,8 +183,15 @@ internal static class MediaAddressRenewal
         for (var i = 0; i < left.Length; i++)
         {
             if (left[i].Kind != right[i].Kind ||
-                !string.Equals(left[i].Id, right[i].Id, StringComparison.Ordinal) ||
+                string.IsNullOrWhiteSpace(left[i].Itag) ||
                 !string.Equals(left[i].Itag, right[i].Itag, StringComparison.Ordinal))
+                return false;
+            // When both sides publish clen, require the same object size (ignore tiny CDN drift).
+            if (!string.IsNullOrWhiteSpace(left[i].Clen) &&
+                !string.IsNullOrWhiteSpace(right[i].Clen) &&
+                long.TryParse(left[i].Clen, out var leftLen) &&
+                long.TryParse(right[i].Clen, out var rightLen) &&
+                Math.Abs(leftLen - rightLen) > 64_000)
                 return false;
         }
 

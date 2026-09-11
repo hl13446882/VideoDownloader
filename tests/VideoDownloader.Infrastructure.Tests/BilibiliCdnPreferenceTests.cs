@@ -223,26 +223,32 @@ public class BilibiliCdnPreferenceTests
     }
 
     [Fact]
-    public void SameYoutubePlayback_True_WhenIdAndItagMatch()
+    public void SameYoutubePlayback_True_WhenItagMatches_EvenIfSessionIdChanges()
     {
         var expired = MediaVariant.FromCombinedTrack(
             "v1",
-            new Uri("https://rr1---sn-npoeen66.googlevideo.com/videoplayback?id=o-abc&itag=137&expire=1"),
+            new Uri("https://rr1---sn-npoeen66.googlevideo.com/videoplayback?id=o-old&itag=137&clen=1673422477&expire=1"),
             RequestContext.CreateEmpty(),
             container: "mp4");
         var fresh = MediaVariant.FromCombinedTrack(
             "v1",
-            new Uri("https://rr2---sn-npoe7ne7.googlevideo.com/videoplayback?id=o-abc&itag=137&expire=999"),
+            new Uri("https://rr2---sn-npoe7ne7.googlevideo.com/videoplayback?id=o-new&itag=137&clen=1673422477&expire=999"),
             RequestContext.CreateEmpty(),
             container: "mp4");
         var otherItag = MediaVariant.FromCombinedTrack(
             "v1",
-            new Uri("https://rr2---sn-npoe7ne7.googlevideo.com/videoplayback?id=o-abc&itag=136&expire=999"),
+            new Uri("https://rr2---sn-npoe7ne7.googlevideo.com/videoplayback?id=o-new&itag=136&clen=900000000&expire=999"),
+            RequestContext.CreateEmpty(),
+            container: "mp4");
+        var otherSize = MediaVariant.FromCombinedTrack(
+            "v1",
+            new Uri("https://rr2---sn-npoe7ne7.googlevideo.com/videoplayback?id=o-new&itag=137&clen=1000000&expire=999"),
             RequestContext.CreateEmpty(),
             container: "mp4");
 
         Assert.True(MediaAddressRenewal.SameYoutubePlayback(expired, fresh));
         Assert.False(MediaAddressRenewal.SameYoutubePlayback(expired, otherItag));
+        Assert.False(MediaAddressRenewal.SameYoutubePlayback(expired, otherSize));
     }
 
     private static NormalizedNetworkEvent Evt(Uri page, string mediaUrl, long length, bool observed) =>
