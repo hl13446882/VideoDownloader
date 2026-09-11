@@ -24,9 +24,15 @@ internal static class BilibiliObservationScript
               const dash=playinfo?.dash||playinfo?.result?.dash||playinfo;
               const pushDash=list=>{
                 if(!Array.isArray(list)) return;
-                for(const item of list.slice(0,12)){
-                  const u=item?.baseUrl||item?.base_url||item?.backupUrl?.[0]||item?.backup_url?.[0];
-                  if(typeof u==='string' && /\.(m3u8|mpd|mp4|webm|m4a|mp3|m4s)([?#]|$)/i.test(u)) observation.media.push(u);
+                for(const item of list.slice(0,16)){
+                  const add=u=>{
+                    if(typeof u==='string' && /\.(m3u8|mpd|mp4|webm|m4a|mp3|m4s)([?#]|$)/i.test(u))
+                      observation.media.push(u);
+                  };
+                  add(item?.baseUrl||item?.base_url);
+                  const backups=item?.backupUrl||item?.backup_url;
+                  if(Array.isArray(backups)) backups.forEach(add);
+                  else add(backups);
                 }
               };
               if(dash){ pushDash(dash.video); pushDash(dash.audio); }

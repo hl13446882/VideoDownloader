@@ -238,9 +238,11 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
         if (_pageUrl is null) return null;
         if (_formats.Count > 0)
         {
-            var best = _formats
+            var formats = _formats.Select(PreferDurableCdn).ToArray();
+            var best = formats
                 .Where(v => v.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined))
                 .OrderByDescending(v => v.Height ?? 0)
+                .ThenByDescending(v => BilibiliCdnPreference.Score(v.SourceUrl))
                 .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
                 .FirstOrDefault();
             // Direct playurl_api not implemented yet — yt-dlp path still hits wbi playurl under the hood.
@@ -251,19 +253,12 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
                 [], _context, 0.95, _caption)
             {
                 SessionId = _sessionId,
-                Formats = _formats.ToArray()
+                Formats = formats
             };
         }
 
-        var video = _tracks
-            .Where(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
-            .OrderByDescending(t => t.BrowserObserved)
-            .ThenByDescending(t => t.ContentLength ?? 0)
-            .FirstOrDefault();
-        var audio = _tracks
-            .Where(t => t.Kind == MediaTrackKind.Audio)
-            .OrderByDescending(t => t.ContentLength ?? 0)
-            .FirstOrDefault();
+        var video = PickBestTrack(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined);
+        var audio = PickBestTrack(t => t.Kind == MediaTrackKind.Audio);
         if (video is null && audio is null) return null;
         winningMethod = ProbeMethods.NetworkPlayurl;
         if (video is null)
@@ -272,6 +267,53 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
         return new MediaDescriptor(SiteIds.Bilibili, _pageUrl, _contentId, MediaContentType.Video,
             video, video.Kind == MediaTrackKind.Combined ? null : audio, [], _context,
             video.BrowserObserved ? 0.95 : 0.8, _caption) { SessionId = _sessionId };
+    }
+
+    private MediaTrack? PickBestTrack(Func<MediaTrack, bool> match)
+    {
+        var candidates = _tracks.Where(match).ToArray();
+        if (candidates.Length == 0)
+            return null;
+
+        var group = candidates
+            .GroupBy(t => BilibiliCdnPreference.ObjectKey(t.SourceUrl), StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(g => g.Max(t => t.ContentLength ?? 0))
+            .ThenByDescending(g => g.Max(t => BilibiliCdnPreference.Score(t.SourceUrl)))
+            .First();
+        return PreferDurableCdn(group.First());
+    }
+
+    private MediaVariant PreferDurableCdn(MediaVariant variant)
+    {
+        var tracks = variant.Tracks.Select(PreferDurableCdn).ToArray();
+        if (tracks.SequenceEqual(variant.Tracks))
+            return variant;
+        return variant with { Tracks = tracks };
+    }
+
+    private MediaTrack PreferDurableCdn(MediaTrack track)
+    {
+        var key = BilibiliCdnPreference.ObjectKey(track.SourceUrl);
+        if (string.IsNullOrWhiteSpace(key))
+            return track;
+
+        var best = _tracks
+            .Where(t => t.Kind == track.Kind)
+            .Where(t => string.Equals(BilibiliCdnPreference.ObjectKey(t.SourceUrl), key, StringComparison.OrdinalIgnoreCase))
+            .Append(track)
+            .OrderByDescending(t => BilibiliCdnPreference.Score(t.SourceUrl))
+            .ThenByDescending(t => t.ContentLength ?? 0)
+            .First();
+
+        if (string.Equals(best.SourceUrl.AbsoluteUri, track.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
+            return track;
+
+        _logger.LogInformation(
+            "Bilibili CDN prefer {FromHost} -> {ToHost} object={Object}",
+            track.SourceUrl.Host,
+            best.SourceUrl.Host,
+            key);
+        return track with { SourceUrl = best.SourceUrl };
     }
 
     private void ApplyJson(string? json)
@@ -345,6 +387,7 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
         url.Host.Contains("bilivideo", StringComparison.OrdinalIgnoreCase) ||
         url.Host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase) ||
         url.Host.Contains("hdslb.com", StringComparison.OrdinalIgnoreCase) ||
+        url.Host.Contains("akamaized.net", StringComparison.OrdinalIgnoreCase) ||
         url.Host.Contains("upos", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsBrowserPlay(NormalizedNetworkEvent e) =>
