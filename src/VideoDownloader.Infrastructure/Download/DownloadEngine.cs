@@ -290,25 +290,54 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
 
     private static void CleanupJobScratch(DownloadJob job, bool deleteTarget)
     {
+        TryDeleteFile(job.TargetPath + ".part");
+
+        var saveDir = Path.GetDirectoryName(job.TargetPath) ?? string.Empty;
+        var partsDir = Path.Combine(saveDir, ".parts", job.Id.ToString("N"));
+        TryDeleteDirectory(partsDir);
+        TryDeleteEmptyPartsRoot(saveDir);
+
+        if (deleteTarget)
+            TryDeleteFile(job.TargetPath);
+    }
+
+    private static bool JobScratchExists(DownloadJob job)
+    {
+        if (File.Exists(job.TargetPath + ".part"))
+            return true;
+
+        var saveDir = Path.GetDirectoryName(job.TargetPath) ?? string.Empty;
+        var partsDir = Path.Combine(saveDir, ".parts", job.Id.ToString("N"));
+        return Directory.Exists(partsDir);
+    }
+
+    private async Task WipeCancelledScratchAsync(DownloadJob job)
+    {
+        for (var attempt = 0; attempt < 16; attempt++)
+        {
+            CleanupJobScratch(job, deleteTarget: false);
+            if (!JobScratchExists(job))
+                return;
+
+            await Task.Delay(80);
+        }
+
+        if (JobScratchExists(job))
+            _logger.LogWarning("Temp files still present after cancel job={JobId}", job.Id);
+    }
+
+    private static void TryDeleteFile(string path)
+    {
         try
         {
-            var partPath = job.TargetPath + ".part";
-            if (File.Exists(partPath))
-                File.Delete(partPath);
-
-            var saveDir = Path.GetDirectoryName(job.TargetPath) ?? string.Empty;
-            var partsDir = Path.Combine(saveDir, ".parts", job.Id.ToString("N"));
-            if (Directory.Exists(partsDir))
-                Directory.Delete(partsDir, recursive: true);
-
-            TryDeleteEmptyPartsRoot(saveDir);
-
-            if (deleteTarget && File.Exists(job.TargetPath))
-                File.Delete(job.TargetPath);
+            if (File.Exists(path))
+                File.Delete(path);
         }
-        catch
+        catch (IOException)
         {
-            // Best-effort cleanup; queue removal must not fail on locked temp files.
+        }
+        catch (UnauthorizedAccessException)
+        {
         }
     }
 
@@ -663,7 +692,6 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             else
             {
                 _stateMachine.Cancel(job);
-                CleanupJobScratch(job, deleteTarget: false);
                 await _repository.SaveAsync(job, CancellationToken.None);
             }
         }
@@ -692,6 +720,10 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             _ctsMap.TryRemove(job.Id, out _);
             _concurrency.Release();
             runLock.Release();
+
+            // CancelAsync may run while ffmpeg/HTTP still hold files; wipe after handles close.
+            if (_removedJobs.ContainsKey(job.Id) || job.Status == DownloadStatus.Cancelled)
+                await WipeCancelledScratchAsync(job);
         }
     }
 
@@ -981,6 +1013,23 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         try
         {
             Directory.Delete(dir, recursive: true);
+        }
+        catch
+        {
+            try
+            {
+                foreach (var file in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+                    TryDeleteFile(file);
+                Directory.Delete(dir, recursive: true);
+            }
+            catch
+            {
+                // locked files / concurrent access
+            }
+        }
+
+        try
+        {
             var parent = Path.GetDirectoryName(dir);
             if (!string.IsNullOrWhiteSpace(parent) &&
                 string.Equals(Path.GetFileName(parent), ".parts", StringComparison.OrdinalIgnoreCase))
@@ -988,7 +1037,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         }
         catch
         {
-            // locked files / concurrent access
+            // ignore
         }
     }
 
