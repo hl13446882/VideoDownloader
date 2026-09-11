@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using VideoDownloader.Core.Contracts;
@@ -364,6 +366,107 @@ public sealed class FfmpegAdapter : IFfmpegAdapter
         }
 
         return candidates.Select(p => p.Track).ToArray();
+    }
+
+    public async Task<(double? DurationSec, int? Height)> ProbeLocalFileAsync(string path, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            return (null, null);
+
+        var ffmpegPath = PathExpander.Expand(_options.Ffmpeg.ExecutablePath);
+        var ffprobePath = Path.Combine(Path.GetDirectoryName(ffmpegPath) ?? string.Empty, "ffprobe.exe");
+        if (!File.Exists(ffprobePath))
+            ffprobePath = "ffprobe";
+
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = ffprobePath,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            psi.ArgumentList.Add("-v");
+            psi.ArgumentList.Add("error");
+            psi.ArgumentList.Add("-show_entries");
+            psi.ArgumentList.Add("format=duration:stream=codec_type,height");
+            psi.ArgumentList.Add("-of");
+            psi.ArgumentList.Add("json");
+            psi.ArgumentList.Add(path);
+
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(8));
+            using var process = Process.Start(psi);
+            if (process is null)
+                return (null, null);
+
+            var stdout = await process.StandardOutput.ReadToEndAsync(timeout.Token);
+            await process.WaitForExitAsync(timeout.Token);
+            if (process.ExitCode != 0)
+                return (null, null);
+
+            return ParseProbeJson(stdout);
+        }
+        catch (OperationCanceledException)
+        {
+            return (null, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "ffprobe failed for {Path}", path);
+            return (null, null);
+        }
+    }
+
+    internal static (double? DurationSec, int? Height) ParseProbeJson(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            return (null, null);
+
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            double? duration = null;
+            int? height = null;
+
+            if (root.TryGetProperty("format", out var format) &&
+                format.TryGetProperty("duration", out var durationEl))
+            {
+                if (durationEl.ValueKind == JsonValueKind.Number && durationEl.TryGetDouble(out var n) && n > 0)
+                    duration = n;
+                else if (durationEl.ValueKind == JsonValueKind.String &&
+                         double.TryParse(durationEl.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) &&
+                         parsed > 0)
+                    duration = parsed;
+            }
+
+            if (root.TryGetProperty("streams", out var streams) && streams.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var stream in streams.EnumerateArray())
+                {
+                    if (!stream.TryGetProperty("codec_type", out var kind) ||
+                        !string.Equals(kind.GetString(), "video", StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (stream.TryGetProperty("height", out var heightEl) &&
+                        heightEl.ValueKind == JsonValueKind.Number &&
+                        heightEl.TryGetInt32(out var h) &&
+                        h > 0)
+                    {
+                        height = h;
+                        break;
+                    }
+                }
+            }
+
+            return (duration, height);
+        }
+        catch
+        {
+            return (null, null);
+        }
     }
 
     private static async Task<(bool HasVideo, bool HasAudio)> ProbeStreamKindsAsync(

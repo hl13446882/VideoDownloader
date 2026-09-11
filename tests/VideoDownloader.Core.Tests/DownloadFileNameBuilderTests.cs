@@ -250,6 +250,28 @@ public class DownloadFileNameBuilderTests
     }
 
     [Fact]
+    public void MergeMissingMeta_FillsOnlyAbsentParts_DurationInMinutes()
+    {
+        Assert.Equal("标题_3分_1080P_256MB", DownloadFileNameBuilder.MergeMissingMeta(
+            "标题_1080P", durationSec: 185, height: 720, totalBytes: 256L * 1024 * 1024));
+        Assert.Equal("标题_3分_1080P_256MB", DownloadFileNameBuilder.MergeMissingMeta(
+            "标题_3分_1080P_256MB", durationSec: 999, height: 480, totalBytes: 10));
+        Assert.Equal("标题_1分_720P_12MB", DownloadFileNameBuilder.MergeMissingMeta(
+            "标题", durationSec: 45, height: 720, totalBytes: 12L * 1024 * 1024));
+        Assert.True(DownloadFileNameBuilder.HasCompleteMetaSuffix("标题_3分_1080P_256MB"));
+        Assert.False(DownloadFileNameBuilder.HasCompleteMetaSuffix("标题_1080P_12MB"));
+    }
+
+    [Fact]
+    public void FormatDurationMinutes_RoundsAwayFromZeroAtLeastOne()
+    {
+        Assert.Equal(1, DownloadFileNameBuilder.FormatDurationMinutes(1));
+        Assert.Equal(3, DownloadFileNameBuilder.FormatDurationMinutes(185));
+        Assert.Equal(1, DownloadFileNameBuilder.FormatDurationMinutes(59));
+        Assert.Equal(2, DownloadFileNameBuilder.FormatDurationMinutes(90));
+    }
+
+    [Fact]
     public void FilterLiveInput_StripsIllegalCharacters()
     {
         var filtered = DownloadFileNameBuilder.FilterLiveInput(@"a<>:""/\|?*b");

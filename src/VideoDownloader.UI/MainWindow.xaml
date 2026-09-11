@@ -246,9 +246,13 @@
                                             <TextBlock.Style>
                                                 <Style TargetType="TextBlock">
                                                     <Setter Property="Visibility" Value="Visible"/>
+                                                    <Setter Property="Foreground" Value="#222222"/>
                                                     <Style.Triggers>
                                                         <DataTrigger Binding="{Binding IsEditing}" Value="True">
                                                             <Setter Property="Visibility" Value="Collapsed"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding IsCompleted}" Value="True">
+                                                            <Setter Property="Foreground" Value="#123A8C"/>
                                                         </DataTrigger>
                                                     </Style.Triggers>
                                                 </Style>
@@ -294,7 +298,18 @@
                                             </Style>
                                         </ProgressBar.Style>
                                     </ProgressBar>
-                                    <TextBlock Text="{Binding ProgressText}" FontSize="11" Foreground="#555"/>
+                                    <TextBlock Text="{Binding ProgressText}" FontSize="11" Foreground="#555">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsCompleted}" Value="True">
+                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
                                     <TextBlock Text="{Binding Status}" FontSize="11">
                                         <TextBlock.Style>
                                             <Style TargetType="TextBlock">
@@ -302,6 +317,13 @@
                                                 <Style.Triggers>
                                                     <DataTrigger Binding="{Binding IsFailed}" Value="True">
                                                         <Setter Property="Foreground" Value="#B45309"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding IsCompleted}" Value="True">
+                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding IsFileMissing}" Value="True">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                        <Setter Property="Foreground" Value="#123A8C"/>
                                                     </DataTrigger>
                                                 </Style.Triggers>
                                             </Style>

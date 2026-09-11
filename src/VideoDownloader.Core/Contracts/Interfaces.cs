@@ -184,4 +184,7 @@ public interface IFfmpegAdapter
         string audioPath,
         string outputPath,
         CancellationToken ct);
+
+    /// <summary>Reads duration (seconds) and video height from a local completed file.</summary>
+    Task<(double? DurationSec, int? Height)> ProbeLocalFileAsync(string path, CancellationToken ct);
 }

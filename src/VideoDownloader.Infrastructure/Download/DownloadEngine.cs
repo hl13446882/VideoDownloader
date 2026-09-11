@@ -453,6 +453,79 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         CleanupOrphanedScratch(_jobs.Values);
 
         _logger.LogInformation("Recovered {Count} download jobs from persistence.", persisted.Count);
+        _ = BackfillCompletedFileNamesAsync(_lifetime.Token);
+    }
+
+    private async Task BackfillCompletedFileNamesAsync(CancellationToken ct)
+    {
+        try
+        {
+            var jobs = _jobs.Values
+                .Where(j => j.Status == DownloadStatus.Completed && File.Exists(j.TargetPath))
+                .ToArray();
+            foreach (var job in jobs)
+            {
+                ct.ThrowIfCancellationRequested();
+                try
+                {
+                    await ApplyCompletedFileNameAsync(job, ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Completed-name backfill failed for {JobId}", job.Id);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Completed-name backfill stopped");
+        }
+    }
+
+    private async Task ApplyCompletedFileNameAsync(DownloadJob job, CancellationToken ct)
+    {
+        if (job.Status != DownloadStatus.Completed || !File.Exists(job.TargetPath))
+            return;
+
+        UpdateCompletedFileSize(job);
+        var fileStem = Path.GetFileNameWithoutExtension(job.TargetPath);
+        var source = string.IsNullOrWhiteSpace(fileStem) ? job.DisplayName : fileStem;
+
+        DownloadFileNameBuilder.TryParseMetaParts(source, out _, out var existing);
+        double? durationSec = existing.Minutes is > 0 ? existing.Minutes.Value * 60.0 : null;
+        int? height = existing.Height ?? (job.Variant.Height is > 0 ? job.Variant.Height : null);
+        var bytes = existing.Bytes ?? job.TotalBytes ?? new FileInfo(job.TargetPath).Length;
+
+        if (durationSec is null || height is null)
+        {
+            try
+            {
+                var probed = await _ffmpegAdapter.ProbeLocalFileAsync(job.TargetPath, ct);
+                durationSec ??= probed.DurationSec is > 0 ? probed.DurationSec : null;
+                height ??= probed.Height is > 0 ? probed.Height : null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Completed-name probe failed for {JobId}", job.Id);
+            }
+        }
+
+        var merged = DownloadFileNameBuilder.MergeMissingMeta(source, durationSec, height, bytes);
+        if (string.Equals(merged, job.DisplayName, StringComparison.Ordinal) &&
+            string.Equals(merged, fileStem, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        try
+        {
+            await RenameAsync(job.Id, merged, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not apply completed filename meta for {JobId}", job.Id);
+        }
     }
 
     private static bool IsStaleForAutoRecover(DownloadJob job)
@@ -678,6 +751,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             if (_removedJobs.ContainsKey(job.Id)) return;
             _stateMachine.Complete(job);
             CleanupJobScratch(job, deleteTarget: false);
+            await ApplyCompletedFileNameAsync(job, CancellationToken.None);
             await _repository.SaveAsync(job, CancellationToken.None);
         }
         catch (OperationCanceledException) when (cts.IsCancellationRequested)

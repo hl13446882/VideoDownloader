@@ -192,16 +192,14 @@ public static partial class DownloadFileNameBuilder
     }
 
     /// <summary>
-    /// Builds <c>_3分_1080P_256MB</c>-style suffix. Missing fields are omitted (no empty segments).
+    /// Builds <c>_3分_1080P_256MB</c>-style suffix. Duration is always whole minutes.
+    /// Missing fields are omitted (no empty segments).
     /// </summary>
     public static string FormatMetaSuffix(double? durationSec, int? height, long? totalBytes)
     {
         var parts = new List<string>(3);
         if (durationSec is > 0)
-        {
-            var minutes = Math.Max(1, (int)Math.Round(durationSec.Value / 60.0, MidpointRounding.AwayFromZero));
-            parts.Add(minutes.ToString(CultureInfo.InvariantCulture) + "分");
-        }
+            parts.Add(FormatDurationMinutes(durationSec.Value) + "分");
 
         if (height is > 0)
             parts.Add(height.Value.ToString(CultureInfo.InvariantCulture) + "P");
@@ -211,6 +209,75 @@ public static partial class DownloadFileNameBuilder
 
         return parts.Count == 0 ? string.Empty : "_" + string.Join("_", parts);
     }
+
+    /// <summary>Rounds seconds to at least 1 minute for the <c>_N分</c> label.</summary>
+    public static int FormatDurationMinutes(double durationSec) =>
+        Math.Max(1, (int)Math.Round(durationSec / 60.0, MidpointRounding.AwayFromZero));
+
+    /// <summary>
+    /// Fills missing <c>_分_P_MB/GB</c> parts without replacing ones already on the stem.
+    /// </summary>
+    public static string MergeMissingMeta(string stem, double? durationSec, int? height, long? totalBytes)
+    {
+        TryParseMetaParts(stem, out var head, out var existing);
+        if (string.IsNullOrWhiteSpace(head))
+            head = "video";
+
+        var duration = existing.Minutes is > 0
+            ? existing.Minutes.Value * 60.0
+            : durationSec;
+        var mergedHeight = existing.Height ?? height;
+        var mergedBytes = existing.Bytes ?? totalBytes;
+        return head + FormatMetaSuffix(duration, mergedHeight, mergedBytes);
+    }
+
+    /// <summary>True when the stem already has duration, resolution, and size suffixes.</summary>
+    public static bool HasCompleteMetaSuffix(string? stem) =>
+        TryParseMetaParts(stem, out _, out var meta) &&
+        meta.Minutes is > 0 &&
+        meta.Height is > 0 &&
+        meta.Bytes is > 0;
+
+    /// <summary>
+    /// Splits a stem into title + parsed <c>_分_P_MB/GB</c> parts.
+    /// </summary>
+    public static bool TryParseMetaParts(string? stem, out string head, out DownloadNameMeta meta)
+    {
+        head = stem ?? string.Empty;
+        meta = default;
+        if (!TrySplitMetaSuffix(stem, out head, out var suffix) || suffix.Length == 0)
+            return false;
+
+        int? minutes = null;
+        int? height = null;
+        long? bytes = null;
+        foreach (var part in suffix.Split('_', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (part.EndsWith("分", StringComparison.Ordinal) &&
+                int.TryParse(part[..^1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedMinutes) &&
+                parsedMinutes > 0)
+            {
+                minutes = parsedMinutes;
+                continue;
+            }
+
+            if ((part.EndsWith("P", StringComparison.OrdinalIgnoreCase)) &&
+                int.TryParse(part[..^1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedHeight) &&
+                parsedHeight > 0)
+            {
+                height = parsedHeight;
+                continue;
+            }
+
+            if (TryParseSizeLabel(part, out var parsedBytes))
+                bytes = parsedBytes;
+        }
+
+        meta = new DownloadNameMeta(minutes, height, bytes);
+        return minutes is not null || height is not null || bytes is not null;
+    }
+
+    public readonly record struct DownloadNameMeta(int? Minutes, int? Height, long? Bytes);
 
     public static string FormatSizeLabel(long bytes)
     {
@@ -235,6 +302,31 @@ public static partial class DownloadFileNameBuilder
             return Math.Round(mb, MidpointRounding.AwayFromZero).ToString("0", CultureInfo.InvariantCulture) + "MB";
 
         return mb.ToString("0.#", CultureInfo.InvariantCulture) + "MB";
+    }
+
+    public static bool TryParseSizeLabel(string? label, out long bytes)
+    {
+        bytes = 0;
+        if (string.IsNullOrWhiteSpace(label))
+            return false;
+
+        if (label.EndsWith("GB", StringComparison.OrdinalIgnoreCase) &&
+            double.TryParse(label[..^2], NumberStyles.Float, CultureInfo.InvariantCulture, out var gb) &&
+            gb > 0)
+        {
+            bytes = (long)Math.Round(gb * OneGibibyte, MidpointRounding.AwayFromZero);
+            return bytes > 0;
+        }
+
+        if (label.EndsWith("MB", StringComparison.OrdinalIgnoreCase) &&
+            double.TryParse(label[..^2], NumberStyles.Float, CultureInfo.InvariantCulture, out var mb) &&
+            mb > 0)
+        {
+            bytes = (long)Math.Round(mb * OneMebibyte, MidpointRounding.AwayFromZero);
+            return bytes > 0;
+        }
+
+        return false;
     }
 
     /// <summary>
