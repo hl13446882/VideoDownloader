@@ -113,14 +113,20 @@ public partial class App : Application
     private static void UpdateLicenseTitle(MainWindow window, LicenseInfo license, VideoDownloader.UI.Localization.LocalizationService loc) =>
         window.Title = license.IsFull && license.IsValid ? loc.T("title.full") : loc.T("title.demo");
 
+    private int _dispatcherErrorDialogShown;
+
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
     {
+        e.Handled = true;
+        // Progress/timer refresh can re-enter the same binding failure every 400ms.
+        if (Interlocked.Exchange(ref _dispatcherErrorDialogShown, 1) != 0)
+            return;
+
         MessageBox.Show(
             $"发生未处理错误 / Unhandled error：{e.Exception.Message}",
             "Video Downloader",
             MessageBoxButton.OK,
             MessageBoxImage.Warning);
-        e.Handled = true;
     }
 
     private static void OnDomainUnhandledException(object sender, UnhandledExceptionEventArgs e)
