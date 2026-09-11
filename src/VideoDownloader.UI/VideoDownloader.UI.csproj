@@ -19,10 +19,17 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <Version>0.2.0-beta</Version>
     <AssemblyTitle>Video Downloader</AssemblyTitle>
     <Product>Video Downloader</Product>
     <Company>VideoDownloader</Company>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\app.ico" />
+    <Resource Include="Assets\app.png" />
+    <None Include="Assets\app-icon-source.jpg" CopyToOutputDirectory="Never" />
+  </ItemGroup>
 
 </Project>
