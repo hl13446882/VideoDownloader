@@ -1692,7 +1692,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             {
                 var ordered = g.OrderByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
                     .ThenByDescending(v => v.Height ?? 0).ToArray();
-                return ordered[0] with { Alternatives = ordered.Skip(1).Take(4).ToArray() };
+                return MediaVariantAlternatives.WithLadder(ordered[0], ordered);
             })
             .Where(v => !MediaResourceSizeFilter.ShouldExcludeVariant(v) &&
                         !MediaResourceSizeFilter.ShouldExcludeGenericVideoVariant(v))

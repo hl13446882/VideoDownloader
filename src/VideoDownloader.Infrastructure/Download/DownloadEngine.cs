@@ -80,9 +80,13 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         Uri? pageUrl = null,
         string? caption = null,
         double? durationSec = null,
+        IReadOnlyList<MediaVariant>? siblingVariants = null,
         CancellationToken ct = default)
     {
         RejectMseOrdinaryDownload(variant);
+
+        // Persist the full quality ladder so 403 recovery can resume the same object.
+        variant = MediaVariantAlternatives.WithLadder(variant, siblingVariants);
 
         if (_license.DownloadLimitBytes is int demoLimit && variant.TotalContentLength is long total && total > demoLimit)
             throw new DownloadException(ErrorCodes.LicenseLimit, "DEMO download limit is 10 MiB.");
@@ -672,7 +676,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                         var switched = await MediaAddressRenewal.TryAlternativesAsync(
                             job.Variant,
                             _availability is null ? null : _availability.ValidateAsync,
-                            cts.Token);
+                            cts.Token,
+                            expectedTotalBytes: job.ExpectedTotalBytes ?? job.TotalBytes);
                         if (switched is not null)
                         {
                             ApplyRenewedVariant(job, switched.WithRequestContext(refreshed));
@@ -811,8 +816,16 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                     addressRenewed = true;
                     try
                     {
-                        var renewed = await MediaAddressRenewal.ResolveAsync(pageUrl, job.Variant, refreshed, _resolvers, cts.Token,
-                            _availability is null ? null : _availability.ValidateAsync);
+                        if (job.ExpectedTotalBytes is not > 0 && job.TotalBytes is > 0)
+                            job.ExpectedTotalBytes = job.TotalBytes;
+                        var renewed = await MediaAddressRenewal.ResolveAsync(
+                            pageUrl,
+                            job.Variant,
+                            refreshed,
+                            _resolvers,
+                            cts.Token,
+                            _availability is null ? null : _availability.ValidateAsync,
+                            job.ExpectedTotalBytes ?? job.TotalBytes);
                         ApplyRenewedVariant(job, renewed);
                     }
                     catch (Exception recoveryError)

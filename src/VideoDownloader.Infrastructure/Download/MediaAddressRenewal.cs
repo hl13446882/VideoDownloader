@@ -11,14 +11,16 @@ internal static class MediaAddressRenewal
 {
     internal static async Task<MediaVariant> ResolveAsync(Uri page, MediaVariant previous, RequestContext context,
         IEnumerable<IExternalSiteResolver> resolvers, CancellationToken ct,
-        Func<MediaVariant, CancellationToken, Task>? validate = null)
+        Func<MediaVariant, CancellationToken, Task>? validate = null,
+        long? expectedTotalBytes = null)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(60));
         try
         {
+        var sizeAnchor = expectedTotalBytes ?? previous.TotalContentLength;
         var errors = new List<string>();
-        var alternate = await TryAlternativesAsync(previous, validate, timeout.Token, errors);
+        var alternate = await TryAlternativesAsync(previous, validate, timeout.Token, errors, sizeAnchor);
         if (alternate is not null)
             return alternate;
         page = previous.RecoveryPageUrl ?? page;
@@ -36,13 +38,17 @@ internal static class MediaAddressRenewal
             catch (Exception ex) { errors.Add("resolve:" + ex.GetType().Name); continue; }
             var matches = videos.Where(v => !v.IsDrmProtected && SameDetectedContent(previous, v, page))
                 .SelectMany(v => v.Variants)
-                .Select(v => BilibiliCdnPreference.AlignDashRenewal(previous, v) ?? v)
+                .Select(v => BilibiliCdnPreference.AlignDashRenewal(previous, v)
+                             ?? BilibiliCdnPreference.AlignDashRenewalBySize(previous, v, sizeAnchor)
+                             ?? v)
                 .Where(v => (Compatible(previous, v) ||
                              BilibiliCdnPreference.SameDashObjects(previous, v) ||
+                             BilibiliCdnPreference.SameDashSize(previous, v, sizeAnchor) ||
                              SameYoutubePlayback(previous, v)) &&
                     !IsKnownUndersizedVideo(v) &&
                     (validate is not null || !v.Tracks.Select(t => t.SourceUrl).SequenceEqual(previous.Tracks.Select(t => t.SourceUrl))))
-                .OrderByDescending(v => BilibiliCdnPreference.SameDashObjects(previous, v) || SameYoutubePlayback(previous, v) ? 1 : 0)
+                .OrderByDescending(v => BilibiliCdnPreference.SameDashObjects(previous, v) || SameYoutubePlayback(previous, v) ? 2
+                    : BilibiliCdnPreference.SameDashSize(previous, v, sizeAnchor) ? 1 : 0)
                 .ThenByDescending(v => BilibiliCdnPreference.IsMediaHost(v.SourceUrl) ? BilibiliCdnPreference.Score(v.SourceUrl) : 0)
                 .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
                 .ThenByDescending(DurableHostScore)
@@ -60,8 +66,17 @@ internal static class MediaAddressRenewal
                         continue;
                     }
 
-                    var aligned = BilibiliCdnPreference.AlignDashRenewal(previous, match) ?? match;
-                    return aligned with { ContentIdentity = previous.ContentIdentity, RecoveryPageUrl = page, Alternatives = [] };
+                    var aligned = BilibiliCdnPreference.AlignDashRenewal(previous, match)
+                        ?? BilibiliCdnPreference.AlignDashRenewalBySize(previous, match, sizeAnchor)
+                        ?? match;
+                    var withIdentity = aligned with
+                    {
+                        ContentIdentity = previous.ContentIdentity,
+                        RecoveryPageUrl = page
+                    };
+                    return MediaVariantAlternatives.WithLadder(
+                        withIdentity,
+                        videos.SelectMany(v => v.Variants).Append(previous));
                 }
                 catch (DownloadException ex) { errors.Add("renewed:" + ex.ErrorCode); }
                 catch (HttpRequestException) { errors.Add("renewed:network"); }
@@ -74,35 +89,48 @@ internal static class MediaAddressRenewal
 
     /// <summary>
     /// Try sibling format URLs only (no yt-dlp). Used so 403 recovery can switch CDN before gateway renew.
+    /// Prefer exact DASH object / size-aligned siblings so a partial .part can continue.
     /// </summary>
     internal static async Task<MediaVariant?> TryAlternativesAsync(
         MediaVariant previous,
         Func<MediaVariant, CancellationToken, Task>? validate,
         CancellationToken ct,
-        List<string>? errors = null)
+        List<string>? errors = null,
+        long? expectedTotalBytes = null)
     {
         errors ??= [];
-        foreach (var alternate in previous.Alternatives
-                     .OrderByDescending(DurableHostScore)
-                     .ThenByDescending(a => SameHost(previous, a) ? 0 : 1)
-                     .ThenByDescending(a => a.TotalContentLength ?? a.Bandwidth ?? 0)
-                     .Take(6))
+        var sizeAnchor = expectedTotalBytes ?? previous.TotalContentLength;
+        var ordered = previous.Alternatives
+            .Select(a => (
+                Raw: a,
+                Aligned: BilibiliCdnPreference.AlignDashRenewal(previous, a)
+                         ?? BilibiliCdnPreference.AlignDashRenewalBySize(previous, a, sizeAnchor)
+                         ?? (Compatible(previous, a) && SameContent(previous, a) ? a : null)))
+            .Where(x => x.Aligned is not null)
+            .OrderByDescending(x => BilibiliCdnPreference.SameDashObjects(previous, x.Raw) ? 2
+                : BilibiliCdnPreference.SameDashSize(previous, x.Raw, sizeAnchor) ? 1 : 0)
+            .ThenByDescending(x => DurableHostScore(x.Aligned!))
+            .ThenByDescending(x => SameHost(previous, x.Aligned!) ? 0 : 1)
+            .ThenByDescending(x => x.Aligned!.TotalContentLength ?? x.Aligned.Bandwidth ?? 0)
+            .Take(MediaVariantAlternatives.MaxStored)
+            .ToList();
+
+        foreach (var (_, aligned) in ordered)
         {
-            if (!SameContent(previous, alternate) || !Compatible(previous, alternate)) continue;
-            if (IsKnownUndersizedVideo(alternate)) continue;
-            // Same fragile signed host/family rarely unlocks after 403; never retry web-prime↔web-prime.
-            if (IsFragileSignedHost(previous.SourceUrl) && IsFragileSignedHost(alternate.SourceUrl))
+            var candidate = aligned!;
+            if (IsKnownUndersizedVideo(candidate)) continue;
+            if (IsFragileSignedHost(previous.SourceUrl) && IsFragileSignedHost(candidate.SourceUrl))
                 continue;
-            if (string.Equals(alternate.SourceUrl.AbsoluteUri, previous.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(candidate.SourceUrl.AbsoluteUri, previous.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
                 continue;
             try
             {
-                if (validate is not null) await validate(alternate, ct);
-                return alternate with
+                if (validate is not null) await validate(candidate, ct);
+                return candidate with
                 {
-                    ContentIdentity = previous.ContentIdentity ?? alternate.ContentIdentity,
-                    RecoveryPageUrl = previous.RecoveryPageUrl ?? alternate.RecoveryPageUrl,
-                    Alternatives = []
+                    ContentIdentity = previous.ContentIdentity ?? candidate.ContentIdentity,
+                    RecoveryPageUrl = previous.RecoveryPageUrl ?? candidate.RecoveryPageUrl,
+                    Alternatives = previous.Alternatives
                 };
             }
             catch (DownloadException ex) { errors.Add("alternate:" + ex.ErrorCode); }

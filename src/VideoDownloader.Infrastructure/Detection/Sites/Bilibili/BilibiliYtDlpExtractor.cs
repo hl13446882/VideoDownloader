@@ -6,6 +6,7 @@ using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Infrastructure.Configuration;
+using VideoDownloader.Infrastructure.Download;
 using VideoDownloader.Infrastructure.Json;
 using VideoDownloader.Infrastructure.Logging;
 
@@ -536,6 +537,11 @@ public sealed class BilibiliYtDlpExtractor : IExternalSiteResolver
             .ThenByDescending(v => v.Height ?? 0)
             .ToList();
 
+        // Every quality keeps the full ladder as Alternatives for resume-after-403.
+        variants = variants
+            .Select(v => MediaVariantAlternatives.WithLadder(v, variants))
+            .ToList();
+
         if (variants.Count == 0)
             return [];
 
@@ -680,18 +686,28 @@ public sealed class BilibiliYtDlpExtractor : IExternalSiteResolver
                         HasCodec(f, "vcodec", allowNone: false) &&
                         HasCodec(f, "acodec", allowNone: true))
             .GroupBy(f => JsonNumber.TryInt32Prop(f, "height", out var height) ? height : 0)
-            .Select(group => group
+            // Keep several codecs per height (AVC/HEVC/AV1). Resume after 403 must still see the
+            // exact DASH object that was partially downloaded — not only the largest ladder rung.
+            .SelectMany(group => group
                 .OrderByDescending(f => HasUsableFormatUrl(f, directOnly: true))
                 .ThenByDescending(FormatCdnScore)
                 .ThenByDescending(f => StringPropertyEquals(f, "ext", "mp4"))
                 .ThenByDescending(f => TryGetSize(f) ?? 0)
                 .ThenByDescending(f => TryGetBitrate(f) ?? 0)
-                .First())
+                .Take(4))
             .Where(f => TryGetSize(f) is null or >= MediaResourceSizeFilter.MinProgressiveVideoBytes)
+            .GroupBy(f =>
+            {
+                var url = GetFormatUrl(f);
+                return Uri.TryCreate(url, UriKind.Absolute, out var uri)
+                    ? BilibiliCdnPreference.ObjectKey(uri)
+                    : FormatId(f);
+            }, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
             .OrderByDescending(f => JsonNumber.TryInt32Prop(f, "height", out var height) ? height : 0)
             .ThenByDescending(f => TryGetSize(f) ?? 0)
             .ThenByDescending(f => TryGetBitrate(f) ?? 0)
-            .Take(12);
+            .Take(24);
 
     private static IEnumerable<JsonElement> SelectAudioFormats(JsonElement formats) =>
         formats.EnumerateArray()

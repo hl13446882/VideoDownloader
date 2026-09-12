@@ -1,3 +1,4 @@
+using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
 
 namespace VideoDownloader.Infrastructure.Detection.Sites.Bilibili;
@@ -151,6 +152,105 @@ internal static class BilibiliCdnPreference
             Width = next.Width ?? previous.Width,
             Height = next.Height ?? previous.Height
         };
+    }
+
+    /// <summary>
+    /// True when a renewed variant exposes a video/combined track whose size matches the
+    /// partially downloaded object (CDN may change while qn/object bytes stay the same).
+    /// </summary>
+    public static bool SameDashSize(MediaVariant previous, MediaVariant next, long? expectedTotal)
+    {
+        if (!IsMediaHost(previous.SourceUrl) || !IsMediaHost(next.SourceUrl))
+            return false;
+        var target = ResolveSizeAnchor(previous, expectedTotal);
+        if (target is not > 0)
+            return false;
+
+        return next.Tracks.Any(t =>
+            t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined &&
+            t.ContentLength is long len &&
+            Math.Abs(len - target.Value) <= 64 * 1024 &&
+            SameDashCid(previous.SourceUrl, t.SourceUrl));
+    }
+
+    /// <summary>
+    /// Map previous track layout onto a size-matched renewed object when the exact m4s name
+    /// is missing from the first ladder pick but the same cid+bytes still exist.
+    /// </summary>
+    public static MediaVariant? AlignDashRenewalBySize(MediaVariant previous, MediaVariant next, long? expectedTotal)
+    {
+        if (!SameDashSize(previous, next, expectedTotal))
+            return null;
+
+        var target = ResolveSizeAnchor(previous, expectedTotal)!.Value;
+        var unused = next.Tracks.ToList();
+        var tracks = new List<MediaTrack>(previous.Tracks.Count);
+        foreach (var left in previous.Tracks)
+        {
+            var idx = unused.FindIndex(t =>
+                KindsCompatible(left.Kind, t.Kind) &&
+                t.ContentLength is long len &&
+                Math.Abs(len - (left.ContentLength is > MediaResourceSizeFilter.MinProgressiveVideoBytes
+                    ? left.ContentLength.Value
+                    : target)) <= 64 * 1024 &&
+                SameDashCid(left.SourceUrl, t.SourceUrl));
+            if (idx < 0 && left.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
+            {
+                idx = unused.FindIndex(t =>
+                    t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined &&
+                    t.ContentLength is long len &&
+                    Math.Abs(len - target) <= 64 * 1024 &&
+                    SameDashCid(left.SourceUrl, t.SourceUrl));
+            }
+
+            if (idx < 0)
+                return null;
+            var right = unused[idx];
+            unused.RemoveAt(idx);
+            tracks.Add(left with
+            {
+                SourceUrl = right.SourceUrl,
+                RequestContext = right.RequestContext,
+                ContentLength = right.ContentLength ?? left.ContentLength,
+                Codec = right.Codec ?? left.Codec,
+                Container = right.Container ?? left.Container,
+                Bandwidth = right.Bandwidth ?? left.Bandwidth,
+                BrowserObserved = false,
+                IsValidated = false,
+                Evidence = MediaEvidence.Heuristic
+            });
+        }
+
+        return previous with
+        {
+            Tracks = tracks,
+            Bandwidth = next.Bandwidth ?? previous.Bandwidth,
+            Width = next.Width ?? previous.Width,
+            Height = next.Height ?? previous.Height
+        };
+    }
+
+    private static long? ResolveSizeAnchor(MediaVariant previous, long? expectedTotal)
+    {
+        if (expectedTotal is > MediaResourceSizeFilter.MinProgressiveVideoBytes)
+            return expectedTotal;
+        var fromTracks = previous.Tracks
+            .Where(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
+            .Select(t => t.ContentLength)
+            .FirstOrDefault(l => l is > MediaResourceSizeFilter.MinProgressiveVideoBytes);
+        return fromTracks ?? previous.TotalContentLength;
+    }
+
+    /// <summary>Same cid stem, e.g. <c>41791391545-1-</c> before the quality id.</summary>
+    public static bool SameDashCid(Uri left, Uri right)
+    {
+        var a = ObjectKey(left);
+        var b = ObjectKey(right);
+        var ai = a.LastIndexOf('-');
+        var bi = b.LastIndexOf('-');
+        if (ai <= 0 || bi <= 0)
+            return false;
+        return string.Equals(a[..ai], b[..bi], StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool KindsCompatible(MediaTrackKind left, MediaTrackKind right) =>

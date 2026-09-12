@@ -125,22 +125,9 @@ public static class MediaDescriptorMapper
                 .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
                 .ToArray();
 
-            // Attach sibling formats so HTTP 403 recovery can switch hosts without rediscovery.
+            // Attach sibling formats so HTTP 403 recovery can switch hosts/qualities without rediscovery.
             return ladder
-                .Select(primary =>
-                {
-                    var alts = ladder
-                        .Where(x => !string.Equals(
-                            x.SourceUrl.AbsoluteUri,
-                            primary.SourceUrl.AbsoluteUri,
-                            StringComparison.OrdinalIgnoreCase))
-                        .OrderByDescending(MediaAddressRenewal.DurableHostScore)
-                        .ThenByDescending(x => x.TotalContentLength ?? x.Bandwidth ?? 0)
-                        .Take(4)
-                        .Select(x => x with { Alternatives = [] })
-                        .ToArray();
-                    return primary with { Alternatives = alts };
-                })
+                .Select(primary => MediaVariantAlternatives.WithLadder(primary, ladder))
                 .ToArray();
         }
 

@@ -19,6 +19,7 @@
     <Using Include="Xunit" />
     <Content Include="..\..\publish\VideoDownload\ffmpeg\*.exe" Link="ffmpeg\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\publish\VideoDownload\M3u8\*.exe" Link="M3u8\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

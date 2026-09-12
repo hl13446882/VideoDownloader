@@ -308,6 +308,119 @@ public class BilibiliCdnPreferenceTests
         Assert.False(MediaAddressRenewal.SameYoutubePlayback(expired, otherSize));
     }
 
+    [Fact]
+    public void AlignDashRenewalBySize_MapsCombined_OntoMatchingAv1Object()
+    {
+        var previous = MediaVariant.FromCombinedTrack(
+            "视频",
+            new Uri("https://upos-sz-mirrorcosov.bilivideo.com/upgcxcode/45/15/41791391545/41791391545-1-100026.m4s?os=cosovbv"),
+            RequestContext.CreateEmpty(),
+            container: "mp4",
+            contentLength: 6722) with // stale tiny length; job total is the anchor
+        {
+            ContentIdentity = "id:BV1y6Y76yE4Q"
+        };
+
+        var next = MediaVariant.FromTracks(
+            "1080p",
+            null,
+            1080,
+            null,
+            "mp4",
+            [
+                new MediaTrack(
+                    "video",
+                    MediaTrackKind.Video,
+                    new Uri("https://upos-sz-mirrorbos.bilivideo.com/upgcxcode/45/15/41791391545/41791391545-1-100026.m4s?os=bos"),
+                    "av01",
+                    "mp4",
+                    null,
+                    445_523_164,
+                    RequestContext.CreateEmpty()),
+                new MediaTrack(
+                    "audio",
+                    MediaTrackKind.Audio,
+                    new Uri("https://upos-sz-mirrorbos.bilivideo.com/upgcxcode/45/15/41791391545/41791391545-1-30280.m4s?os=bos"),
+                    "mp4a",
+                    "m4a",
+                    null,
+                    51_761_933,
+                    RequestContext.CreateEmpty())
+            ]);
+
+        Assert.True(BilibiliCdnPreference.SameDashObjects(previous, next));
+        var aligned = BilibiliCdnPreference.AlignDashRenewal(previous, next);
+        Assert.NotNull(aligned);
+        Assert.Single(aligned!.Tracks);
+        Assert.Equal(MediaTrackKind.Combined, aligned.Tracks[0].Kind);
+        Assert.Contains("100026.m4s", aligned.SourceUrl.AbsolutePath);
+        Assert.Contains("mirrorbos", aligned.SourceUrl.Host);
+        Assert.Equal(445_523_164, aligned.Tracks[0].ContentLength);
+    }
+
+    [Fact]
+    public void WithLadder_StoresAllResolutionSiblings()
+    {
+        var low = MediaVariant.FromCombinedTrack(
+            "360p",
+            new Uri("https://upos-sz-mirrorbos.bilivideo.com/a/41791391545-1-100022.m4s"),
+            RequestContext.CreateEmpty(),
+            height: 360,
+            contentLength: 64_207_138);
+        var mid = MediaVariant.FromCombinedTrack(
+            "720p",
+            new Uri("https://upos-sz-mirrorbos.bilivideo.com/a/41791391545-1-100024.m4s"),
+            RequestContext.CreateEmpty(),
+            height: 720,
+            contentLength: 181_260_197);
+        var hi = MediaVariant.FromCombinedTrack(
+            "1080p",
+            new Uri("https://upos-sz-mirrorbos.bilivideo.com/a/41791391545-1-100026.m4s"),
+            RequestContext.CreateEmpty(),
+            height: 1080,
+            contentLength: 445_523_164);
+
+        var packed = MediaVariantAlternatives.WithLadder(hi, [low, mid, hi]);
+        Assert.Equal(2, packed.Alternatives.Count);
+        Assert.Contains(packed.Alternatives, a => a.Height == 360);
+        Assert.Contains(packed.Alternatives, a => a.Height == 720);
+    }
+
+    [Fact]
+    public void ParseJson_KeepsAv1_100026_WhenLargerAvcExists()
+    {
+        var jsonPath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "bilibili-BV1y6Y76yE4Q.json");
+        if (!File.Exists(jsonPath))
+            jsonPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "Fixtures", "bilibili-BV1y6Y76yE4Q.json"));
+        var json = File.ReadAllText(jsonPath);
+        var extractor = new BilibiliYtDlpExtractor(
+            Options.Create(new AppOptions()),
+            NullLogger<BilibiliYtDlpExtractor>.Instance);
+        var videos = extractor.ParseJson(
+            json,
+            new Uri("https://www.bilibili.com/video/BV1y6Y76yE4Q/"),
+            RequestContext.CreateEmpty(),
+            SiteIds.Bilibili);
+        Assert.NotEmpty(videos);
+        var keys = videos[0].Variants
+            .SelectMany(v => v.Tracks)
+            .Select(t => BilibiliCdnPreference.ObjectKey(t.SourceUrl))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        Assert.Contains("41791391545-1-100026.m4s", keys);
+        Assert.Contains("41791391545-1-30080.m4s", keys);
+
+        var previous = MediaVariant.FromCombinedTrack(
+            "视频",
+            new Uri("https://upos-sz-mirrorcosov.bilivideo.com/upgcxcode/45/15/41791391545/41791391545-1-100026.m4s"),
+            RequestContext.CreateEmpty(),
+            contentLength: 445_523_331) with
+        {
+            ContentIdentity = "id:BV1y6Y76yE4Q",
+            RecoveryPageUrl = new Uri("https://www.bilibili.com/video/BV1y6Y76yE4Q/")
+        };
+        Assert.Contains(videos[0].Variants, v => BilibiliCdnPreference.SameDashObjects(previous, v));
+    }
+
     private static NormalizedNetworkEvent Evt(Uri page, string mediaUrl, long length, bool observed) =>
         new(
             new Uri(mediaUrl),
