@@ -411,6 +411,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
     public async Task RecoverOnStartupAsync(CancellationToken ct = default)
     {
         var persisted = await _repository.GetAllAsync(ct);
+        var maxAutoStart = Math.Clamp(_options.Download.MaxConcurrentDownloads, 1, 5);
+        var autoStarted = 0;
         foreach (var job in persisted)
         {
             var original = job.Status;
@@ -438,25 +440,36 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
 
             if (recovered == DownloadStatus.Paused)
             {
-                // Stale paused/hung downloads (expired CDN, abandoned YouTube) must not
-                // seize every concurrency slot and leave new enqueues stuck at Pending.
-                // Bilibili is excluded: signed m4s URLs last hours, and restart must resume .part.
+                // Do NOT Fail(CONTEXT_EXPIRED) here. Exceeding concurrency (or looking
+                // "stale") only means defer auto-start — the user can still Resume, and
+                // PumpAutoRecoverQueue will start more when a slot frees.
                 if (IsStaleForAutoRecover(job))
                 {
-                    _stateMachine.Fail(job, ErrorCodes.ContextExpired);
-                    await _repository.SaveAsync(job, ct);
-                    _logger.LogWarning(
-                        "Skipped auto-recover for stale job {JobId} (updated={UpdatedAt})",
-                        job.Id,
-                        job.UpdatedAt);
+                    _logger.LogInformation(
+                        "Deferred auto-recover for job {JobId} (stale signature/age; kept Paused)",
+                        job.Id);
                     continue;
                 }
 
+                if (autoStarted >= maxAutoStart)
+                {
+                    _logger.LogInformation(
+                        "Deferred auto-recover for job {JobId} (concurrency budget {Budget})",
+                        job.Id,
+                        maxAutoStart);
+                    continue;
+                }
+
+                autoStarted++;
                 _ = RunJobAsync(job);
             }
             else if (recovered == DownloadStatus.Failed && ShouldRetryBilibiliFailedOnStartup(job))
             {
+                if (autoStarted >= maxAutoStart)
+                    continue;
+
                 job.LastErrorCode = null;
+                autoStarted++;
                 _ = RunJobAsync(job);
             }
         }
@@ -541,8 +554,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
 
     internal static bool IsStaleForAutoRecover(DownloadJob job)
     {
-        // Signed CDN jobs must attempt Range resume after restart. A 30-minute wall clock
-        // (or a parsed expire= token) used to fail them as CONTEXT_EXPIRED without trying.
+        // Prefer deferring auto-start over failing. Bilibili / YouTube always attempt resume.
         if (BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl) ||
             MediaAddressRenewal.IsYouTubePlayback(job.Variant.SourceUrl))
             return false;
@@ -579,14 +591,27 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
     private async Task RunJobAsync(DownloadJob job)
     {
         var runLock = _runLocks.GetOrAdd(job.Id, _ => new SemaphoreSlim(1));
-        await runLock.WaitAsync();
-        await _concurrency.WaitAsync();
-        var cts = new CancellationTokenSource();
+        await runLock.WaitAsync(_lifetime.Token);
+
+        // A slot-pump may schedule the same Paused job twice; skip if already active/done.
+        if (job.Status is DownloadStatus.Completed or DownloadStatus.Cancelled or DownloadStatus.Removed ||
+            job.Status is DownloadStatus.Downloading or DownloadStatus.Muxing or DownloadStatus.Preparing ||
+            _ctsMap.ContainsKey(job.Id))
+        {
+            runLock.Release();
+            return;
+        }
+
+        await _concurrency.WaitAsync(_lifetime.Token);
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         _ctsMap[job.Id] = cts;
 
         try
         {
             if (_removedJobs.ContainsKey(job.Id))
+                return;
+
+            if (job.Status is DownloadStatus.Completed or DownloadStatus.Cancelled or DownloadStatus.Removed)
                 return;
 
             BeginExecution(job);
@@ -836,13 +861,42 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         finally
         {
             _ctsMap.TryRemove(job.Id, out _);
+            try { cts.Dispose(); } catch { /* ignore */ }
             _concurrency.Release();
             runLock.Release();
 
             // CancelAsync may run while ffmpeg/HTTP still hold files; wipe after handles close.
             if (_removedJobs.ContainsKey(job.Id) || job.Status == DownloadStatus.Cancelled)
                 await WipeCancelledScratchAsync(job);
+
+            PumpAutoRecoverQueue();
         }
+    }
+
+    /// <summary>
+    /// After a concurrency slot frees, start another deferred Paused job (if auto-recover is on).
+    /// </summary>
+    private void PumpAutoRecoverQueue()
+    {
+        if (!_options.Download.AutoRecoverDownloads || _lifetime.IsCancellationRequested)
+            return;
+
+        var available = _concurrency.CurrentCount;
+        if (available <= 0)
+            return;
+
+        var candidates = _jobs.Values
+            .Where(j =>
+                j.Status == DownloadStatus.Paused &&
+                !_ctsMap.ContainsKey(j.Id) &&
+                !_removedJobs.ContainsKey(j.Id) &&
+                !IsStaleForAutoRecover(j))
+            .OrderByDescending(j => j.UpdatedAt)
+            .Take(available)
+            .ToArray();
+
+        foreach (var next in candidates)
+            _ = RunJobAsync(next);
     }
 
     private async Task ExecuteDownloadAsync(
