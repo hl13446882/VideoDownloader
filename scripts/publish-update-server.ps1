@@ -64,28 +64,34 @@ $remoteChannel = "$RemotePath/$Channel"
 $remoteFiles = "$remoteChannel/files"
 $remoteTmp = "$remoteChannel/manifest.json.tmp"
 $remoteManifest = "$remoteChannel/manifest.json"
+$bundle = Join-Path $stage 'files.tar.gz'
 
-Write-Host "Uploading to $sshTarget:$remoteChannel ..."
-ssh -o BatchMode=yes $sshTarget "mkdir -p '$remoteFiles'"
-if ($LASTEXITCODE -ne 0) { throw 'ssh mkdir failed' }
-
-# Prefer tar|ssh for atomic-ish tree sync without requiring rsync on Windows.
+Write-Host "Uploading to ${sshTarget}:${remoteChannel} ..."
 $tar = Get-Command tar -ErrorAction SilentlyContinue
 if (-not $tar) { throw 'tar is required to upload update files' }
 
 Push-Location $filesDir
 try {
-  tar -cf - . | ssh -o BatchMode=yes $sshTarget "mkdir -p '$remoteFiles' && rm -rf '$remoteFiles'/* && tar -C '$remoteFiles' -xf -"
-  if ($LASTEXITCODE -ne 0) { throw 'upload of files tree failed' }
+  & tar -czf $bundle .
+  if ($LASTEXITCODE -ne 0) { throw 'local tar create failed' }
 }
 finally {
   Pop-Location
 }
 
+ssh -o BatchMode=yes $sshTarget "mkdir -p '$remoteFiles'"
+if ($LASTEXITCODE -ne 0) { throw 'ssh mkdir failed' }
+
+scp -o BatchMode=yes $bundle "${sshTarget}:/tmp/vd-update-files.tar.gz"
+if ($LASTEXITCODE -ne 0) { throw 'scp bundle failed' }
+
+ssh -o BatchMode=yes $sshTarget "rm -rf '$remoteFiles' && mkdir -p '$remoteFiles' && tar -C '$remoteFiles' -xzf /tmp/vd-update-files.tar.gz && rm -f /tmp/vd-update-files.tar.gz && chown -R videodownloader:videodownloader '$remoteChannel' && chmod -R u+rwX,go+rX '$remoteChannel'"
+if ($LASTEXITCODE -ne 0) { throw 'remote extract failed' }
+
 scp -o BatchMode=yes $manifestPath "${sshTarget}:${remoteTmp}"
 if ($LASTEXITCODE -ne 0) { throw 'scp manifest failed' }
-ssh -o BatchMode=yes $sshTarget "mv -f '$remoteTmp' '$remoteManifest'"
+ssh -o BatchMode=yes $sshTarget "mv -f '$remoteTmp' '$remoteManifest' && chown videodownloader:videodownloader '$remoteManifest'"
 if ($LASTEXITCODE -ne 0) { throw 'remote manifest publish failed' }
 
-Write-Host "Published update $Version to $sshTarget:$remoteManifest"
+Write-Host "Published update $Version to ${sshTarget}:${remoteManifest}"
 Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
