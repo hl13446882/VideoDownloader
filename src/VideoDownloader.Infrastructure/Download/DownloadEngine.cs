@@ -1589,11 +1589,19 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
     public void Dispose()
     {
         _lifetime.Cancel();
+        foreach (var cts in _ctsMap.Values)
+        {
+            try { cts.Cancel(); }
+            catch { /* shutting down */ }
+        }
+
         try { _failedRetryLoop.Wait(TimeSpan.FromSeconds(2)); }
         catch { /* shutting down */ }
+
         _lifetime.Dispose();
         _concurrency.Dispose();
         foreach (var cts in _ctsMap.Values)
             cts.Dispose();
+        _ctsMap.Clear();
     }
 }

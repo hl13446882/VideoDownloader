@@ -1,4 +1,5 @@
-﻿using System.IO;
+﻿using System.Diagnostics;
+using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -13,8 +14,10 @@ namespace VideoDownloader.UI;
 
 public partial class App : Application
 {
+    private const string InstanceMutexName = @"Local\VideoDownloader.SingleInstance";
     private ServiceProvider? _services;
     private Mutex? _instanceMutex;
+    private bool _mutexOwned;
 
     static App()
     {
@@ -23,6 +26,7 @@ public partial class App : Application
 
     public App()
     {
+        ShutdownMode = ShutdownMode.OnMainWindowClose;
         DispatcherUnhandledException += OnDispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;
     }
@@ -64,8 +68,7 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
-        _instanceMutex = new Mutex(true, @"Local\VideoDownloader.SingleInstance", out var createdNew);
-        if (!createdNew)
+        if (!TryAcquireInstanceMutex())
         {
             MessageBox.Show(
                 "客户端已在运行。请关闭已打开的窗口后再试，不要重复启动（会抢占同一份续传文件）。",
@@ -109,21 +112,181 @@ public partial class App : Application
                 "Video Downloader",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
-            Shutdown(1);
+            EmergencyExit(1);
         }
     }
 
     protected override void OnExit(ExitEventArgs e)
     {
-        if (_services is IAsyncDisposable asyncDisposable)
-            asyncDisposable.DisposeAsync().AsTask().GetAwaiter().GetResult();
-        else
-            _services?.Dispose();
+        try
+        {
+            DisposeServices();
+        }
+        finally
+        {
+            ReleaseInstanceMutex();
+            base.OnExit(e);
+            // Download/WebView2 work can keep the CLR process alive after the window is gone.
+            // Hard-exit so close/crash never leaves a mutex-holding ghost.
+            Environment.Exit(e.ApplicationExitCode);
+        }
+    }
 
-        try { _instanceMutex?.ReleaseMutex(); } catch (ApplicationException) { }
-        _instanceMutex?.Dispose();
+    private bool TryAcquireInstanceMutex()
+    {
+        if (TryCreateMutex(out var createdNew) && createdNew)
+            return true;
 
-        base.OnExit(e);
+        // Living process with no UI = previous close/crash left a ghost. Reclaim once.
+        if (TryKillWindowlessSiblings())
+        {
+            ReleaseInstanceMutex();
+            return TryCreateMutex(out createdNew) && createdNew;
+        }
+
+        ReleaseInstanceMutex();
+        return false;
+    }
+
+    private bool TryCreateMutex(out bool createdNew)
+    {
+        createdNew = false;
+        try
+        {
+            _instanceMutex = new Mutex(true, InstanceMutexName, out createdNew);
+            _mutexOwned = createdNew;
+            if (!createdNew)
+            {
+                _instanceMutex.Dispose();
+                _instanceMutex = null;
+            }
+
+            return true;
+        }
+        catch
+        {
+            _instanceMutex = null;
+            _mutexOwned = false;
+            return false;
+        }
+    }
+
+    private static bool TryKillWindowlessSiblings()
+    {
+        var self = Process.GetCurrentProcess();
+        var selfPath = NormalizePath(self.MainModule?.FileName);
+        var killed = false;
+
+        foreach (var process in Process.GetProcessesByName("VideoDownloader"))
+        {
+            try
+            {
+                if (process.Id == self.Id)
+                    continue;
+
+                var path = NormalizePath(SafeMainModulePath(process));
+                // Only reclaim instances of this install. Skip if path cannot be read.
+                if (selfPath is null || path is null ||
+                    !string.Equals(selfPath, path, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // Still starting (no HWND yet) — do not kill a healthy peer mid-init.
+                if ((DateTime.Now - process.StartTime) < TimeSpan.FromSeconds(30) &&
+                    process.MainWindowHandle == IntPtr.Zero)
+                    continue;
+
+                if (process.MainWindowHandle != IntPtr.Zero)
+                    continue;
+
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(5000);
+                killed = true;
+            }
+            catch
+            {
+                // ignore access / exited races
+            }
+            finally
+            {
+                process.Dispose();
+            }
+        }
+
+        return killed;
+    }
+
+    private static string? SafeMainModulePath(Process process)
+    {
+        try { return process.MainModule?.FileName; }
+        catch { return null; }
+    }
+
+    private static string? NormalizePath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return null;
+        try { return Path.GetFullPath(path); }
+        catch { return path; }
+    }
+
+    private void DisposeServices()
+    {
+        if (_services is null)
+            return;
+
+        try
+        {
+            if (_services is IAsyncDisposable asyncDisposable)
+            {
+                var dispose = asyncDisposable.DisposeAsync().AsTask();
+                if (!dispose.Wait(TimeSpan.FromSeconds(5)))
+                    return;
+            }
+            else
+            {
+                _services.Dispose();
+            }
+        }
+        catch
+        {
+            // ignore shutdown dispose failures
+        }
+        finally
+        {
+            _services = null;
+        }
+    }
+
+    private void ReleaseInstanceMutex()
+    {
+        if (_instanceMutex is null)
+            return;
+
+        try
+        {
+            if (_mutexOwned)
+                _instanceMutex.ReleaseMutex();
+        }
+        catch (ApplicationException)
+        {
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+
+        try { _instanceMutex.Dispose(); }
+        catch { /* ignore */ }
+
+        _instanceMutex = null;
+        _mutexOwned = false;
+    }
+
+    private void EmergencyExit(int code)
+    {
+        try { DisposeServices(); }
+        catch { /* ignore */ }
+        ReleaseInstanceMutex();
+        Environment.Exit(code);
     }
 
     private static void UpdateLicenseTitle(MainWindow window, LicenseInfo license, VideoDownloader.UI.Localization.LocalizationService loc) =>
@@ -145,15 +308,27 @@ public partial class App : Application
             MessageBoxImage.Warning);
     }
 
-    private static void OnDomainUnhandledException(object sender, UnhandledExceptionEventArgs e)
+    private void OnDomainUnhandledException(object sender, UnhandledExceptionEventArgs e)
     {
-        if (e.ExceptionObject is Exception ex)
+        try
         {
-            MessageBox.Show(
-                $"发生严重错误 / Fatal error：{ex.Message}",
-                "Video Downloader",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            if (e.ExceptionObject is Exception ex)
+            {
+                MessageBox.Show(
+                    $"发生严重错误 / Fatal error：{ex.Message}",
+                    "Video Downloader",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            }
+        }
+        catch
+        {
+            // ignore UI failures during crash
+        }
+        finally
+        {
+            // Fatal CLR errors must not leave a mutex-holding process.
+            EmergencyExit(1);
         }
     }
 }

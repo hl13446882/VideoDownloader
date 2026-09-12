@@ -17,6 +17,7 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _timer;
     private readonly Dictionary<Guid, WebView2> _webViews = new();
     private bool _isClosing;
+    private bool _allowClose;
     private bool _suppressQueueSelectionSync;
 
     public MainWindow(MainViewModel viewModel)
@@ -377,8 +378,15 @@ public partial class MainWindow : Window
             webView.Visibility = id == selectedId ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private void OnClosing(object? sender, CancelEventArgs e)
+    private async void OnClosing(object? sender, CancelEventArgs e)
     {
+        // Second pass after Shutdown(): allow the window to destroy.
+        if (_allowClose)
+            return;
+
+        // Keep the window alive until WebView2/hosts are disposed on the UI thread.
+        // Fire-and-forget Task.Run dispose left a living process (mutex held, no HWND).
+        e.Cancel = true;
         if (_isClosing)
             return;
 
@@ -387,17 +395,24 @@ public partial class MainWindow : Window
         _viewModel.Tabs.CollectionChanged -= OnTabsChanged;
         _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
 
-        _ = Task.Run(async () =>
+        try
         {
-            try
-            {
-                await _viewModel.DisposeHostsAsync();
-            }
-            catch
-            {
-                // ignore shutdown errors
-            }
-        });
+            foreach (var tab in _viewModel.Tabs.ToArray())
+                RemoveWebView(tab);
+            await _viewModel.DisposeHostsAsync();
+        }
+        catch
+        {
+            // ignore shutdown errors
+        }
+        finally
+        {
+            _allowClose = true;
+            if (Application.Current is { } app)
+                app.Shutdown(0);
+            else
+                Close();
+        }
     }
 
     private void AddressBox_PreviewKeyDown(object sender, KeyEventArgs e)
