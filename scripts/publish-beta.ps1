@@ -12,8 +12,10 @@ $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 # Each publish bumps SemVer patch (e.g. 0.2.1-beta -> 0.2.2-beta). published_at is recorded
 # later in the update manifest and is not part of version comparison.
 $bumpScript = Join-Path $root 'scripts\bump-release-version.ps1'
-$bumpedVersion = & $bumpScript
-if ($LASTEXITCODE -ne 0 -or -not $bumpedVersion) { throw 'Version bump failed' }
+$bumpedVersion = (& $bumpScript | Select-Object -Last 1)
+if (-not $bumpedVersion) { throw 'Version bump failed' }
+$bumpedVersion = $bumpedVersion.ToString().Trim()
+if ($bumpedVersion -notmatch '^\d+\.\d+\.\d+') { throw "Version bump returned unexpected value: $bumpedVersion" }
 Write-Host "Publishing version $bumpedVersion"
 
 $stage = Join-Path $root ('artifacts\release-' + [Guid]::NewGuid().ToString('N'))
