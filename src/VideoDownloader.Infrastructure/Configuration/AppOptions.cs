@@ -42,6 +42,7 @@ public sealed class DownloadOptions
     public string DefaultSavePath { get; set; } =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
 
+    /// <summary>Max simultaneous download jobs (UI allows 1–5).</summary>
     public int MaxConcurrentDownloads { get; set; } = 3;
     public int RetryCount { get; set; } = 3;
     public bool AutoRecoverDownloads { get; set; } = false;

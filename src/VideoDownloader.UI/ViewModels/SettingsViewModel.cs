@@ -21,7 +21,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private string _savePath;
 
     [ObservableProperty]
-    private string _maxConcurrentText;
+    private int _maxConcurrent;
 
     [ObservableProperty]
     private string _retryCountText;
@@ -43,6 +43,8 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     public LocalizationService L => _loc;
 
+    public IReadOnlyList<int> ConcurrentOptions { get; } = [1, 2, 3, 4, 5];
+
     public SettingsViewModel(
         AppOptions options,
         UserSettingsStore store,
@@ -54,7 +56,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         _appLog = appLog;
         _loc = loc;
         _savePath = options.Download.DefaultSavePath;
-        _maxConcurrentText = options.Download.MaxConcurrentDownloads.ToString();
+        _maxConcurrent = Math.Clamp(options.Download.MaxConcurrentDownloads, 1, 5);
         _retryCountText = options.Download.RetryCount.ToString();
         _failedRetryIntervalText = options.Download.FailedRetryIntervalSeconds.ToString();
         _autoRecover = options.Download.AutoRecoverDownloads;
@@ -72,12 +74,6 @@ public sealed partial class SettingsViewModel : ObservableObject
             return;
         }
 
-        if (!int.TryParse(MaxConcurrentText, out var maxConcurrent))
-        {
-            StatusMessage = _loc.T("settings.invalidConcurrent");
-            return;
-        }
-
         if (!int.TryParse(RetryCountText, out var retryCount))
         {
             StatusMessage = _loc.T("settings.invalidRetry");
@@ -91,7 +87,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         }
 
         _options.Download.DefaultSavePath = SavePath.Trim();
-        _options.Download.MaxConcurrentDownloads = Math.Clamp(maxConcurrent, 1, 10);
+        _options.Download.MaxConcurrentDownloads = Math.Clamp(MaxConcurrent, 1, 5);
         _options.Download.RetryCount = Math.Clamp(retryCount, 0, 10);
         _options.Download.FailedRetryIntervalSeconds = Math.Clamp(failedRetryInterval, 0, 3600);
         _options.Download.AutoRecoverDownloads = AutoRecover;

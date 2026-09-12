@@ -38,6 +38,7 @@ public sealed class UserSettingsStore
 
     public void Save(AppOptions options)
     {
+        Sanitize(options);
         var dir = Path.GetDirectoryName(SettingsPath)!;
         Directory.CreateDirectory(dir);
         var json = JsonSerializer.Serialize(options, JsonOptions);
@@ -49,7 +50,7 @@ public sealed class UserSettingsStore
         if (loaded is null)
             return Clone(defaults);
 
-        return new AppOptions
+        var merged = new AppOptions
         {
             Download = loaded.Download ?? defaults.Download,
             Browser = loaded.Browser ?? defaults.Browser,
@@ -62,74 +63,87 @@ public sealed class UserSettingsStore
             License = defaults.License,
             Ui = loaded.Ui ?? defaults.Ui
         };
+        Sanitize(merged);
+        return merged;
     }
 
-    private static AppOptions Clone(AppOptions source) => new()
+    private static void Sanitize(AppOptions options)
     {
-        Download = new DownloadOptions
+        options.Download.MaxConcurrentDownloads =
+            Math.Clamp(options.Download.MaxConcurrentDownloads, 1, 5);
+    }
+
+    private static AppOptions Clone(AppOptions source)
+    {
+        var clone = new AppOptions
         {
-            DefaultSavePath = source.Download.DefaultSavePath,
-            MaxConcurrentDownloads = source.Download.MaxConcurrentDownloads,
-            RetryCount = source.Download.RetryCount,
-            AutoRecoverDownloads = source.Download.AutoRecoverDownloads,
-            FailedRetryIntervalSeconds = source.Download.FailedRetryIntervalSeconds,
-            ParallelConnections = source.Download.ParallelConnections,
-            ParallelMinBytes = source.Download.ParallelMinBytes,
-            ParallelAudioVideoTracks = source.Download.ParallelAudioVideoTracks
-        },
-        Browser = new BrowserOptions
-        {
-            UserDataFolder = source.Browser.UserDataFolder,
-            CaptureCookies = source.Browser.CaptureCookies
-        },
-        Ffmpeg = new FfmpegOptions { ExecutablePath = source.Ffmpeg.ExecutablePath },
-        Database = new DatabaseOptions { Path = source.Database.Path },
-        Logging = new LoggingOptions
-        {
-            Enabled = source.Logging.Enabled,
-            MinimumLevel = source.Logging.MinimumLevel,
-            LogPath = source.Logging.LogPath
-        },
-        Detection = new DetectionOptions
-        {
-            ChannelCapacity = source.Detection.ChannelCapacity,
-            DedupCacheMaxEntries = source.Detection.DedupCacheMaxEntries,
-            DedupCacheTtlMinutes = source.Detection.DedupCacheTtlMinutes,
-            MinDisplayBytes = source.Detection.MinDisplayBytes
-        },
-        Sites = new SitesOptions
-        {
-            PreferSiteAdapters = source.Sites.PreferSiteAdapters,
-            FallbackToGeneric = source.Sites.FallbackToGeneric,
-            YouTube = new SiteToggleOptions
+            Download = new DownloadOptions
             {
-                Enabled = source.Sites.YouTube.Enabled,
-                ExternalResolver = source.Sites.YouTube.ExternalResolver
+                DefaultSavePath = source.Download.DefaultSavePath,
+                MaxConcurrentDownloads = source.Download.MaxConcurrentDownloads,
+                RetryCount = source.Download.RetryCount,
+                AutoRecoverDownloads = source.Download.AutoRecoverDownloads,
+                FailedRetryIntervalSeconds = source.Download.FailedRetryIntervalSeconds,
+                ParallelConnections = source.Download.ParallelConnections,
+                ParallelMinBytes = source.Download.ParallelMinBytes,
+                ParallelAudioVideoTracks = source.Download.ParallelAudioVideoTracks
             },
-            Bilibili = new SiteToggleOptions { Enabled = source.Sites.Bilibili.Enabled },
-            Douyin = new SiteToggleOptions { Enabled = source.Sites.Douyin.Enabled },
-            TikTok = new SiteToggleOptions
+            Browser = new BrowserOptions
             {
-                Enabled = source.Sites.TikTok.Enabled,
-                ExternalResolver = source.Sites.TikTok.ExternalResolver
+                UserDataFolder = source.Browser.UserDataFolder,
+                CaptureCookies = source.Browser.CaptureCookies
+            },
+            Ffmpeg = new FfmpegOptions { ExecutablePath = source.Ffmpeg.ExecutablePath },
+            Database = new DatabaseOptions { Path = source.Database.Path },
+            Logging = new LoggingOptions
+            {
+                Enabled = source.Logging.Enabled,
+                MinimumLevel = source.Logging.MinimumLevel,
+                LogPath = source.Logging.LogPath
+            },
+            Detection = new DetectionOptions
+            {
+                ChannelCapacity = source.Detection.ChannelCapacity,
+                DedupCacheMaxEntries = source.Detection.DedupCacheMaxEntries,
+                DedupCacheTtlMinutes = source.Detection.DedupCacheTtlMinutes,
+                MinDisplayBytes = source.Detection.MinDisplayBytes
+            },
+            Sites = new SitesOptions
+            {
+                PreferSiteAdapters = source.Sites.PreferSiteAdapters,
+                FallbackToGeneric = source.Sites.FallbackToGeneric,
+                YouTube = new SiteToggleOptions
+                {
+                    Enabled = source.Sites.YouTube.Enabled,
+                    ExternalResolver = source.Sites.YouTube.ExternalResolver
+                },
+                Bilibili = new SiteToggleOptions { Enabled = source.Sites.Bilibili.Enabled },
+                Douyin = new SiteToggleOptions { Enabled = source.Sites.Douyin.Enabled },
+                TikTok = new SiteToggleOptions
+                {
+                    Enabled = source.Sites.TikTok.Enabled,
+                    ExternalResolver = source.Sites.TikTok.ExternalResolver
+                }
+            },
+            ExternalResolvers = new ExternalResolversOptions
+            {
+                Enabled = source.ExternalResolvers.Enabled,
+                UseBrowserCookies = source.ExternalResolvers.UseBrowserCookies,
+                YtDlpPath = source.ExternalResolvers.YtDlpPath
+            },
+            License = new LicenseOptions
+            {
+                Endpoint = source.License.Endpoint,
+                PublicKeyPem = source.License.PublicKeyPem,
+                DemoMaxBytes = source.License.DemoMaxBytes
+            },
+            Ui = new UiOptions
+            {
+                Language = source.Ui?.Language ?? "zh-CN",
+                QueueGrouped = source.Ui?.QueueGrouped ?? false
             }
-        },
-        ExternalResolvers = new ExternalResolversOptions
-        {
-            Enabled = source.ExternalResolvers.Enabled,
-            UseBrowserCookies = source.ExternalResolvers.UseBrowserCookies,
-            YtDlpPath = source.ExternalResolvers.YtDlpPath
-        },
-        License = new LicenseOptions
-        {
-            Endpoint = source.License.Endpoint,
-            PublicKeyPem = source.License.PublicKeyPem,
-            DemoMaxBytes = source.License.DemoMaxBytes
-        },
-        Ui = new UiOptions
-        {
-            Language = source.Ui?.Language ?? "zh-CN",
-            QueueGrouped = source.Ui?.QueueGrouped ?? false
-        }
-    };
+        };
+        Sanitize(clone);
+        return clone;
+    }
 }

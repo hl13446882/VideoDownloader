@@ -70,7 +70,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         _resolvers = (resolvers ?? []).ToArray();
         _availability = availability;
         _rediscoverer = rediscoverer;
-        _concurrency = new SemaphoreSlim(_options.Download.MaxConcurrentDownloads);
+        _concurrency = new SemaphoreSlim(Math.Clamp(_options.Download.MaxConcurrentDownloads, 1, 5));
         _failedRetryLoop = Task.Run(() => FailedRetryLoopAsync(_lifetime.Token));
     }
 
