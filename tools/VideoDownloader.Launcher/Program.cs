@@ -1,9 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Net.Http;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -16,6 +19,7 @@ internal static class Program
     private const string RequiredMajor = "10";
     private const string RuntimeInstallerUrl =
         "https://aka.ms/dotnet/10.0/windowsdesktop-runtime-win-x64.exe";
+    private const string ApplyUpdateArg = "--apply-update";
 
     [DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr hWnd);
@@ -40,12 +44,31 @@ internal static class Program
         LoadingForm splash = null;
         try
         {
-            splash = new LoadingForm();
-            splash.Show();
-            splash.Activate();
-            Application.DoEvents();
-
             var rootDir = AppDomain.CurrentDomain.BaseDirectory;
+            var applyUpdate = args != null && args.Any(a =>
+                string.Equals(a, ApplyUpdateArg, StringComparison.OrdinalIgnoreCase));
+
+            if (applyUpdate || File.Exists(PendingUpdatePath()))
+            {
+                splash = new LoadingForm();
+                splash.Show();
+                splash.SetStatus("正在应用更新…");
+                Application.DoEvents();
+                if (!TryApplyPendingUpdate(rootDir, splash))
+                    return 1;
+                args = (args ?? Array.Empty<string>())
+                    .Where(a => !string.Equals(a, ApplyUpdateArg, StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+            }
+
+            if (splash == null)
+            {
+                splash = new LoadingForm();
+                splash.Show();
+                splash.Activate();
+                Application.DoEvents();
+            }
+
             var appExe = Path.GetFullPath(Path.Combine(rootDir, AppRelativePath));
             var appDir = Path.GetDirectoryName(appExe);
             if (appDir is null || !File.Exists(appExe))
@@ -138,6 +161,246 @@ internal static class Program
         }
     }
 
+    private static string PendingUpdatePath()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "VideoDownloader",
+            "pending-update.json");
+    }
+
+    private static string UpdateErrorLogPath()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "VideoDownloader",
+            "update-error.log");
+    }
+
+    private static bool TryApplyPendingUpdate(string launcherDir, LoadingForm splash)
+    {
+        var pendingPath = PendingUpdatePath();
+        if (!File.Exists(pendingPath))
+            return true;
+
+        try
+        {
+            WaitForAppExit(splash);
+            StopHelperProcesses();
+
+            var json = File.ReadAllText(pendingPath);
+            using (var doc = JsonDocument.Parse(json))
+            {
+                var root = doc.RootElement;
+                var installRoot = root.TryGetProperty("installRoot", out var ir)
+                    ? ir.GetString()
+                    : launcherDir;
+                var zipPath = root.TryGetProperty("zipPath", out var zp) ? zp.GetString() : null;
+                if (string.IsNullOrWhiteSpace(installRoot))
+                    installRoot = launcherDir;
+
+                installRoot = Path.GetFullPath(installRoot);
+                if (!string.Equals(
+                        Path.GetFullPath(launcherDir).TrimEnd('\\'),
+                        installRoot.TrimEnd('\\'),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    // Safety: only apply into the directory that started us.
+                    installRoot = Path.GetFullPath(launcherDir);
+                }
+
+                var staging = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "VideoDownloader",
+                    "updates",
+                    "staging-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(staging);
+
+                if (!string.IsNullOrWhiteSpace(zipPath) && File.Exists(zipPath))
+                {
+                    splash.SetStatus("正在解压更新包…");
+                    Application.DoEvents();
+                    ExtractZipSafe(zipPath, staging);
+
+                    splash.SetStatus("正在替换文件…");
+                    Application.DoEvents();
+                    string deferredLauncherSource = null;
+                    string currentLauncherPath = null;
+                    try
+                    {
+                        if (Process.GetCurrentProcess().MainModule != null)
+                            currentLauncherPath = Path.GetFullPath(Process.GetCurrentProcess().MainModule.FileName);
+                    }
+                    catch
+                    {
+                        currentLauncherPath = Path.GetFullPath(Path.Combine(installRoot, "VideoDownloader.exe"));
+                    }
+
+                    foreach (var file in Directory.EnumerateFiles(staging, "*", SearchOption.AllDirectories))
+                    {
+                        var relative = file.Substring(staging.Length)
+                            .TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                        if (relative.IndexOf("..", StringComparison.Ordinal) >= 0)
+                            throw new InvalidDataException("Unsafe update path: " + relative);
+
+                        var dest = Path.Combine(installRoot, relative);
+                        var destFull = Path.GetFullPath(dest);
+                        if (currentLauncherPath != null &&
+                            string.Equals(destFull, currentLauncherPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            deferredLauncherSource = file;
+                            continue;
+                        }
+
+                        Directory.CreateDirectory(Path.GetDirectoryName(dest));
+                        File.Copy(file, dest, true);
+                    }
+
+                    if (deferredLauncherSource != null)
+                    {
+                        var newPath = Path.Combine(installRoot, "VideoDownloader.exe.new");
+                        File.Copy(deferredLauncherSource, newPath, true);
+                        ScheduleLauncherReplace(installRoot, newPath);
+                    }
+                }
+
+                if (root.TryGetProperty("deletes", out var deletes) && deletes.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var item in deletes.EnumerateArray())
+                    {
+                        var relative = item.GetString();
+                        if (string.IsNullOrWhiteSpace(relative) || relative.IndexOf("..", StringComparison.Ordinal) >= 0)
+                            continue;
+                        var target = Path.Combine(installRoot, relative.Replace('/', Path.DirectorySeparatorChar));
+                        if (File.Exists(target))
+                            File.Delete(target);
+                    }
+                }
+
+                try { Directory.Delete(staging, true); } catch { /* ignore */ }
+            }
+
+            File.Delete(pendingPath);
+            splash.SetStatus("更新完成，正在启动…");
+            Application.DoEvents();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(UpdateErrorLogPath()));
+                File.WriteAllText(UpdateErrorLogPath(), ex.ToString());
+            }
+            catch
+            {
+                // ignore
+            }
+
+            HideSplash(splash);
+            MessageBox.Show(
+                "应用更新失败，将尝试启动当前版本。\n\n" + ex.Message,
+                "Video Downloader",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return true; // continue launching old build
+        }
+    }
+
+    private static void ExtractZipSafe(string zipPath, string staging)
+    {
+        using (var archive = ZipFile.OpenRead(zipPath))
+        {
+            foreach (var entry in archive.Entries)
+            {
+                if (string.IsNullOrEmpty(entry.Name) && entry.FullName.EndsWith("/"))
+                    continue;
+                var relative = entry.FullName.Replace('\\', '/').TrimStart('/');
+                if (relative.Contains("..") || Path.IsPathRooted(relative))
+                    throw new InvalidDataException("Unsafe zip entry: " + entry.FullName);
+                var dest = Path.Combine(staging, relative.Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(dest));
+                entry.ExtractToFile(dest, true);
+            }
+        }
+    }
+
+    private static void ScheduleLauncherReplace(string installRoot, string newLauncherPath)
+    {
+        var bat = Path.Combine(
+            Path.GetTempPath(),
+            "vd-replace-launcher-" + Guid.NewGuid().ToString("N") + ".cmd");
+        var target = Path.Combine(installRoot, "VideoDownloader.exe");
+        var content =
+            "@echo off\r\n" +
+            "ping 127.0.0.1 -n 2 >nul\r\n" +
+            "move /Y \"" + newLauncherPath + "\" \"" + target + "\" >nul\r\n" +
+            "del \"%~f0\"\r\n";
+        File.WriteAllText(bat, content);
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = bat,
+            CreateNoWindow = true,
+            UseShellExecute = false,
+            WindowStyle = ProcessWindowStyle.Hidden
+        });
+    }
+
+    private static void WaitForAppExit(LoadingForm splash)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(60);
+        while (DateTime.UtcNow < deadline)
+        {
+            Application.DoEvents();
+            var stillRunning = Process.GetProcessesByName("VideoDownloader")
+                .Any(p =>
+                {
+                    try
+                    {
+                        if (p.Id == Process.GetCurrentProcess().Id)
+                            return false;
+                        var module = p.MainModule != null ? p.MainModule.FileName : null;
+                        return module != null &&
+                               module.IndexOf("\\app\\VideoDownloader.exe", StringComparison.OrdinalIgnoreCase) >= 0;
+                    }
+                    catch
+                    {
+                        return false;
+                    }
+                });
+            if (!stillRunning)
+                return;
+            splash.SetStatus("等待主程序退出…");
+            Thread.Sleep(250);
+        }
+    }
+
+    private static void StopHelperProcesses()
+    {
+        foreach (var name in new[] { "N_m3u8DL-RE", "ffmpeg", "ffprobe", "yt-dlp" })
+        {
+            try
+            {
+                foreach (var process in Process.GetProcessesByName(name))
+                {
+                    try
+                    {
+                        process.Kill();
+                        process.WaitForExit(3000);
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+    }
+
     private static void HideSplash(LoadingForm splash)
     {
         if (splash is null || splash.IsDisposed)
@@ -155,7 +418,6 @@ internal static class Program
 
     private static void BringMainWindowToFront(Process process, LoadingForm splash)
     {
-        // Wait until the WPF main window exists (startup init can take several seconds).
         var deadline = DateTime.UtcNow.AddSeconds(90);
         IntPtr hwnd = IntPtr.Zero;
         while (DateTime.UtcNow < deadline)
@@ -188,7 +450,6 @@ internal static class Program
             if (IsIconic(hwnd))
                 ShowWindow(hwnd, SwRestore);
             SetForegroundWindow(hwnd);
-            // Keep splash briefly so the transition feels intentional, then drop it.
             splash?.SetStatus("即将打开…");
             Application.DoEvents();
             Thread.Sleep(150);
@@ -211,7 +472,6 @@ internal static class Program
 
     private static bool HasWindowsDesktopRuntime10()
     {
-        // Machine environment only — never the app folder.
         if (TryListRuntimesHasDesktop10())
             return true;
 
@@ -228,8 +488,6 @@ internal static class Program
                     !name.StartsWith(RequiredMajor + ".", StringComparison.Ordinal))
                     continue;
 
-                // Shared framework folders ship deps/runtimeconfig; do not require a
-                // Microsoft.WindowsDesktop.App.dll (it is not present in install trees).
                 if (File.Exists(Path.Combine(dir, "Microsoft.WindowsDesktop.App.deps.json")) ||
                     File.Exists(Path.Combine(dir, "PresentationFramework.dll")) ||
                     Directory.EnumerateFiles(dir).Any())
@@ -266,7 +524,6 @@ internal static class Program
                 if (process.ExitCode != 0)
                     return false;
 
-                // e.g. Microsoft.WindowsDesktop.App 10.0.9 [...]
                 using (var reader = new StringReader(output))
                 {
                     string line;
@@ -299,7 +556,6 @@ internal static class Program
                 return candidate;
         }
 
-        // PATH lookup (still machine host, not app-dir).
         try
         {
             var psi = new ProcessStartInfo
@@ -330,7 +586,7 @@ internal static class Program
 
     private static string[] MachineDotNetRoots()
     {
-        var list = new System.Collections.Generic.List<string>();
+        var list = new List<string>();
         void Add(string path)
         {
             if (string.IsNullOrWhiteSpace(path))
@@ -344,7 +600,6 @@ internal static class Program
                 return;
             }
 
-            // Never treat the application directory as a runtime root.
             var appDir = Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory)
                 .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             var normalized = path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -422,7 +677,6 @@ internal static class Program
                 }
 
                 process.WaitForExit();
-                // 0 = success, 3010 = success reboot required
                 if (process.ExitCode is 0 or 3010)
                     return true;
 

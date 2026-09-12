@@ -13,6 +13,7 @@ public sealed class AppOptions
     public SitesOptions Sites { get; set; } = new();
     public ExternalResolversOptions ExternalResolvers { get; set; } = new();
     public LicenseOptions License { get; set; } = new();
+    public UpdateOptions Update { get; set; } = new();
     public UiOptions Ui { get; set; } = new();
 }
 
@@ -23,6 +24,15 @@ public sealed class UiOptions
 
     /// <summary>When true, the download queue is grouped by site-folder domain.</summary>
     public bool QueueGrouped { get; set; }
+}
+
+public sealed class UpdateOptions
+{
+    /// <summary>Defaults to the licensing web host (same server as license check).</summary>
+    public string Endpoint { get; set; } = "http://141.164.40.70:11111";
+    public string Channel { get; set; } = "beta";
+    public bool Enabled { get; set; } = true;
+    public bool RequireFullLicense { get; set; } = true;
 }
 
 public sealed class LicenseOptions

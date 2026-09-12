@@ -5,11 +5,13 @@ import bcrypt
 import hashlib
 import hmac
 import html
+import io
 import json
 import os
 import secrets
 import sqlite3
 import sys
+import zipfile
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.cookies import SimpleCookie
@@ -19,10 +21,11 @@ from urllib.parse import parse_qs, urlparse, urlencode
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature, encode_dss_signature
 
 
 DATA_DIR = Path(os.environ.get("VD_LICENSE_DATA", "/var/lib/videodownloader-license"))
+UPDATE_ROOT = Path(os.environ.get("VD_UPDATE_ROOT", "/var/lib/videodownloader-updates"))
 DATABASE = DATA_DIR / "licenses.db"
 PRIVATE_KEY_FILE = DATA_DIR / "signing-key.pem"
 SESSION_SECRET_FILE = DATA_DIR / "session-secret.bin"
@@ -46,6 +49,7 @@ def db():
 
 def initialize():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    UPDATE_ROOT.mkdir(parents=True, exist_ok=True)
     with db() as connection:
         connection.executescript("""
             CREATE TABLE IF NOT EXISTS activations (
@@ -168,6 +172,101 @@ def parse_session(token):
         return None
 
 
+def base64url_decode(value):
+    padded = value.replace("-", "+").replace("_", "/")
+    padded += "=" * (-len(padded) % 4)
+    return base64.b64decode(padded)
+
+
+def public_key():
+    return private_key().public_key()
+
+
+def normalize_update_path(path):
+    if not isinstance(path, str) or not path.strip():
+        return None
+    normalized = path.replace("\\", "/").strip().lstrip("/")
+    if ".." in normalized.split("/") or normalized.startswith("~/") or Path(normalized).is_absolute():
+        return None
+    return normalized
+
+
+def channel_dir(channel):
+    if not isinstance(channel, str) or not channel or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for c in channel):
+        return None
+    return UPDATE_ROOT / channel
+
+
+def load_manifest(channel):
+    root = channel_dir(channel)
+    if root is None:
+        return None
+    manifest_path = root / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
+
+
+def verify_full_license(document):
+    if not isinstance(document, dict):
+        return False, "invalid_license"
+    machine_id = document.get("machine_id", "")
+    edition = document.get("edition", "")
+    issued_at = document.get("issued_at", "")
+    expires_at = document.get("expires_at", "")
+    signature = document.get("signature", "")
+    if not isinstance(machine_id, str) or len(machine_id) != 64 or any(c not in "0123456789abcdef" for c in machine_id):
+        return False, "invalid_machine_id"
+    if edition != "full":
+        return False, "not_full"
+    try:
+        issued = datetime.fromisoformat(issued_at.replace("Z", "+00:00"))
+        expires = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except Exception:
+        return False, "invalid_time"
+    now = utcnow()
+    if expires <= now or issued > now + timedelta(minutes=5):
+        return False, "expired"
+    canonical = "\n".join((machine_id, edition, issued_at, expires_at)).encode()
+    try:
+        raw = base64url_decode(signature)
+        if len(raw) != 64:
+            return False, "bad_signature"
+        der = encode_dss_signature(int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big"))
+        public_key().verify(der, canonical, ec.ECDSA(hashes.SHA256()))
+    except Exception:
+        return False, "bad_signature"
+    return True, machine_id
+
+
+def build_delta_zip(channel, paths):
+    root = channel_dir(channel)
+    if root is None:
+        raise ValueError("invalid_channel")
+    files_root = (root / "files").resolve()
+    manifest = load_manifest(channel)
+    if not manifest:
+        raise FileNotFoundError("manifest_missing")
+    allowed = {}
+    for entry in manifest.get("files", []):
+        relative = normalize_update_path(entry.get("path", ""))
+        if relative:
+            allowed[relative] = entry
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for raw_path in paths:
+            relative = normalize_update_path(raw_path)
+            if relative is None or relative not in allowed:
+                raise PermissionError("path_not_allowed:" + str(raw_path))
+            source = (files_root / relative).resolve()
+            if not str(source).startswith(str(files_root) + os.sep) and source != files_root:
+                raise PermissionError("path_escape")
+            if not source.is_file():
+                raise FileNotFoundError(relative)
+            archive.write(source, arcname=relative.replace("\\", "/"))
+    return buffer.getvalue()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "VideoDownloaderLicense/1.0"
 
@@ -183,9 +282,17 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def read_json(self):
+    def send_bytes(self, status, data, content_type):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def read_json(self, max_length=1024 * 1024):
         length = int(self.headers.get("Content-Length", "0"))
-        if length > 4096:
+        if length > max_length:
             raise ValueError("request too large")
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
@@ -230,6 +337,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def updates_page(self, user):
+        rows = []
+        if UPDATE_ROOT.exists():
+            for channel_path in sorted(UPDATE_ROOT.iterdir()):
+                if not channel_path.is_dir():
+                    continue
+                manifest = load_manifest(channel_path.name) or {}
+                version = html.escape(str(manifest.get("version", "-")))
+                published = html.escape(str(manifest.get("published_at", "-")))
+                count = len(manifest.get("files", [])) if isinstance(manifest.get("files"), list) else 0
+                rows.append(f"<tr><td>{html.escape(channel_path.name)}</td><td>{version}</td><td>{published}</td><td>{count}</td></tr>")
+        body = f"<div class='bar'><h1>客户端更新</h1><div>{html.escape(user)} | <a href='/admin/logout'>退出</a></div></div>"
+        body += "<p><a href='/admin'>授权管理</a> | <a href='/admin/logs'>查看日志</a> | <a href='/admin/updates'>客户端更新</a> | <a href='/admin/users'>管理员账号</a> | <a href='/admin/password'>修改我的密码</a></p>"
+        body += "<p>发布目录由 publish 脚本同步到服务器；文件树不对匿名开放，仅正版许可可通过 API 拉取差量包。</p>"
+        body += "<table><thead><tr><th>通道</th><th>版本</th><th>发布时间</th><th>文件数</th></tr></thead><tbody>"
+        body += "".join(rows) or "<tr><td colspan='4'>暂无已发布更新</td></tr>"
+        body += "</tbody></table>"
+        return self.send_page("客户端更新", body)
+
     def records_page(self, user, logs=False):
         args = parse_qs(urlparse(self.path).query)
         query = args.get("q", [""])[0][:128].strip()
@@ -271,7 +397,7 @@ class Handler(BaseHTTPRequestHandler):
             records.append("<tr>" + cells + "</tr>")
         if not logs: headers += "<th>状态</th><th>操作</th>"
         title = "操作日志" if logs else "授权管理"
-        body = f"<div class='bar'><h1>{title}</h1><div>{html.escape(user)} | <a href='/admin/logout'>退出</a></div></div><p><a href='/admin'>授权管理</a> | <a href='/admin/logs'>查看日志</a> | <a href='/admin/users'>管理员账号</a> | <a href='/admin/password'>修改我的密码</a></p>"
+        body = f"<div class='bar'><h1>{title}</h1><div>{html.escape(user)} | <a href='/admin/logout'>退出</a></div></div><p><a href='/admin'>授权管理</a> | <a href='/admin/logs'>查看日志</a> | <a href='/admin/updates'>客户端更新</a> | <a href='/admin/users'>管理员账号</a> | <a href='/admin/password'>修改我的密码</a></p>"
         body += f"<form method='get' action='{path}'><input name='q' value='{html.escape(query, quote=True)}' placeholder='查询机器 ID'><input type='hidden' name='sort' value='{sort}'><input type='hidden' name='dir' value='{direction.lower()}'><button>查询</button> <a href='{path}'>清除</a></form>"
         body += "<style>td{overflow-wrap:anywhere;max-width:280px}th{white-space:nowrap}h1{font-size:26px}body{padding:0 12px}</style>"
         body += "<div style='overflow-x:auto'><table><thead><tr>" + headers + "</tr></thead><tbody>" + ("".join(records) or "<tr><td colspan='7'>暂无记录</td></tr>") + "</tbody></table></div>"
@@ -279,6 +405,42 @@ class Handler(BaseHTTPRequestHandler):
         if page > 1: body += f" | <a href='{link(page=page-1)}'>上一页</a>"
         if page < pages: body += f" | <a href='{link(page=page+1)}'>下一页</a>"
         return self.send_page(title, body + "</p>")
+
+    def handle_update_manifest(self):
+        try:
+            payload = self.read_json()
+        except (ValueError, json.JSONDecodeError):
+            return self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request"})
+        ok, detail = verify_full_license(payload.get("license"))
+        if not ok:
+            return self.send_json(HTTPStatus.FORBIDDEN, {"error": detail})
+        channel = payload.get("channel", "beta")
+        manifest = load_manifest(channel)
+        if not manifest:
+            return self.send_json(HTTPStatus.NOT_FOUND, {"error": "no_release"})
+        return self.send_json(HTTPStatus.OK, manifest)
+
+    def handle_update_delta(self):
+        try:
+            payload = self.read_json()
+        except (ValueError, json.JSONDecodeError):
+            return self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request"})
+        ok, detail = verify_full_license(payload.get("license"))
+        if not ok:
+            return self.send_json(HTTPStatus.FORBIDDEN, {"error": detail})
+        channel = payload.get("channel", "beta")
+        paths = payload.get("paths", [])
+        if not isinstance(paths, list) or not paths or len(paths) > 5000:
+            return self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_paths"})
+        try:
+            data = build_delta_zip(channel, paths)
+        except PermissionError:
+            return self.send_json(HTTPStatus.FORBIDDEN, {"error": "path_not_allowed"})
+        except FileNotFoundError:
+            return self.send_json(HTTPStatus.NOT_FOUND, {"error": "file_missing"})
+        except ValueError:
+            return self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_channel"})
+        return self.send_bytes(HTTPStatus.OK, data, "application/zip")
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -298,6 +460,11 @@ class Handler(BaseHTTPRequestHandler):
             if not user:
                 return
             return self.records_page(user, logs=path == "/admin/logs")
+        if path == "/admin/updates":
+            user = self.require_admin()
+            if not user:
+                return
+            return self.updates_page(user)
         if path == "/admin/users":
             if not self.require_admin(): return
             return self.send_page("管理员账号", "<h1>添加管理员</h1><form method='post'><input name='username' placeholder='账号' required><input name='password' type='password' placeholder='初始密码，至少 8 位' required><button>添加</button></form><p><a href='/admin'>返回</a></p>")
@@ -310,7 +477,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/api/v1/license/check":
             try:
-                payload = self.read_json()
+                payload = self.read_json(max_length=4096)
                 machine_id = payload.get("machine_id", "")
                 if not isinstance(machine_id, str) or len(machine_id) != 64 or any(c not in "0123456789abcdef" for c in machine_id):
                     return self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_machine_id"})
@@ -323,6 +490,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(HTTPStatus.OK, license_payload(machine_id, bool(row["approved"])))
             except (ValueError, json.JSONDecodeError):
                 return self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request"})
+        if path == "/api/v1/update/manifest":
+            return self.handle_update_manifest()
+        if path == "/api/v1/update/delta":
+            return self.handle_update_delta()
         if path == "/admin/login":
             form = self.read_form()
             with db() as connection:

@@ -8,14 +8,13 @@
     <LangVersion>latest</LangVersion>
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationIcon>..\..\src\VideoDownloader.UI\Assets\app.ico</ApplicationIcon>
-    <Version>0.2.0-beta</Version>
-    <AssemblyTitle>Video Downloader</AssemblyTitle>
-    <Product>Video Downloader</Product>
-    <Company>VideoDownloader</Company>
     <!-- Framework-dependent on .NET Framework 4.8 (preinstalled on Win10/11). -->
     <RuntimeIdentifier></RuntimeIdentifier>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="System.Net.Http" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
   </ItemGroup>
 </Project>

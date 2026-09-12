@@ -13,6 +13,7 @@ class AdminTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         app.DATA_DIR = Path(self.temp.name)
+        app.UPDATE_ROOT = Path(self.temp.name) / 'updates'
         app.DATABASE = app.DATA_DIR / 'licenses.db'
         app.PRIVATE_KEY_FILE = app.DATA_DIR / 'key.pem'
         app.SESSION_SECRET_FILE = app.DATA_DIR / 'secret.bin'
@@ -30,8 +31,9 @@ class AdminTests(unittest.TestCase):
     def tearDown(self):
         self.server.shutdown()
         self.server.server_close()
-        self.thread.join()
-        self.temp.cleanup()
+        self.thread.join(timeout=5)
+        import shutil
+        shutil.rmtree(self.temp.name, ignore_errors=True)
 
     def request(self, path, data=None, api=False, authorized=True):
         headers = {'Cookie': self.cookie} if authorized else {}
@@ -42,9 +44,12 @@ class AdminTests(unittest.TestCase):
         connection = http.client.HTTPConnection(*self.server.server_address)
         connection.request('POST' if data is not None else 'GET', path, body, headers)
         response = connection.getresponse()
-        result = response.status, response.read().decode()
+        raw = response.read()
+        status = response.status
         connection.close()
-        return result
+        if api and path.endswith('/delta'):
+            return status, raw
+        return status, raw.decode()
 
     def test_first_query_approval_revocation_and_history(self):
         machine = 'a'*64
@@ -94,6 +99,52 @@ class AdminTests(unittest.TestCase):
             dump = str([tuple(row) for row in rows])
             self.assertNotIn('test-password-123', dump)
             self.assertNotIn('new-password-456', dump)
+
+    def _seed_release(self):
+        channel = app.UPDATE_ROOT / 'beta'
+        files = channel / 'files'
+        files.mkdir(parents=True, exist_ok=True)
+        payload = b'hello-update'
+        target = files / 'app'
+        target.mkdir(parents=True, exist_ok=True)
+        (target / 'VideoDownloader.exe').write_bytes(payload)
+        digest = __import__('hashlib').sha256(payload).hexdigest()
+        manifest = {
+            'channel': 'beta',
+            'version': '0.2.1-beta',
+            'published_at': '2026-09-12T00:00:00Z',
+            'release_notes': 'test',
+            'files': [{'path': 'app/VideoDownloader.exe', 'sha256': digest, 'size': len(payload)}],
+        }
+        (channel / 'manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
+        return digest
+
+    def test_update_requires_full_license_and_serves_delta(self):
+        digest = self._seed_release()
+        machine = 'b' * 64
+        demo = json.loads(self.request('/api/v1/license/check', {'machine_id': machine}, api=True)[1])
+        status, body = self.request('/api/v1/update/manifest', {'channel': 'beta', 'license': demo}, api=True)
+        self.assertEqual(403, status)
+        self.assertIn('not_full', body)
+        self.assertEqual(303, self.request('/admin/activation/' + machine, {'approved': 1})[0])
+        full = json.loads(self.request('/api/v1/license/check', {'machine_id': machine}, api=True)[1])
+        status, body = self.request('/api/v1/update/manifest', {'channel': 'beta', 'license': full}, api=True)
+        self.assertEqual(200, status)
+        manifest = json.loads(body)
+        self.assertEqual('0.2.1-beta', manifest['version'])
+        status, raw = self.request(
+            '/api/v1/update/delta',
+            {'channel': 'beta', 'paths': ['app/VideoDownloader.exe'], 'license': full},
+            api=True)
+        self.assertEqual(200, status)
+        self.assertEqual(b'PK', raw[:2])
+        status, body = self.request(
+            '/api/v1/update/delta',
+            {'channel': 'beta', 'paths': ['../etc/passwd'], 'license': full},
+            api=True)
+        self.assertEqual(403, status)
+        self.assertEqual(digest, manifest['files'][0]['sha256'])
+        self.assertEqual(200, self.request('/admin/updates')[0])
 
 
 if __name__ == '__main__':

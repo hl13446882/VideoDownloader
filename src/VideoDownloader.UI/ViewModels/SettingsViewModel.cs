@@ -3,9 +3,11 @@ using System.IO;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Microsoft.Extensions.DependencyInjection;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Logging;
 using VideoDownloader.Infrastructure.Security;
+using VideoDownloader.Infrastructure.Update;
 using VideoDownloader.UI.Localization;
 
 namespace VideoDownloader.UI.ViewModels;
@@ -16,6 +18,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly UserSettingsStore _store;
     private readonly AppLogService _appLog;
     private readonly LocalizationService _loc;
+    private readonly IServiceProvider _services;
 
     [ObservableProperty]
     private string _savePath;
@@ -41,7 +44,12 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     private string _statusMessage = string.Empty;
 
+    [ObservableProperty]
+    private bool _checkUpdateEnabled = true;
+
     public LocalizationService L => _loc;
+
+    public string AppVersionText => AppVersionInfo.SemVer;
 
     public IReadOnlyList<int> ConcurrentOptions { get; } = [1, 2, 3, 4, 5];
 
@@ -49,12 +57,14 @@ public sealed partial class SettingsViewModel : ObservableObject
         AppOptions options,
         UserSettingsStore store,
         AppLogService appLog,
-        LocalizationService loc)
+        LocalizationService loc,
+        IServiceProvider services)
     {
         _options = options;
         _store = store;
         _appLog = appLog;
         _loc = loc;
+        _services = services;
         _savePath = options.Download.DefaultSavePath;
         _maxConcurrent = Math.Clamp(options.Download.MaxConcurrentDownloads, 1, 5);
         _retryCountText = options.Download.RetryCount.ToString();
@@ -62,7 +72,11 @@ public sealed partial class SettingsViewModel : ObservableObject
         _autoRecover = options.Download.AutoRecoverDownloads;
         _loggingEnabled = options.Logging.Enabled;
         _logLevel = options.Logging.MinimumLevel;
-        _loc.LanguageChanged += (_, _) => OnPropertyChanged(nameof(L));
+        _loc.LanguageChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(L));
+            OnPropertyChanged(nameof(AppVersionText));
+        };
     }
 
     [RelayCommand]
@@ -134,6 +148,21 @@ public sealed partial class SettingsViewModel : ObservableObject
         catch (Exception ex)
         {
             StatusMessage = _loc.Format("settings.openLogsFolderFailed", ex.Message);
+        }
+    }
+
+    [RelayCommand]
+    private async Task CheckUpdateAsync()
+    {
+        CheckUpdateEnabled = false;
+        try
+        {
+            StatusMessage = _loc.T("update.checking");
+            StatusMessage = await ClientUpdateCoordinator.RunManualCheckAsync(_services);
+        }
+        finally
+        {
+            CheckUpdateEnabled = true;
         }
     }
 }

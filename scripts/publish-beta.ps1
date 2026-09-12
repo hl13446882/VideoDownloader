@@ -87,6 +87,16 @@ if ($rc -ge 8) { throw "robocopy failed with code $rc" }
 
 Write-Host "Published: $target\VideoDownloader.exe"
 
+# Upload differential update package to the licensing/web host.
+$updateScript = Join-Path $root 'scripts\publish-update-server.ps1'
+if (Test-Path -LiteralPath $updateScript) {
+  Write-Host 'Publishing update package to server...'
+  & $updateScript -PackageDir $target
+  if ($LASTEXITCODE -ne 0) {
+    throw "Update server publish failed (exit $LASTEXITCODE)."
+  }
+}
+
 # Auto site verification (YouTube / Douyin / Bilibili detect + switch).
 $verifyScript = Join-Path $root 'scripts\verify-sites.ps1'
 if (-not $SkipVerify -and (Test-Path -LiteralPath $verifyScript)) {

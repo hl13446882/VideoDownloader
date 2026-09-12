@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="{Binding L.SettingsTitle}"
         Icon="pack://application:,,,/Assets/app.ico"
-        Height="540"
+        Height="580"
         Width="540"
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize">
@@ -66,7 +66,17 @@
         <CheckBox Grid.Row="7" Grid.Column="1" Content="{Binding L.SettingsAutoRecover}"
                   IsChecked="{Binding AutoRecover}" Margin="0,0,0,8"/>
 
-        <TextBlock Grid.Row="8" Grid.Column="0" Grid.ColumnSpan="2"
+        <TextBlock Grid.Row="8" Grid.Column="0" Text="{Binding L.SettingsAppVersion}" VerticalAlignment="Center" Margin="0,0,8,8"/>
+        <DockPanel Grid.Row="8" Grid.Column="1" Margin="0,0,0,8">
+            <Button DockPanel.Dock="Right"
+                    Content="{Binding L.SettingsCheckUpdate}"
+                    Command="{Binding CheckUpdateCommand}"
+                    Padding="12,4" Margin="8,0,0,0"
+                    IsEnabled="{Binding CheckUpdateEnabled}"/>
+            <TextBlock Text="{Binding AppVersionText}" VerticalAlignment="Center" TextWrapping="Wrap"/>
+        </DockPanel>
+
+        <TextBlock Grid.Row="9" Grid.Column="0" Grid.ColumnSpan="2"
                    Text="{Binding StatusMessage}" Foreground="#047857" Margin="0,8,0,8" TextWrapping="Wrap"/>
 
         <StackPanel Grid.Row="10" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right">

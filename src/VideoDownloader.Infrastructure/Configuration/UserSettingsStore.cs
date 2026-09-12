@@ -61,6 +61,7 @@ public sealed class UserSettingsStore
             Sites = loaded.Sites ?? defaults.Sites,
             ExternalResolvers = loaded.ExternalResolvers ?? defaults.ExternalResolvers,
             License = defaults.License,
+            Update = defaults.Update,
             Ui = loaded.Ui ?? defaults.Ui
         };
         Sanitize(merged);
@@ -136,6 +137,13 @@ public sealed class UserSettingsStore
                 Endpoint = source.License.Endpoint,
                 PublicKeyPem = source.License.PublicKeyPem,
                 DemoMaxBytes = source.License.DemoMaxBytes
+            },
+            Update = new UpdateOptions
+            {
+                Endpoint = source.Update.Endpoint,
+                Channel = source.Update.Channel,
+                Enabled = source.Update.Enabled,
+                RequireFullLicense = source.Update.RequireFullLicense
             },
             Ui = new UiOptions
             {

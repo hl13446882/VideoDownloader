@@ -107,6 +107,8 @@ public sealed partial class LocalizationService : ObservableObject
         OnPropertyChanged(nameof(SettingsOpenLogsFolder));
         OnPropertyChanged(nameof(SettingsOpenLogsFolderTip));
         OnPropertyChanged(nameof(SettingsAutoRecover));
+        OnPropertyChanged(nameof(SettingsAppVersion));
+        OnPropertyChanged(nameof(SettingsCheckUpdate));
         OnPropertyChanged(nameof(SettingsSave));
         OnPropertyChanged(nameof(SettingsClose));
         OnPropertyChanged(nameof(DialogTitle));
@@ -158,6 +160,8 @@ public sealed partial class LocalizationService : ObservableObject
     public string SettingsOpenLogsFolder => T("settings.openLogsFolder");
     public string SettingsOpenLogsFolderTip => T("settings.openLogsFolderTip");
     public string SettingsAutoRecover => T("settings.autoRecover");
+    public string SettingsAppVersion => T("settings.appVersion");
+    public string SettingsCheckUpdate => T("settings.checkUpdate");
     public string SettingsSave => T("settings.save");
     public string SettingsClose => T("settings.close");
     public string DialogTitle => T("dialog.title");
@@ -220,6 +224,8 @@ public sealed partial class LocalizationService : ObservableObject
         ["settings.openLogsFolderDone"] = ("已打开日志目录：{0}", "Opened logs folder: {0}"),
         ["settings.openLogsFolderFailed"] = ("无法打开日志目录：{0}", "Cannot open logs folder: {0}"),
         ["settings.autoRecover"] = ("启动时自动恢复已暂停的下载", "Auto-resume paused downloads on startup"),
+        ["settings.appVersion"] = ("应用版本", "App version"),
+        ["settings.checkUpdate"] = ("检查更新", "Check for updates"),
         ["settings.save"] = ("保存", "Save"),
         ["settings.close"] = ("关闭", "Close"),
         ["settings.invalidPath"] = ("保存目录无效，请填写绝对路径。", "Invalid save folder. Use an absolute path."),
@@ -228,6 +234,17 @@ public sealed partial class LocalizationService : ObservableObject
         ["settings.invalidFailedRetryInterval"] = ("失败捞起间隔必须是数字。", "Failed retry interval must be a number."),
         ["settings.saved"] = ("设置已保存。日志开关立即生效；并发数变更需重启应用后生效。",
             "Settings saved. Logging applies immediately; concurrent changes need an app restart."),
+        ["update.checking"] = ("正在检查更新…", "Checking for updates…"),
+        ["update.licenseRequired"] = ("仅正版用户可更新。", "Updates are available for licensed users only."),
+        ["update.upToDate"] = ("当前已是最新版本（{0}）。", "You are on the latest version ({0})."),
+        ["update.promptTitle"] = ("发现新版本", "Update available"),
+        ["update.promptBody"] = ("新版本 {0} 已下载完成，需要关闭并重启以完成更新。是否立即重启？",
+            "Version {0} has been downloaded. Close and restart to finish updating?"),
+        ["update.readyLater"] = ("新版本 {0} 已就绪，下次确认后即可升级。", "Version {0} is ready; confirm later to apply."),
+        ["update.restarting"] = ("正在重启以应用 {0}…", "Restarting to apply {0}…"),
+        ["update.forbidden"] = ("服务器拒绝更新请求（需要有效正版许可）。", "Update rejected (valid full license required)."),
+        ["update.failed"] = ("检查更新失败：{0}", "Update check failed: {0}"),
+        ["update.applyFailed"] = ("上次自动升级失败：\n{0}", "Previous auto-update failed:\n{0}"),
         ["dialog.title"] = ("提示", "Notice"),
         ["dialog.removeTitle"] = ("移除下载任务", "Remove download"),
         ["dialog.removeBody"] = ("请选择移除方式：\n\n是 — 删除记录并删除已下载文件\n否 — 仅删除记录，保留文件\n取消 — 不移除",

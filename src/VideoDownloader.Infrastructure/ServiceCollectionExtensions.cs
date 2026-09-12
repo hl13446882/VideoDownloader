@@ -20,6 +20,7 @@ using VideoDownloader.Infrastructure.Manifests;
 using VideoDownloader.Infrastructure.Persistence;
 using VideoDownloader.Infrastructure.Sites;
 using VideoDownloader.Infrastructure.Sites.ExternalResolvers;
+using VideoDownloader.Infrastructure.Update;
 
 namespace VideoDownloader.Infrastructure;
 
@@ -92,6 +93,22 @@ public static class ServiceCollectionExtensions
             sp.GetRequiredService<IHttpClientFactory>().CreateClient("license"),
             sp.GetRequiredService<IOptions<AppOptions>>(),
             sp.GetRequiredService<ILogger<LicenseService>>()));
+
+        services.AddHttpClient("update", client =>
+        {
+            client.BaseAddress = new Uri(options.Update.Endpoint.TrimEnd('/') + "/");
+            client.Timeout = TimeSpan.FromMinutes(30);
+        }).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        {
+            UseCookies = false,
+            UseProxy = false,
+            AutomaticDecompression = System.Net.DecompressionMethods.All
+        });
+        services.AddSingleton(sp => new UpdateService(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient("update"),
+            sp.GetRequiredService<LicenseService>(),
+            sp.GetRequiredService<IOptions<AppOptions>>(),
+            sp.GetRequiredService<ILogger<UpdateService>>()));
 
         services.AddHttpClient("media-primary", client =>
             {

@@ -9,6 +9,7 @@ Group=videodownloader
 WorkingDirectory=/opt/videodownloader-license
 Environment=VD_LICENSE_DATA=/var/lib/videodownloader-license
 Environment=VD_LICENSE_PORT=11111
+Environment=VD_UPDATE_ROOT=/var/lib/videodownloader-updates
 ExecStart=/usr/bin/python3 /opt/videodownloader-license/licensing_server.py
 Restart=always
 RestartSec=3
@@ -16,6 +17,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/videodownloader-license
+ReadOnlyPaths=/var/lib/videodownloader-updates
 
 [Install]
 WantedBy=multi-user.target

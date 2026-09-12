@@ -20,10 +20,6 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
-    <Version>0.2.0-beta</Version>
-    <AssemblyTitle>Video Downloader</AssemblyTitle>
-    <Product>Video Downloader</Product>
-    <Company>VideoDownloader</Company>
   </PropertyGroup>
 
   <ItemGroup>

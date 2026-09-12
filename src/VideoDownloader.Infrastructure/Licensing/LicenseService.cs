@@ -31,6 +31,7 @@ public sealed class LicenseService
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
 
     public LicenseInfo Current { get; private set; } = new("unavailable", false, DateTimeOffset.MinValue, "uninitialized");
+    public LicenseDocument? LastDocument { get; private set; }
     public int? DownloadLimitBytes => Current.IsFull && Current.IsValid ? null : _options.License.DemoMaxBytes;
 
     public LicenseService(HttpClient client, IOptions<AppOptions> options, ILogger<LicenseService> logger)
@@ -63,6 +64,7 @@ public sealed class LicenseService
                 var document = await response.Content.ReadFromJsonAsync<LicenseDocument>(cancellationToken: ct)
                     ?? throw new InvalidDataException("Empty license response.");
                 Current = Verify(document, machineId);
+                LastDocument = document;
                 await File.WriteAllTextAsync(CachePath(), JsonSerializer.Serialize(document), ct);
                 _logger.LogInformation("License checked: edition={Edition}, source=server", Current.IsFull ? "full" : "demo");
             }
@@ -73,11 +75,13 @@ public sealed class LicenseService
                 {
                     var cached = JsonSerializer.Deserialize<LicenseDocument>(await File.ReadAllTextAsync(CachePath(), ct));
                     Current = Verify(cached ?? throw new InvalidDataException("Empty cache."), machineId) with { Source = "cache" };
+                    LastDocument = cached;
                 }
                 catch (Exception cacheEx)
                 {
                     _logger.LogWarning("No valid license cache: {Error}", cacheEx.GetType().Name);
                     Current = new LicenseInfo(machineId, false, DateTimeOffset.MinValue, "demo");
+                    LastDocument = null;
                 }
             }
         }

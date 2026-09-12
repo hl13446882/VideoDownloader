@@ -105,6 +105,9 @@ public partial class App : Application
                 var current = _services.GetRequiredService<LicenseService>().Current;
                 UpdateLicenseTitle(mainWindow, current, loc);
             };
+
+            ClientUpdateCoordinator.ShowPreviousFailureIfAny(loc);
+            _ = ClientUpdateCoordinator.RunStartupCheckAsync(_services);
         }
         catch (Exception ex)
         {
