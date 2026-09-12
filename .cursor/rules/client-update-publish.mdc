@@ -1,0 +1,26 @@
+---
+description: Client update publish — differential upload and SemVer bump
+alwaysApply: true
+---
+
+# Client update publish rules
+
+When running `scripts/publish-beta.ps1` / uploading to the update server (`141.164.40.70`):
+
+1. **Version bump (every publish)**  
+   - Before build, bump SemVer patch via `scripts/bump-release-version.ps1`  
+     (e.g. `0.2.1-beta` → `0.2.2-beta`).  
+   - Keep the prerelease label (`-beta`).  
+   - Sync `Directory.Build.props` and `installer/VideoDownloader.iss`.
+
+2. **Record publish time**  
+   - `manifest.json` must include `published_at` (UTC ISO-8601).  
+   - **`published_at` is metadata only** — client update checks compare SemVer only; never use date/time for “is newer?”.
+
+3. **Differential server upload**  
+   - Do **not** full-upload the whole tree when remote already has a manifest.  
+   - Compare local file SHA256 vs remote `manifest.json`; upload **only changed/new files**; delete obsolete remote paths; always publish the new manifest.  
+   - First publish / unreadable remote / `-ForceFullUpload` may full-upload.
+
+4. **Client download remains differential**  
+   - Clients still pull only changed paths via delta API after comparing local hashes.
