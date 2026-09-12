@@ -10,7 +10,7 @@ namespace VideoDownloader.Launcher;
 
 internal static class Program
 {
-    private const string AppExeName = "VideoDownloader.App.exe";
+    private const string AppRelativePath = @"app\VideoDownloader.exe";
     private const string RequiredMajor = "10";
     private const string RuntimeInstallerUrl =
         "https://aka.ms/dotnet/10.0/windowsdesktop-runtime-win-x64.exe";
@@ -23,12 +23,14 @@ internal static class Program
 
         try
         {
-            var appDir = AppDomain.CurrentDomain.BaseDirectory;
-            var appExe = Path.Combine(appDir, AppExeName);
-            if (!File.Exists(appExe))
+            var rootDir = AppDomain.CurrentDomain.BaseDirectory;
+            var appExe = Path.GetFullPath(Path.Combine(rootDir, AppRelativePath));
+            var appDir = Path.GetDirectoryName(appExe);
+            if (appDir is null || !File.Exists(appExe))
             {
                 MessageBox.Show(
-                    "找不到主程序 VideoDownloader.App.exe。\nPlease reinstall / 请重新复制完整发布包。",
+                    "找不到主程序（app\\VideoDownloader.exe）。\n请重新复制完整发布包。\n\n" +
+                    "Main program not found. Please reinstall the full package.",
                     "Video Downloader",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
@@ -38,8 +40,8 @@ internal static class Program
             if (!HasWindowsDesktopRuntime10())
             {
                 var answer = MessageBox.Show(
-                    "未检测到 .NET 10 Desktop Runtime，需要先安装才能运行。\n\n" +
-                    ".NET 10 Desktop Runtime is required and was not found.\n\n" +
+                    "未检测到本机 .NET 10 Desktop Runtime，需要先安装才能运行。\n\n" +
+                    ".NET 10 Desktop Runtime is required and was not found on this PC.\n\n" +
                     "是否立即下载并安装？（需要管理员权限）\nDownload and install now? (Administrator required)",
                     "Video Downloader",
                     MessageBoxButtons.YesNo,
@@ -53,7 +55,7 @@ internal static class Program
                 if (!HasWindowsDesktopRuntime10())
                 {
                     MessageBox.Show(
-                        "安装完成但仍未检测到 .NET 10 Desktop Runtime。\n请重启电脑后再试，或手动安装：\n" +
+                        "安装完成但仍未检测到本机 .NET 10 Desktop Runtime。\n请重启电脑后再试，或手动安装：\n" +
                         RuntimeInstallerUrl,
                         "Video Downloader",
                         MessageBoxButtons.OK,
@@ -94,7 +96,11 @@ internal static class Program
 
     private static bool HasWindowsDesktopRuntime10()
     {
-        foreach (var root in DotNetRoots())
+        // Machine environment only — never the app folder.
+        if (TryListRuntimesHasDesktop10())
+            return true;
+
+        foreach (var root in MachineDotNetRoots())
         {
             var shared = Path.Combine(root, "shared", "Microsoft.WindowsDesktop.App");
             if (!Directory.Exists(shared))
@@ -103,9 +109,15 @@ internal static class Program
             foreach (var dir in Directory.EnumerateDirectories(shared))
             {
                 var name = Path.GetFileName(dir);
-                if (name != null &&
-                    name.StartsWith(RequiredMajor + ".", StringComparison.Ordinal) &&
-                    File.Exists(Path.Combine(dir, "Microsoft.WindowsDesktop.App.dll")))
+                if (name is null ||
+                    !name.StartsWith(RequiredMajor + ".", StringComparison.Ordinal))
+                    continue;
+
+                // Shared framework folders ship deps/runtimeconfig; do not require a
+                // Microsoft.WindowsDesktop.App.dll (it is not present in install trees).
+                if (File.Exists(Path.Combine(dir, "Microsoft.WindowsDesktop.App.deps.json")) ||
+                    File.Exists(Path.Combine(dir, "PresentationFramework.dll")) ||
+                    Directory.EnumerateFiles(dir).Any())
                     return true;
             }
         }
@@ -113,7 +125,95 @@ internal static class Program
         return false;
     }
 
-    private static string[] DotNetRoots()
+    private static bool TryListRuntimesHasDesktop10()
+    {
+        var dotnet = ResolveDotNetHost();
+        if (dotnet is null)
+            return false;
+
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = dotnet,
+                Arguments = "--list-runtimes",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            using (var process = Process.Start(psi))
+            {
+                if (process is null)
+                    return false;
+                var output = process.StandardOutput.ReadToEnd();
+                process.WaitForExit(15000);
+                if (process.ExitCode != 0)
+                    return false;
+
+                // e.g. Microsoft.WindowsDesktop.App 10.0.9 [...]
+                using (var reader = new StringReader(output))
+                {
+                    string line;
+                    while ((line = reader.ReadLine()) != null)
+                    {
+                        if (line.IndexOf("Microsoft.WindowsDesktop.App", StringComparison.OrdinalIgnoreCase) < 0)
+                            continue;
+                        var parts = line.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length >= 2 &&
+                            parts[1].StartsWith(RequiredMajor + ".", StringComparison.Ordinal))
+                            return true;
+                    }
+                }
+            }
+        }
+        catch
+        {
+            return false;
+        }
+
+        return false;
+    }
+
+    private static string ResolveDotNetHost()
+    {
+        foreach (var root in MachineDotNetRoots())
+        {
+            var candidate = Path.Combine(root, "dotnet.exe");
+            if (File.Exists(candidate))
+                return candidate;
+        }
+
+        // PATH lookup (still machine host, not app-dir).
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "where",
+                Arguments = "dotnet",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true
+            };
+            using (var process = Process.Start(psi))
+            {
+                if (process is null)
+                    return null;
+                var line = process.StandardOutput.ReadLine();
+                process.WaitForExit(5000);
+                if (!string.IsNullOrWhiteSpace(line) && File.Exists(line.Trim()))
+                    return line.Trim();
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        return null;
+    }
+
+    private static string[] MachineDotNetRoots()
     {
         var list = new System.Collections.Generic.List<string>();
         void Add(string path)
@@ -128,6 +228,13 @@ internal static class Program
             {
                 return;
             }
+
+            // Never treat the application directory as a runtime root.
+            var appDir = Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var normalized = path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (string.Equals(normalized, appDir, StringComparison.OrdinalIgnoreCase))
+                return;
 
             if (Directory.Exists(path) &&
                 !list.Exists(x => string.Equals(x, path, StringComparison.OrdinalIgnoreCase)))

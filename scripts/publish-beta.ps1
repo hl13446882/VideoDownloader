@@ -33,14 +33,15 @@ $launcherOut = Join-Path $stage 'launcher'
 dotnet build $launcherProj -c $Configuration -o $launcherOut --nologo -v q
 if ($LASTEXITCODE -ne 0) { throw 'Launcher build failed' }
 
-$ffmpegDir = Join-Path $package 'ffmpeg'
-$m3u8Dir = Join-Path $package 'M3u8'
-New-Item -ItemType Directory -Path $package, $ffmpegDir, $m3u8Dir -Force | Out-Null
+$ffmpegDir = Join-Path $package 'app\ffmpeg'
+$m3u8Dir = Join-Path $package 'app\M3u8'
+$appDir = Join-Path $package 'app'
+New-Item -ItemType Directory -Path $package, $appDir, $ffmpegDir, $m3u8Dir -Force | Out-Null
 
-# Root: framework-dependent single-file app + net48 bootstrap (no bundled .NET 10 runtime).
+# Root entry: net48 launcher only. Real app + tools live under app\ (same BaseDirectory layout).
 $appSrc = Join-Path $appBuild 'VideoDownloader.exe'
 if (-not (Test-Path -LiteralPath $appSrc)) { throw 'Missing required publish artifact: VideoDownloader.exe' }
-Copy-Item -LiteralPath $appSrc -Destination (Join-Path $package 'VideoDownloader.App.exe') -Force
+Copy-Item -LiteralPath $appSrc -Destination (Join-Path $appDir 'VideoDownloader.exe') -Force
 
 $launcherSrc = Join-Path $launcherOut 'VideoDownloader.exe'
 if (-not (Test-Path -LiteralPath $launcherSrc)) { throw 'Missing launcher: VideoDownloader.exe' }
@@ -54,7 +55,7 @@ foreach ($tool in 'ffmpeg.exe', 'ffprobe.exe') {
 
 # yt-dlp is an application resolver, not a .NET runtime dependency. Keep it
 # separate from the main executable so its absence is visible and replaceable.
-$toolsDir = Join-Path $package 'tools'
+$toolsDir = Join-Path $package 'app\tools'
 $ytDlpSrc = Join-Path $root 'tools\external\yt-dlp.exe'
 if (-not (Test-Path -LiteralPath $ytDlpSrc)) { throw "Missing resolver: $ytDlpSrc" }
 New-Item -ItemType Directory -Path $toolsDir -Force | Out-Null
