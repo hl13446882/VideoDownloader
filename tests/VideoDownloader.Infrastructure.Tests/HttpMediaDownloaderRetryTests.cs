@@ -591,6 +591,7 @@ public class HttpMediaDownloaderRetryTests
             var range = request.Headers.Range!.Ranges.Single();
             var from = (int)range.From!.Value;
             var to = (int)(range.To ?? data.Length - 1);
+            Assert.InRange(to - from + 1, 1, 1024 * 1024);
             return Partial(data, from, to - from + 1);
         });
 
@@ -619,8 +620,8 @@ public class HttpMediaDownloaderRetryTests
             await downloader.DownloadDirectAsync(job, null, null, CancellationToken.None);
             Assert.True(File.Exists(job.TargetPath));
             Assert.Equal(data.Length, new FileInfo(job.TargetPath).Length);
-            Assert.Equal(4, rangeHits);
-            Assert.Equal(redirect ? 4 : 0, redirectHits);
+            Assert.Equal(8, rangeHits);
+            Assert.Equal(redirect ? 8 : 0, redirectHits);
             Assert.Equal(data, await File.ReadAllBytesAsync(job.TargetPath));
             Assert.False(Directory.Exists(job.TargetPath + ".part.chunks"));
         }
@@ -630,6 +631,121 @@ public class HttpMediaDownloaderRetryTests
             if (File.Exists(job.TargetPath + ".part")) File.Delete(job.TargetPath + ".part");
             var chunks = job.TargetPath + ".part.chunks";
             if (Directory.Exists(chunks)) Directory.Delete(chunks, true);
+        }
+    }
+
+    [Fact]
+    public async Task ParallelRanges_SlowReads_PublishBeforeTwoMiB()
+    {
+        var data = ValidSizedMp4(2 * 1024 * 1024);
+        using var client = new HttpClient(new StubHandler(request =>
+        {
+            var range = request.Headers.Range!.Ranges.Single();
+            var start = (int)range.From!.Value;
+            var end = (int)range.To!.Value;
+            var response = new HttpResponseMessage(HttpStatusCode.PartialContent)
+            {
+                Content = new StreamContent(new SlowReadStream(data[start..(end + 1)]))
+            };
+            response.Content.Headers.ContentRange = new ContentRangeHeaderValue(start, end, data.Length);
+            return response;
+        }));
+        var job = CreateGoogleJob(data.Length);
+        var reports = new List<long>();
+        try
+        {
+            await CreateDownloader(client, 0, 2, 1024).DownloadDirectAsync(job,
+                new CallbackProgress(bytes => reports.Add(bytes)), null, CancellationToken.None);
+            Assert.Contains(reports, bytes => bytes > 0 && bytes < 1024 * 1024);
+            Assert.True(reports.Zip(reports.Skip(1)).All(p => p.First <= p.Second));
+            Assert.Equal(data, await File.ReadAllBytesAsync(job.TargetPath));
+        }
+        finally { CleanupGoogleJob(job); }
+    }
+
+    [Fact]
+    public async Task ParallelRanges_ConnectionReset_RetriesOnlyMissingBytes()
+    {
+        var data = ValidSizedMp4(2 * 1024 * 1024);
+        var failed = 0;
+        var resumed = 0;
+        using var client = new HttpClient(new StubHandler(request =>
+        {
+            var range = request.Headers.Range!.Ranges.Single();
+            var start = (int)range.From!.Value;
+            var end = (int)range.To!.Value;
+            if (start == 8192) Interlocked.Increment(ref resumed);
+            if (start == 0 && Interlocked.Exchange(ref failed, 1) == 0)
+            {
+                var response = new HttpResponseMessage(HttpStatusCode.PartialContent)
+                {
+                    Content = new StreamContent(new ConnectionResetStream(data[..(end + 1)], 8192))
+                };
+                response.Content.Headers.ContentRange = new ContentRangeHeaderValue(start, end, data.Length);
+                return response;
+            }
+            return Partial(data, start, end - start + 1);
+        }));
+        var job = CreateGoogleJob(data.Length);
+        try
+        {
+            await CreateDownloader(client, 1, 2, 1024).DownloadDirectAsync(job, null, null, CancellationToken.None);
+            Assert.Equal(1, resumed);
+            Assert.Equal(data, await File.ReadAllBytesAsync(job.TargetPath));
+        }
+        finally { CleanupGoogleJob(job); }
+    }
+
+    [Fact]
+    public async Task GoogleVideo_LegacyPart_ResumesWithSmallRequests()
+    {
+        var data = ValidSizedMp4(3 * 1024 * 1024);
+        var starts = new List<long>();
+        using var client = new HttpClient(new StubHandler(request =>
+        {
+            var range = request.Headers.Range!.Ranges.Single();
+            var start = (int)range.From!.Value;
+            var end = (int)range.To!.Value;
+            starts.Add(start);
+            Assert.InRange(end - start + 1, 1, 1024 * 1024);
+            return Partial(data, start, end - start + 1);
+        }));
+        var job = CreateGoogleJob(data.Length);
+        try
+        {
+            await File.WriteAllBytesAsync(job.TargetPath + ".part", data[..8192]);
+            await CreateDownloader(client, 0, 2, 1024).DownloadDirectAsync(job, null, null, CancellationToken.None);
+            Assert.Equal(8192, starts[0]);
+            Assert.Equal(3, starts.Count);
+            Assert.Equal(data, await File.ReadAllBytesAsync(job.TargetPath));
+        }
+        finally { CleanupGoogleJob(job); }
+    }
+
+    private static DownloadJob CreateGoogleJob(int size)
+    {
+        var job = CreateJob();
+        job.TotalBytes = size;
+        job.Variant = MediaVariant.FromCombinedTrack("test",
+            new Uri("https://rr1.googlevideo.com/videoplayback"), RequestContext.CreateEmpty(),
+            container: "mp4", contentLength: size);
+        return job;
+    }
+
+    private static void CleanupGoogleJob(DownloadJob job)
+    {
+        File.Delete(job.TargetPath);
+        File.Delete(job.TargetPath + ".part");
+        if (Directory.Exists(job.TargetPath + ".part.chunks"))
+            Directory.Delete(job.TargetPath + ".part.chunks", true);
+    }
+
+    private sealed class SlowReadStream(byte[] data) : MemoryStream(data, writable: false)
+    {
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(100, cancellationToken);
+            return await base.ReadAsync(buffer[..Math.Min(buffer.Length, 32768)], cancellationToken);
         }
     }
 

@@ -1034,12 +1034,16 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             }
         }
 
+        var progressGate = new object();
         void PublishProgress()
         {
-            long sum = 0;
-            for (var i = 0; i < trackBytes.Length; i++)
-                sum += Volatile.Read(ref trackBytes[i]);
-            job.DownloadedBytes = sum;
+            lock (progressGate)
+            {
+                long sum = 0;
+                for (var i = 0; i < trackBytes.Length; i++)
+                    sum += Volatile.Read(ref trackBytes[i]);
+                job.DownloadedBytes = sum;
+            }
         }
 
         PublishProgress();

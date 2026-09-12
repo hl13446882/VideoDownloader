@@ -229,7 +229,10 @@ public sealed class HttpMediaDownloader
                 }
                 else
                 {
-                    request.Headers.Range = new RangeHeaderValue(offset, null);
+                    request.Headers.Range = new RangeHeaderValue(offset,
+                        IsParallelRangeHost(url)
+                            ? Math.Max(offset, Math.Min(offset + 1024 * 1024 - 1, (job.TotalBytes ?? long.MaxValue) - 1))
+                            : null);
                     request.Headers.Remove("If-Range");
                     if (offset > 0)
                         RequestMessageFactory.ApplyIfRange(request, job.ETag, job.LastModified);
@@ -429,6 +432,10 @@ public sealed class HttpMediaDownloader
             totalBytes,
             url.Host);
 
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var progressGate = new object();
+        var speedClock = System.Diagnostics.Stopwatch.StartNew();
+        var lastLoggedBytes = sharedBytes;
         var tasks = new Task[ranges.Length];
         for (var i = 0; i < ranges.Length; i++)
         {
@@ -436,23 +443,41 @@ public sealed class HttpMediaDownloader
             var (start, end) = ranges[i];
             tasks[i] = Task.Run(async () =>
             {
-                await DownloadOneRangeChunkAsync(
-                    job,
-                    resource,
-                    url,
-                    http,
-                    chunkDir,
-                    index,
-                    start,
-                    end,
-                    () =>
-                    {
-                        var total = Interlocked.Read(ref sharedBytes);
-                        job.DownloadedBytes = total;
-                        progress?.Report(total);
-                    },
-                    bytes => Interlocked.Add(ref sharedBytes, bytes),
-                    ct);
+                try
+                {
+                    await DownloadOneRangeChunkAsync(
+                        job,
+                        resource,
+                        url,
+                        http,
+                        chunkDir,
+                        index,
+                        start,
+                        end,
+                        () =>
+                        {
+                            lock (progressGate)
+                            {
+                                var total = Interlocked.Read(ref sharedBytes);
+                                job.DownloadedBytes = total;
+                                progress?.Report(total);
+                                if (speedClock.Elapsed.TotalSeconds >= 10)
+                                {
+                                    _logger.LogInformation("HTTP transfer job={JobId} mode=parallel host={Host} bytes={Bytes} KiBps={Speed:F1}",
+                                        job.Id, url.Host, total, (total - lastLoggedBytes) / speedClock.Elapsed.TotalSeconds / 1024);
+                                    lastLoggedBytes = total;
+                                    speedClock.Restart();
+                                }
+                            }
+                        },
+                        bytes => Interlocked.Add(ref sharedBytes, bytes),
+                        stop.Token);
+                }
+                catch
+                {
+                    stop.Cancel();
+                    throw;
+                }
             }, ct);
         }
 
@@ -494,27 +519,6 @@ public sealed class HttpMediaDownloader
         if (have == expected)
             return;
 
-        var from = rangeStart + have;
-        using var response = await SendRangeAsync(resource, url, client, from, rangeEnd, ct);
-        if (response.StatusCode == HttpStatusCode.Forbidden)
-            throw new DownloadException(ErrorCodes.Http403, "Access denied (403).");
-        if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
-            throw new DownloadException(ErrorCodes.Range416, "Range not satisfiable.");
-        if (response.StatusCode != HttpStatusCode.PartialContent &&
-            !(have == 0 && response.StatusCode == HttpStatusCode.OK && from == 0))
-        {
-            throw new DownloadException(
-                ErrorCodes.RangeMismatch,
-                $"Expected 206 for parallel chunk, got {(int)response.StatusCode}.");
-        }
-
-        if (response.StatusCode == HttpStatusCode.PartialContent)
-        {
-            var range = response.Content.Headers.ContentRange;
-            if (range?.From != from || range.To != rangeEnd)
-                throw new DownloadException(ErrorCodes.RangeMismatch, "Parallel chunk Content-Range mismatch.");
-        }
-
         await using var file = new FileStream(
             chunkPath,
             FileMode.OpenOrCreate,
@@ -526,17 +530,62 @@ public sealed class HttpMediaDownloader
             file.SetLength(have);
         file.Position = have;
 
-        await using var input = await response.Content.ReadAsStreamAsync(ct);
-        var buffer = new byte[1024 * 1024];
-        int read;
-        long writtenThisSession = 0;
-        while ((read = await input.ReadAsync(buffer, ct)) > 0)
+        // Keep the on-disk partition layout for Resume, but use small HTTP requests:
+        // large googlevideo ranges are throttled even with multiple connections.
+        var buffer = new byte[64 * 1024];
+        var progressClock = System.Diagnostics.Stopwatch.StartNew();
+        var failures = 0;
+        while (have < expected)
         {
-            await file.WriteAsync(buffer.AsMemory(0, read), ct);
-            writtenThisSession += read;
-            addBytes(read);
-            if (writtenThisSession % (2L * 1024 * 1024) < read)
+            var from = rangeStart + have;
+            var to = Math.Min(rangeEnd, from + 1024 * 1024 - 1);
+            try
+            {
+                using var response = await SendRangeAsync(resource, url, client, from, to, ct);
+                if (response.StatusCode == HttpStatusCode.Forbidden)
+                    throw new DownloadException(ErrorCodes.Http403, "Access denied (403).");
+                if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
+                    throw new DownloadException(ErrorCodes.Range416, "Range not satisfiable.");
+                if (IsRetriableStatus(response.StatusCode))
+                    throw new HttpRequestException($"Retriable status {(int)response.StatusCode}");
+                var range = response.Content.Headers.ContentRange;
+                if (response.StatusCode != HttpStatusCode.PartialContent ||
+                    range?.From != from || range.To != to || range.Length != job.TotalBytes)
+                    throw new DownloadException(ErrorCodes.RangeMismatch, "Parallel chunk Content-Range mismatch.");
+
+                await using var input = await response.Content.ReadAsStreamAsync(ct);
+                int read;
+                long received = 0;
+                while ((read = await input.ReadAsync(buffer, ct)) > 0)
+                {
+                    if (received + read > to - from + 1)
+                        throw new DownloadException(ErrorCodes.RangeMismatch, "Parallel response exceeds requested range.");
+                    await file.WriteAsync(buffer.AsMemory(0, read), ct);
+                    have += read;
+                    received += read;
+                    addBytes(read);
+                    if (progressClock.ElapsedMilliseconds >= 250)
+                    {
+                        publishProgress();
+                        progressClock.Restart();
+                    }
+                }
+                if (received != to - from + 1)
+                    throw new HttpRequestException("Incomplete parallel range response.");
+                failures = 0;
                 publishProgress();
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested &&
+                (ex is HttpRequestException || ex is IOException && IsTransientTransport(ex)) &&
+                failures < _options.Download.RetryCount)
+            {
+                failures++;
+                _logger.LogWarning("Range transport retry job={JobId} chunk={Chunk} offset={Offset} attempt={Attempt}",
+                    job.Id, index, rangeStart + have, failures);
+                await file.FlushAsync(ct);
+                publishProgress();
+                await DelayRetryAsync(failures, ct);
+            }
         }
 
         await file.FlushAsync(ct);
@@ -771,6 +820,8 @@ public sealed class HttpMediaDownloader
         await using var input = await response.Content.ReadAsStreamAsync(ct);
         var buffer = new byte[1024 * 1024];
         var written = offset;
+        var speedClock = System.Diagnostics.Stopwatch.StartNew();
+        var lastLoggedBytes = written;
         int read;
         while ((read = await input.ReadAsync(buffer, ct)) > 0)
         {
@@ -783,6 +834,15 @@ public sealed class HttpMediaDownloader
             written += read;
             job.DownloadedBytes = written;
             progress?.Report(written);
+
+            if (speedClock.Elapsed.TotalSeconds >= 10)
+            {
+                _logger.LogInformation("HTTP transfer job={JobId} mode=single host={Host} bytes={Bytes} KiBps={Speed:F1}",
+                    job.Id, response.RequestMessage?.RequestUri?.Host ?? job.Variant.SourceUrl.Host,
+                    written, (written - lastLoggedBytes) / speedClock.Elapsed.TotalSeconds / 1024);
+                lastLoggedBytes = written;
+                speedClock.Restart();
+            }
 
             if (written % (4 * 1024 * 1024) < read && checkpointAsync is not null)
                 await checkpointAsync();
