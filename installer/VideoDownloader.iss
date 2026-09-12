@@ -18,7 +18,7 @@ SolidCompression=yes
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 PrivilegesRequired=lowest
-UninstallDisplayIcon={app}\VideoDownloader.UI.exe
+UninstallDisplayIcon={app}\VideoDownloader.exe
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -27,11 +27,11 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Video Downloader"; Filename: "{app}\VideoDownloader.UI.exe"
-Name: "{autodesktop}\Video Downloader"; Filename: "{app}\VideoDownloader.UI.exe"; Tasks: desktopicon
+Name: "{group}\Video Downloader"; Filename: "{app}\VideoDownloader.exe"
+Name: "{autodesktop}\Video Downloader"; Filename: "{app}\VideoDownloader.exe"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"
 
 [Run]
-Filename: "{app}\VideoDownloader.UI.exe"; Description: "Launch Video Downloader"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\VideoDownloader.exe"; Description: "Launch Video Downloader"; Flags: nowait postinstall skipifsilent

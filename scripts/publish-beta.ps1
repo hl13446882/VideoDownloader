@@ -27,20 +27,24 @@ dotnet publish (Join-Path $root 'N_m3u8DL-RE-main\src\N_m3u8DL-RE\N_m3u8DL-RE.cs
   -o $m3u8Build
 if ($LASTEXITCODE -ne 0) { throw 'N_m3u8DL-RE publish failed' }
 
+# net48 launcher: detects/installs .NET 10 Desktop Runtime, then starts the app.
+$launcherProj = Join-Path $root 'tools\VideoDownloader.Launcher\VideoDownloader.Launcher.csproj'
+$launcherOut = Join-Path $stage 'launcher'
+dotnet build $launcherProj -c $Configuration -o $launcherOut --nologo -v q
+if ($LASTEXITCODE -ne 0) { throw 'Launcher build failed' }
+
 $ffmpegDir = Join-Path $package 'ffmpeg'
 $m3u8Dir = Join-Path $package 'M3u8'
 New-Item -ItemType Directory -Path $package, $ffmpegDir, $m3u8Dir -Force | Out-Null
 
-# Root: framework-dependent single-file host. Do not ship the .NET runtime,
-# loose framework/package assemblies, or WebView2 native loader duplicates.
-$rootKeep = @(
-  'VideoDownloader.exe'
-)
-foreach ($name in $rootKeep) {
-  $src = Join-Path $appBuild $name
-  if (-not (Test-Path -LiteralPath $src)) { throw "Missing required publish artifact: $name" }
-  Copy-Item -LiteralPath $src -Destination (Join-Path $package $name) -Force
-}
+# Root: framework-dependent single-file app + net48 bootstrap (no bundled .NET 10 runtime).
+$appSrc = Join-Path $appBuild 'VideoDownloader.exe'
+if (-not (Test-Path -LiteralPath $appSrc)) { throw 'Missing required publish artifact: VideoDownloader.exe' }
+Copy-Item -LiteralPath $appSrc -Destination (Join-Path $package 'VideoDownloader.App.exe') -Force
+
+$launcherSrc = Join-Path $launcherOut 'VideoDownloader.exe'
+if (-not (Test-Path -LiteralPath $launcherSrc)) { throw 'Missing launcher: VideoDownloader.exe' }
+Copy-Item -LiteralPath $launcherSrc -Destination (Join-Path $package 'VideoDownloader.exe') -Force
 
 foreach ($tool in 'ffmpeg.exe', 'ffprobe.exe') {
   $src = Join-Path $root "tools\external\$tool"
