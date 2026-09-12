@@ -98,6 +98,7 @@ public partial class App : Application
             var mainWindow = new MainWindow(_services.GetRequiredService<MainViewModel>());
             MainWindow = mainWindow;
             mainWindow.Show();
+            BringMainWindowToFront(mainWindow);
             UpdateLicenseTitle(mainWindow, license, loc);
             loc.LanguageChanged += (_, _) =>
             {
@@ -113,6 +114,23 @@ public partial class App : Application
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
             EmergencyExit(1);
+        }
+    }
+
+    private static void BringMainWindowToFront(Window window)
+    {
+        try
+        {
+            if (window.WindowState == WindowState.Minimized)
+                window.WindowState = WindowState.Normal;
+            window.Activate();
+            window.Topmost = true;
+            window.Topmost = false;
+            window.Focus();
+        }
+        catch
+        {
+            // Best-effort focus only.
         }
     }
 

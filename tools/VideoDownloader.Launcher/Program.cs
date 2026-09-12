@@ -3,6 +3,8 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -15,19 +17,40 @@ internal static class Program
     private const string RuntimeInstallerUrl =
         "https://aka.ms/dotnet/10.0/windowsdesktop-runtime-win-x64.exe";
 
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool AllowSetForegroundWindow(int dwProcessId);
+
+    private const int SwRestore = 9;
+
     [STAThread]
     private static int Main(string[] args)
     {
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
+        LoadingForm splash = null;
         try
         {
+            splash = new LoadingForm();
+            splash.Show();
+            splash.Activate();
+            Application.DoEvents();
+
             var rootDir = AppDomain.CurrentDomain.BaseDirectory;
             var appExe = Path.GetFullPath(Path.Combine(rootDir, AppRelativePath));
             var appDir = Path.GetDirectoryName(appExe);
             if (appDir is null || !File.Exists(appExe))
             {
+                HideSplash(splash);
                 MessageBox.Show(
                     "找不到主程序（app\\VideoDownloader.exe）。\n请重新复制完整发布包。\n\n" +
                     "Main program not found. Please reinstall the full package.",
@@ -37,8 +60,10 @@ internal static class Program
                 return 1;
             }
 
+            splash.SetStatus("正在检查运行环境…");
             if (!HasWindowsDesktopRuntime10())
             {
+                HideSplash(splash);
                 var answer = MessageBox.Show(
                     "未检测到本机 .NET 10 Desktop Runtime，需要先安装才能运行。\n\n" +
                     ".NET 10 Desktop Runtime is required and was not found on this PC.\n\n" +
@@ -49,11 +74,20 @@ internal static class Program
                 if (answer != DialogResult.Yes)
                     return 0;
 
+                splash = new LoadingForm();
+                splash.Show();
+                splash.SetStatus("正在下载并安装 .NET 10…");
+                Application.DoEvents();
+
                 if (!InstallRuntime().GetAwaiter().GetResult())
+                {
+                    HideSplash(splash);
                     return 1;
+                }
 
                 if (!HasWindowsDesktopRuntime10())
                 {
+                    HideSplash(splash);
                     MessageBox.Show(
                         "安装完成但仍未检测到本机 .NET 10 Desktop Runtime。\n请重启电脑后再试，或手动安装：\n" +
                         RuntimeInstallerUrl,
@@ -64,6 +98,7 @@ internal static class Program
                 }
             }
 
+            splash.SetStatus("正在启动主程序…");
             var start = new ProcessStartInfo
             {
                 FileName = appExe,
@@ -71,17 +106,97 @@ internal static class Program
                 UseShellExecute = false,
                 Arguments = string.Join(" ", args.Select(QuoteArg))
             };
-            Process.Start(start);
+            var process = Process.Start(start);
+            if (process is null)
+            {
+                HideSplash(splash);
+                MessageBox.Show(
+                    "无法启动主程序。",
+                    "Video Downloader",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return 1;
+            }
+
+            splash.SetStatus("正在载入，请稍候…");
+            BringMainWindowToFront(process, splash);
             return 0;
         }
         catch (Exception ex)
         {
+            HideSplash(splash);
             MessageBox.Show(
                 "启动失败 / Launch failed：\n" + ex.Message,
                 "Video Downloader",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
             return 1;
+        }
+        finally
+        {
+            HideSplash(splash);
+        }
+    }
+
+    private static void HideSplash(LoadingForm splash)
+    {
+        if (splash is null || splash.IsDisposed)
+            return;
+        try
+        {
+            splash.Close();
+            splash.Dispose();
+        }
+        catch
+        {
+            // ignore
+        }
+    }
+
+    private static void BringMainWindowToFront(Process process, LoadingForm splash)
+    {
+        // Wait until the WPF main window exists (startup init can take several seconds).
+        var deadline = DateTime.UtcNow.AddSeconds(90);
+        IntPtr hwnd = IntPtr.Zero;
+        while (DateTime.UtcNow < deadline)
+        {
+            Application.DoEvents();
+            try
+            {
+                process.Refresh();
+                if (process.HasExited)
+                    break;
+
+                hwnd = process.MainWindowHandle;
+                if (hwnd != IntPtr.Zero)
+                    break;
+            }
+            catch
+            {
+                break;
+            }
+
+            Thread.Sleep(100);
+        }
+
+        if (hwnd == IntPtr.Zero)
+            return;
+
+        try
+        {
+            AllowSetForegroundWindow(process.Id);
+            if (IsIconic(hwnd))
+                ShowWindow(hwnd, SwRestore);
+            SetForegroundWindow(hwnd);
+            // Keep splash briefly so the transition feels intentional, then drop it.
+            splash?.SetStatus("即将打开…");
+            Application.DoEvents();
+            Thread.Sleep(150);
+            SetForegroundWindow(hwnd);
+        }
+        catch
+        {
+            // Best-effort focus only.
         }
     }
 
