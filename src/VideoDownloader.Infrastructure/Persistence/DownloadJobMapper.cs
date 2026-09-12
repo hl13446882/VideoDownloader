@@ -68,7 +68,7 @@ internal static class DownloadJobMapper
         {
             ContentIdentity = variant.ContentIdentity,
             RecoveryPageUrl = variant.RecoveryPageUrl,
-            Alternatives = variant.Alternatives.Take(4).Select(v =>
+            Alternatives = variant.Alternatives.Take(8).Select(v =>
             {
                 var saved = SerializeVariant(v with { Alternatives = [] });
                 return new StoredAlternative(saved.MetaJson, saved.Secret);
@@ -131,7 +131,7 @@ internal static class DownloadJobMapper
         {
             ContentIdentity = meta.ContentIdentity,
             RecoveryPageUrl = meta.RecoveryPageUrl,
-            Alternatives = !includeAlternatives ? [] : (meta.Alternatives ?? []).Take(4)
+            Alternatives = !includeAlternatives ? [] : (meta.Alternatives ?? []).Take(8)
                 .Select(a => DeserializeVariant(sourceUrl, a.MetaJson, a.Secret, false)).ToArray()
         };
     }

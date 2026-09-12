@@ -69,6 +69,8 @@ public interface IDownloadEngine
         MediaVariant variant,
         string displayName,
         Uri? pageUrl = null,
+        string? caption = null,
+        double? durationSec = null,
         CancellationToken ct = default);
 
     Task PauseAsync(Guid jobId, CancellationToken ct = default);

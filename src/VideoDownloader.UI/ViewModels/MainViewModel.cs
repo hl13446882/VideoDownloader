@@ -1614,7 +1614,12 @@ public sealed partial class MainViewModel : ObservableObject
         var name = DownloadFileNameBuilder.Build(video, variant);
         try
         {
-            var id = await _downloadEngine.EnqueueAsync(variant, name, video.PageUrl);
+            var id = await _downloadEngine.EnqueueAsync(
+                variant,
+                name,
+                video.PageUrl,
+                video.DisplayTitle,
+                video.DurationSec);
             _collapsedQueueGroups.Remove(DownloadSiteFolder.Resolve(video.PageUrl));
             RefreshDownloadJobs();
             var created = DownloadJobs.FirstOrDefault(j => j.Job.Id == id);

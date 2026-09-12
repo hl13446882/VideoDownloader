@@ -46,6 +46,10 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
             """;
         await conn.ExecuteAsync(sql);
         await TryAddColumnAsync(conn, "page_url", "TEXT NULL");
+        await TryAddColumnAsync(conn, "caption", "TEXT NULL");
+        await TryAddColumnAsync(conn, "duration_sec", "REAL NULL");
+        await TryAddColumnAsync(conn, "expected_total_bytes", "INTEGER NULL");
+        await TryAddColumnAsync(conn, "content_prefix_hash", "TEXT NULL");
     }
 
     private static async Task TryAddColumnAsync(SqliteConnection conn, string name, string definition)
@@ -73,20 +77,33 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
                 id, display_name, source_url, target_path, media_family, status,
                 downloaded_bytes, total_bytes, etag, last_modified, context_version,
                 request_context_meta_json, request_context_secret, page_url, last_error_code,
+                caption, duration_sec, expected_total_bytes, content_prefix_hash,
                 created_at, updated_at)
             VALUES (
                 @Id, @DisplayName, @SourceUrl, @TargetPath, @MediaFamily, @Status,
                 @DownloadedBytes, @TotalBytes, @ETag, @LastModified, @ContextVersion,
-                @MetaJson, @Secret, @PageUrl, @LastErrorCode, @CreatedAt, @UpdatedAt)
+                @MetaJson, @Secret, @PageUrl, @LastErrorCode,
+                @Caption, @DurationSec, @ExpectedTotalBytes, @ContentPrefixHash,
+                @CreatedAt, @UpdatedAt)
             ON CONFLICT(id) DO UPDATE SET
                 display_name = excluded.display_name,
+                source_url = excluded.source_url,
                 target_path = excluded.target_path,
+                media_family = excluded.media_family,
                 status = excluded.status,
                 downloaded_bytes = excluded.downloaded_bytes,
                 total_bytes = excluded.total_bytes,
                 etag = excluded.etag,
                 last_modified = excluded.last_modified,
+                context_version = excluded.context_version,
+                request_context_meta_json = excluded.request_context_meta_json,
+                request_context_secret = excluded.request_context_secret,
+                page_url = excluded.page_url,
                 last_error_code = excluded.last_error_code,
+                caption = excluded.caption,
+                duration_sec = excluded.duration_sec,
+                expected_total_bytes = excluded.expected_total_bytes,
+                content_prefix_hash = excluded.content_prefix_hash,
                 updated_at = excluded.updated_at;
             """;
 
@@ -107,6 +124,10 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
             Secret = secret,
             PageUrl = job.PageUrl?.ToString(),
             job.LastErrorCode,
+            job.Caption,
+            job.DurationSec,
+            job.ExpectedTotalBytes,
+            job.ContentPrefixHash,
             CreatedAt = job.CreatedAt.ToString("O"),
             UpdatedAt = job.UpdatedAt.ToString("O")
         });
@@ -137,7 +158,7 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
 
     private static DownloadJob? MapRow(JobRow row)
     {
-        if (!Uri.TryCreate(row.source_url, UriKind.Absolute, out var sourceUrl))
+        if (!Uri.TryCreate(row.source_url, UriKind.Absolute, out _))
             return null;
 
         var variant = DownloadJobMapper.DeserializeVariant(
@@ -154,12 +175,16 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
         {
             Id = Guid.Parse(row.id),
             DisplayName = row.display_name,
+            Caption = row.caption,
+            DurationSec = row.duration_sec,
             Variant = variant,
             TargetPath = row.target_path,
             PageUrl = pageUrl,
             Status = (DownloadStatus)row.status,
             DownloadedBytes = row.downloaded_bytes,
             TotalBytes = row.total_bytes,
+            ExpectedTotalBytes = row.expected_total_bytes,
+            ContentPrefixHash = row.content_prefix_hash,
             ETag = row.etag,
             LastModified = row.last_modified,
             LastErrorCode = row.last_error_code,
@@ -193,6 +218,10 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
         public byte[]? request_context_secret { get; set; }
         public string? page_url { get; set; }
         public string? last_error_code { get; set; }
+        public string? caption { get; set; }
+        public double? duration_sec { get; set; }
+        public long? expected_total_bytes { get; set; }
+        public string? content_prefix_hash { get; set; }
         public string created_at { get; set; } = string.Empty;
         public string updated_at { get; set; } = string.Empty;
     }

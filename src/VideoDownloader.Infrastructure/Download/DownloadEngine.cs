@@ -78,6 +78,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         MediaVariant variant,
         string displayName,
         Uri? pageUrl = null,
+        string? caption = null,
+        double? durationSec = null,
         CancellationToken ct = default)
     {
         RejectMseOrdinaryDownload(variant);
@@ -115,10 +117,13 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             {
                 Id = Guid.NewGuid(),
                 DisplayName = stem,
+                Caption = string.IsNullOrWhiteSpace(caption) ? null : caption.Trim(),
+                DurationSec = durationSec is > 0 ? durationSec : null,
                 Variant = variant,
                 PageUrl = pageUrl,
                 TargetPath = targetPath,
                 Status = DownloadStatus.Pending,
+                ExpectedTotalBytes = variant.TotalContentLength is > 0 ? variant.TotalContentLength : null,
                 CreatedAt = DateTimeOffset.UtcNow,
                 UpdatedAt = DateTimeOffset.UtcNow
             };
@@ -519,9 +524,11 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         var source = string.IsNullOrWhiteSpace(fileStem) ? job.DisplayName : fileStem;
 
         DownloadFileNameBuilder.TryParseMetaParts(source, out _, out var existing);
-        double? durationSec = existing.Minutes is > 0 ? existing.Minutes.Value * 60.0 : null;
+        double? durationSec = existing.Minutes is > 0
+            ? existing.Minutes.Value * 60.0
+            : job.DurationSec is > 0 ? job.DurationSec : null;
         int? height = existing.Height ?? (job.Variant.Height is > 0 ? job.Variant.Height : null);
-        var bytes = existing.Bytes ?? job.TotalBytes ?? new FileInfo(job.TargetPath).Length;
+        var bytes = existing.Bytes ?? job.ExpectedTotalBytes ?? job.TotalBytes ?? new FileInfo(job.TargetPath).Length;
 
         if (durationSec is null || height is null)
         {
@@ -536,6 +543,9 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                 _logger.LogDebug(ex, "Completed-name probe failed for {JobId}", job.Id);
             }
         }
+
+        if (job.DurationSec is not > 0 && durationSec is > 0)
+            job.DurationSec = durationSec;
 
         var merged = DownloadFileNameBuilder.MergeMissingMeta(source, durationSec, height, bytes);
         if (string.Equals(merged, job.DisplayName, StringComparison.Ordinal) &&
@@ -1370,16 +1380,34 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
     private void ApplyRenewedVariant(DownloadJob job, MediaVariant renewed)
     {
         var previous = job.Variant;
+        var keep = ResumeObjectTrust.ShouldKeepPartialProgress(
+            previous,
+            renewed,
+            job.ExpectedTotalBytes ?? job.TotalBytes,
+            storedETag: job.ETag,
+            renewedETag: null,
+            storedPrefixHash: _options.Download.VerifyPrefixHash ? job.ContentPrefixHash : null,
+            renewedPrefixHash: null);
+
         job.Variant = renewed;
-        if (BilibiliCdnPreference.SameDashObjects(previous, renewed) ||
-            MediaAddressRenewal.SameYoutubePlayback(previous, renewed))
+        if (keep)
         {
             job.LastErrorCode = null;
+            if (job.ExpectedTotalBytes is not > 0 && renewed.TotalContentLength is > 0)
+                job.ExpectedTotalBytes = renewed.TotalContentLength;
+            // CDN rotates often change weak validators; size+identity already decided Keep.
+            if (!string.Equals(previous.SourceUrl.Host, renewed.SourceUrl.Host, StringComparison.OrdinalIgnoreCase))
+            {
+                job.ETag = null;
+                job.LastModified = null;
+            }
+
             _logger.LogInformation(
-                "Keeping partial progress for {JobId} after URL renew {OldHost} -> {NewHost}",
+                "Keeping partial progress for {JobId} after URL renew {OldHost} -> {NewHost} (expectedTotal={Expected})",
                 job.Id,
                 previous.SourceUrl.Host,
-                renewed.SourceUrl.Host);
+                renewed.SourceUrl.Host,
+                job.ExpectedTotalBytes);
             return;
         }
 
@@ -1393,6 +1421,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         if (File.Exists(job.TargetPath + ".part")) File.Delete(job.TargetPath + ".part");
         job.DownloadedBytes = 0;
         job.TotalBytes = job.Variant.TotalContentLength;
+        job.ExpectedTotalBytes = job.Variant.TotalContentLength is > 0 ? job.Variant.TotalContentLength : null;
+        job.ContentPrefixHash = null;
         job.ETag = null;
         job.LastModified = null;
         job.LastErrorCode = null;

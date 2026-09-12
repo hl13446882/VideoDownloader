@@ -408,6 +408,8 @@ public sealed class HttpMediaDownloader
         WriteChunkManifest(chunkDir, totalBytes, ranges.Length);
 
         job.TotalBytes = totalBytes;
+        if (job.ExpectedTotalBytes is not > 0)
+            job.ExpectedTotalBytes = totalBytes;
         var http = client ?? _client;
         var resource = BuildResource(job.Variant, job);
         var url = job.Variant.SourceUrl;
@@ -811,6 +813,8 @@ public sealed class HttpMediaDownloader
         job.ETag = newEtag ?? job.ETag;
         job.LastModified = newModified ?? job.LastModified;
         job.TotalBytes = responseTotal ?? job.TotalBytes;
+        if (job.ExpectedTotalBytes is not > 0 && job.TotalBytes is > 0)
+            job.ExpectedTotalBytes = job.TotalBytes;
         if (_license?.DownloadLimitBytes is int demoLimit && job.TotalBytes is long total && total > demoLimit)
             throw new DownloadException(ErrorCodes.LicenseLimit, "DEMO download limit is 10 MiB.");
 
@@ -1002,6 +1006,8 @@ public sealed class HttpMediaDownloader
         job.ETag = null;
         job.LastModified = null;
         job.TotalBytes = null;
+        job.ExpectedTotalBytes = null;
+        job.ContentPrefixHash = null;
 
         var partPath = job.TargetPath + ".part";
         if (file is null && File.Exists(partPath))

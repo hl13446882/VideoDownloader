@@ -72,6 +72,15 @@ public sealed class DownloadOptions
 
     /// <summary>When true, multi-track FFmpeg jobs download video and audio tracks concurrently.</summary>
     public bool ParallelAudioVideoTracks { get; set; } = true;
+
+    /// <summary>
+    /// When true and both sides have <c>content_prefix_hash</c>, URL renew requires a hash match
+    /// (mismatch forces restart). Default off — size + content identity is the primary trust path.
+    /// </summary>
+    public bool VerifyPrefixHash { get; set; }
+
+    /// <summary>Bytes hashed into <c>content_prefix_hash</c> when prefix hashing is enabled.</summary>
+    public int PrefixHashBytes { get; set; } = 64 * 1024;
 }
 
 public sealed class BrowserOptions

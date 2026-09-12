@@ -23,7 +23,7 @@ public class ExclusiveSiteDetectionTests
         const string id = "7674888187625458982";
         const string ad = "7670164200798342410";
         var page = new Uri("https://www.douyin.com/jingxuan?modal_id=" + id);
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         detector.BeginSession(page, Guid.NewGuid());
         MediaDescriptor? result = null;
         detector.DescriptorsReady += (_, rows) => result = rows.Single();
@@ -50,7 +50,7 @@ public class ExclusiveSiteDetectionTests
     {
         const string id = "7672351780155575579";
         var page = new Uri("https://www.douyin.com/jingxuan?modal_id=" + id);
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         detector.BeginSession(page, Guid.NewGuid());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, rows) => last = rows.Single();
@@ -83,7 +83,7 @@ public class ExclusiveSiteDetectionTests
         const string current = "7674888187625458982";
         const string next = "7522534938898468147";
         var page = new Uri("https://www.douyin.com/jingxuan?modal_id=" + current);
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         detector.BeginSession(page, Guid.NewGuid());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, rows) => last = rows.Single();
@@ -117,7 +117,7 @@ public class ExclusiveSiteDetectionTests
         const string stamped = "7674888187625458982";
         const string playing = "7522534938898468147";
         var page = new Uri("https://www.douyin.com/jingxuan?modal_id=" + stamped);
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, rows) => last = rows.Single();
         detector.BeginSession(page, Guid.NewGuid());
@@ -152,7 +152,7 @@ public class ExclusiveSiteDetectionTests
     public async Task Douyin_Observation_Id_Change_Switches_Content_In_Same_Session()
     {
         var page = new Uri("https://www.douyin.com/jingxuan?modal_id=7674888187625458982");
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         detector.BeginSession(page, Guid.NewGuid());
         await detector.ProcessPageObservationAsync(page, "一",
             """{"identity":"content:7674888187625458982","album":false,"media":[]}""",
@@ -178,7 +178,7 @@ public class ExclusiveSiteDetectionTests
     public async Task Douyin_Rejects_Unbound_Progressive_That_Mismatches_Observed_Duration()
     {
         var page = new Uri("https://www.douyin.com/jingxuan?modal_id=7680898097882840454");
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, rows) => last = rows.FirstOrDefault();
         detector.BeginSession(page, Guid.NewGuid());
@@ -199,7 +199,7 @@ public class ExclusiveSiteDetectionTests
     public async Task Douyin_Accepts_Unbound_Progressive_Matching_Observed_Duration()
     {
         var page = new Uri("https://www.douyin.com/jingxuan?modal_id=7680898097882840454");
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, rows) => last = rows.Single();
         detector.BeginSession(page, Guid.NewGuid());
@@ -222,7 +222,7 @@ public class ExclusiveSiteDetectionTests
         const string current = "7674888187625458982";
         const string next = "7522534938898468147";
         var page = new Uri("https://www.douyin.com/jingxuan?modal_id=" + current);
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         detector.BeginSession(page, Guid.NewGuid());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, rows) => last = rows.Single();
@@ -255,7 +255,7 @@ public class ExclusiveSiteDetectionTests
         const string second = "7660608368599469355";
         var page1 = new Uri("https://www.douyin.com/jingxuan?modal_id=" + first);
         var page2 = new Uri("https://www.douyin.com/jingxuan?modal_id=" + second);
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, rows) => last = rows.FirstOrDefault();
 
@@ -301,7 +301,7 @@ public class ExclusiveSiteDetectionTests
     public async Task Douyin_RejectsMismatchedPlayerObservation_AndUnboundNetwork()
     {
         var page = new Uri("https://www.douyin.com/video/7674888187625458982");
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         detector.BeginSession(page, Guid.NewGuid());
         var emitted = false;
         detector.DescriptorsReady += (_, _) => emitted = true;
@@ -318,7 +318,7 @@ public class ExclusiveSiteDetectionTests
     public async Task Douyin_LateIdentityMustNotAdoptUnidentifiedPreload()
     {
         var page = new Uri("https://www.douyin.com/jingxuan");
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         detector.BeginSession(page, Guid.NewGuid());
         var emitted = false;
         detector.DescriptorsReady += (_, _) => emitted = true;
@@ -338,7 +338,7 @@ public class ExclusiveSiteDetectionTests
     [InlineData(null, null)]
     public async Task Douyin_Partial_Response_Does_Not_Label_Chunk_As_Full_Size(string? range, long? expected)
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         var page = new Uri("https://www.douyin.com/video/7682715203741568283");
         detector.BeginSession(page, Guid.NewGuid());
         await detector.ProcessPageObservationAsync(page, "当前作品", """{"media":[],"album":false}""", RequestContext.CreateEmpty(), CancellationToken.None);
@@ -361,7 +361,7 @@ public class ExclusiveSiteDetectionTests
     [InlineData("https://v3.douyinvod.com/invalid.mp4", "text/html")]
     public async Task Douyin_Rejects_NonMedia_Response_Even_With_Large_Length(string url, string mime)
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         var page = new Uri("https://www.douyin.com/video/7682715203741568283");
         detector.BeginSession(page, Guid.NewGuid());
         await detector.ProcessPageObservationAsync(page, "当前作品", """{"media":[],"album":false}""", RequestContext.CreateEmpty(), CancellationToken.None);
@@ -463,10 +463,10 @@ public class ExclusiveSiteDetectionTests
             Options.Create(new AppOptions()));
         var detectors = new IExclusiveSiteMediaDetector[]
         {
-            new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance),
-            new TikTokMediaDetector(NullLogger<TikTokMediaDetector>.Instance, StubTikTokYtDlp()),
-            new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance, StubYouTubeYtDlp()),
-            new BilibiliMediaDetector(NullLogger<BilibiliMediaDetector>.Instance, StubBilibiliYtDlp())
+            new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>()),
+            new TikTokMediaDetector(NullLogger<TikTokMediaDetector>.Instance, StubTikTokYtDlp(), Substitute.For<IProbeMethodStats>()),
+            new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance, StubYouTubeYtDlp(), Substitute.For<IProbeMethodStats>()),
+            new BilibiliMediaDetector(NullLogger<BilibiliMediaDetector>.Instance, StubBilibiliYtDlp(), Substitute.For<IProbeMethodStats>())
         };
         return new RoutedMediaDetectionPipeline(
             unified,
@@ -476,7 +476,7 @@ public class ExclusiveSiteDetectionTests
     }
 
     private static YouTubeYtDlpExtractor StubYouTubeYtDlp() =>
-        new(Options.Create(new AppOptions()), NullLogger<YouTubeYtDlpExtractor>.Instance);
+        new(Options.Create(new AppOptions()), NullLogger<YouTubeYtDlpExtractor>.Instance, Substitute.For<IProbeMethodStats>());
 
     private static TikTokYtDlpExtractor StubTikTokYtDlp() =>
         new(Options.Create(new AppOptions()), NullLogger<TikTokYtDlpExtractor>.Instance);
@@ -507,10 +507,10 @@ public class ExclusiveSiteDetectionTests
         };
         var detectors = new IExclusiveSiteMediaDetector[]
         {
-            new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance),
-            new TikTokMediaDetector(NullLogger<TikTokMediaDetector>.Instance, StubTikTokYtDlp()),
-            new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance, StubYouTubeYtDlp()),
-            new BilibiliMediaDetector(NullLogger<BilibiliMediaDetector>.Instance, StubBilibiliYtDlp())
+            new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>()),
+            new TikTokMediaDetector(NullLogger<TikTokMediaDetector>.Instance, StubTikTokYtDlp(), Substitute.For<IProbeMethodStats>()),
+            new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance, StubYouTubeYtDlp(), Substitute.For<IProbeMethodStats>()),
+            new BilibiliMediaDetector(NullLogger<BilibiliMediaDetector>.Instance, StubBilibiliYtDlp(), Substitute.For<IProbeMethodStats>())
         };
         foreach (var page in pages)
             Assert.Equal(1, detectors.Count(d => d.Matches(page)));
@@ -548,7 +548,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Douyin_Case2_Scroll_Switches_Content()
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         var page1 = new Uri("https://www.douyin.com/video/1111111111111111111");
         var page2 = new Uri("https://www.douyin.com/video/2222222222222222222");
         MediaDescriptor? last = null;
@@ -574,7 +574,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Douyin_Case3_Video_To_Album_Clears_Video()
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         var page = new Uri("https://www.douyin.com/note/7682715203741568283");
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
@@ -598,7 +598,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Douyin_Case4_Album_Order_And_Dedup()
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         var page = new Uri("https://www.douyin.com/note/7682715203741568283");
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
@@ -617,7 +617,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Douyin_Case5_Excludes_Avatar_Logo()
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         var page = new Uri("https://www.douyin.com/note/7682715203741568283");
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
@@ -634,7 +634,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Douyin_Case6_Album_With_Bgm()
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         var page = new Uri("https://www.douyin.com/note/7682715203741568283");
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
@@ -650,7 +650,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Douyin_Case7_Album_Without_Bgm_Still_Succeeds()
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         var page = new Uri("https://www.douyin.com/note/7682715203741568283");
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
@@ -685,7 +685,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Douyin_Prefers_Muxed_Progressive_Over_Silent_MediaVideo_And_Gateway()
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var page = new Uri("https://www.douyin.com/?recommend=1");
@@ -733,7 +733,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Douyin_Rejects_Silent_MediaVideo_When_No_Progressive()
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var page = new Uri("https://www.douyin.com/video/7682715203741568283");
@@ -756,7 +756,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Douyin_MediaVideo_With_Audio_Does_Not_Become_Ordinary_Download()
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var page = new Uri("https://www.douyin.com/video/7682715203741568283");
@@ -784,7 +784,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Douyin_Larger_MediaVideo_Does_Not_Beat_Smaller_Progressive()
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var page = new Uri("https://www.douyin.com/jingxuan?modal_id=7680538459441859882");
@@ -837,7 +837,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Douyin_Album_Accepts_HostPrefixed_Identity_And_AwemeImages()
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var page = new Uri("https://www.douyin.com/note/7276638706021240125");
@@ -855,7 +855,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Douyin_Album_Ignores_Stray_MediaVideo_Network()
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var page = new Uri("https://www.douyin.com/note/7276638706021240125");
@@ -886,7 +886,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Douyin_Album_With_DeclaredCount_Waits_Until_Filled()
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var page = new Uri("https://www.douyin.com/note/7276638706021240125");
@@ -910,7 +910,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Douyin_Album_Without_DeclaredCount_Seals_Collected()
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var page = new Uri("https://www.douyin.com/note/7276638706021240125");
@@ -926,7 +926,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Douyin_Jingxuan_Video_Not_Stolen_By_Feed_Album_Images()
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var id = "7664990087042770926";
@@ -995,7 +995,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Douyin_Unbound_Progressive_Belongs_To_Current_Work()
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var page = new Uri("https://www.douyin.com/jingxuan?modal_id=7680898097882840454");
@@ -1019,7 +1019,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Douyin_Rejects_Known_Tiny_Progressive_Shell()
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var page = new Uri("https://www.douyin.com/?recommend=1");
@@ -1041,7 +1041,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Douyin_Failed_Complete_Does_Not_Block_Later_Progressive()
     {
-        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance);
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var page = new Uri("https://www.douyin.com/?recommend=1");
@@ -1067,7 +1067,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task TikTok_Exclusive_Positive_Path()
     {
-        var detector = new TikTokMediaDetector(NullLogger<TikTokMediaDetector>.Instance, StubTikTokYtDlp());
+        var detector = new TikTokMediaDetector(NullLogger<TikTokMediaDetector>.Instance, StubTikTokYtDlp(), Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var page = new Uri("https://www.tiktok.com/@u/video/1234567890123456789");
@@ -1082,7 +1082,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task YouTube_Exclusive_Positive_Path()
     {
-        var detector = new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance, StubYouTubeYtDlp());
+        var detector = new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance, StubYouTubeYtDlp(), Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var page = new Uri("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
@@ -1097,7 +1097,7 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task Bilibili_Exclusive_Positive_Path()
     {
-        var detector = new BilibiliMediaDetector(NullLogger<BilibiliMediaDetector>.Instance, StubBilibiliYtDlp());
+        var detector = new BilibiliMediaDetector(NullLogger<BilibiliMediaDetector>.Instance, StubBilibiliYtDlp(), Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var page = new Uri("https://www.bilibili.com/video/BV1xx411c7mD");
