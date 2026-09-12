@@ -36,15 +36,20 @@ internal static class MediaAddressRenewal
             catch (Exception ex) { errors.Add("resolve:" + ex.GetType().Name); continue; }
             var matches = videos.Where(v => !v.IsDrmProtected && SameDetectedContent(previous, v, page))
                 .SelectMany(v => v.Variants)
+                .Select(v => BilibiliCdnPreference.AlignDashRenewal(previous, v) ?? v)
                 .Where(v => (Compatible(previous, v) ||
                              BilibiliCdnPreference.SameDashObjects(previous, v) ||
                              SameYoutubePlayback(previous, v)) &&
                     !IsKnownUndersizedVideo(v) &&
                     (validate is not null || !v.Tracks.Select(t => t.SourceUrl).SequenceEqual(previous.Tracks.Select(t => t.SourceUrl))))
                 .OrderByDescending(v => BilibiliCdnPreference.SameDashObjects(previous, v) || SameYoutubePlayback(previous, v) ? 1 : 0)
+                .ThenByDescending(v => BilibiliCdnPreference.IsMediaHost(v.SourceUrl) ? BilibiliCdnPreference.Score(v.SourceUrl) : 0)
                 .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
                 .ThenByDescending(DurableHostScore)
-                .Take(8);
+                .Take(8)
+                .ToList();
+            if (matches.Count == 0 && videos.Count > 0)
+                errors.Add("renewed:no_quality_match");
             foreach (var match in matches)
                 try
                 {
@@ -55,7 +60,8 @@ internal static class MediaAddressRenewal
                         continue;
                     }
 
-                    return match with { ContentIdentity = previous.ContentIdentity, RecoveryPageUrl = page, Alternatives = [] };
+                    var aligned = BilibiliCdnPreference.AlignDashRenewal(previous, match) ?? match;
+                    return aligned with { ContentIdentity = previous.ContentIdentity, RecoveryPageUrl = page, Alternatives = [] };
                 }
                 catch (DownloadException ex) { errors.Add("renewed:" + ex.ErrorCode); }
                 catch (HttpRequestException) { errors.Add("renewed:network"); }

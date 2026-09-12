@@ -81,34 +81,82 @@ internal static class BilibiliCdnPreference
 
     /// <summary>
     /// Same cid/qn DASH objects with a new signature or CDN. Keep <c>.part</c> after 403 URL renew.
+    /// Previous may be video-only (browser capture) while renew returns video+audio — still match
+    /// when every previous object key is present on the next variant.
     /// </summary>
     public static bool SameDashObjects(MediaVariant previous, MediaVariant next)
     {
         if (!IsMediaHost(previous.SourceUrl) || !IsMediaHost(next.SourceUrl))
             return false;
-
-        var left = previous.Tracks
-            .Select(t => (t.Kind, Key: ObjectKey(t.SourceUrl)))
-            .OrderBy(t => t.Kind)
-            .ThenBy(t => t.Key, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        var right = next.Tracks
-            .Select(t => (t.Kind, Key: ObjectKey(t.SourceUrl)))
-            .OrderBy(t => t.Kind)
-            .ThenBy(t => t.Key, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        if (left.Length == 0 || left.Length != right.Length)
+        if (previous.Tracks.Count == 0 || next.Tracks.Count == 0)
             return false;
 
-        for (var i = 0; i < left.Length; i++)
+        var available = next.Tracks
+            .Select((t, i) => (Index: i, t.Kind, Key: ObjectKey(t.SourceUrl)))
+            .ToList();
+
+        foreach (var left in previous.Tracks)
         {
-            if (left[i].Kind != right[i].Kind ||
-                !string.Equals(left[i].Key, right[i].Key, StringComparison.OrdinalIgnoreCase))
+            var key = ObjectKey(left.SourceUrl);
+            var match = available.FindIndex(r =>
+                string.Equals(r.Key, key, StringComparison.OrdinalIgnoreCase) &&
+                KindsCompatible(left.Kind, r.Kind));
+            if (match < 0)
                 return false;
+            available.RemoveAt(match);
         }
 
         return true;
     }
+
+    /// <summary>
+    /// Rebuild <paramref name="previous"/>'s track layout with renewed URLs from <paramref name="next"/>
+    /// so a video-only job does not suddenly become a mux job after 403 recovery.
+    /// </summary>
+    public static MediaVariant? AlignDashRenewal(MediaVariant previous, MediaVariant next)
+    {
+        if (!SameDashObjects(previous, next))
+            return null;
+
+        var unused = next.Tracks.ToList();
+        var tracks = new List<MediaTrack>(previous.Tracks.Count);
+        foreach (var left in previous.Tracks)
+        {
+            var key = ObjectKey(left.SourceUrl);
+            var idx = unused.FindIndex(t =>
+                string.Equals(ObjectKey(t.SourceUrl), key, StringComparison.OrdinalIgnoreCase) &&
+                KindsCompatible(left.Kind, t.Kind));
+            if (idx < 0)
+                return null;
+            var right = unused[idx];
+            unused.RemoveAt(idx);
+            tracks.Add(left with
+            {
+                SourceUrl = right.SourceUrl,
+                RequestContext = right.RequestContext,
+                ContentLength = right.ContentLength ?? left.ContentLength,
+                Codec = right.Codec ?? left.Codec,
+                Container = right.Container ?? left.Container,
+                Bandwidth = right.Bandwidth ?? left.Bandwidth,
+                BrowserObserved = false,
+                IsValidated = false,
+                Evidence = MediaEvidence.Heuristic
+            });
+        }
+
+        return previous with
+        {
+            Tracks = tracks,
+            Bandwidth = next.Bandwidth ?? previous.Bandwidth,
+            Width = next.Width ?? previous.Width,
+            Height = next.Height ?? previous.Height
+        };
+    }
+
+    private static bool KindsCompatible(MediaTrackKind left, MediaTrackKind right) =>
+        left == right ||
+        ((left is MediaTrackKind.Video or MediaTrackKind.Combined) &&
+         (right is MediaTrackKind.Video or MediaTrackKind.Combined));
 
     /// <summary>
     /// Overseas COS/HW mirrors (<c>cosov</c> / <c>os=cosovbv</c>) share the "cos" substring

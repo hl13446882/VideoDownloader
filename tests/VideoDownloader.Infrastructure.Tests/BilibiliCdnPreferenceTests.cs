@@ -70,6 +70,63 @@ public class BilibiliCdnPreferenceTests
     }
 
     [Fact]
+    public void SameDashObjects_Allows_VideoOnly_Against_VideoPlusAudio_Renewal()
+    {
+        var ctx = RequestContext.CreateEmpty();
+        var videoOnly = MediaVariant.FromTracks(
+            "视频",
+            null,
+            null,
+            null,
+            "mp4",
+            [
+                new MediaTrack(
+                    "video",
+                    MediaTrackKind.Video,
+                    new Uri("https://upos-sz-mirrorcosov.bilivideo.com/upgcxcode/45/15/41791391545/41791391545-1-100026.m4s?os=cosovbv"),
+                    null,
+                    "mp4",
+                    null,
+                    445_523_331,
+                    ctx)
+            ]);
+        var renewed = MediaVariant.FromTracks(
+            "1080p",
+            null,
+            1080,
+            null,
+            "mp4",
+            [
+                new MediaTrack(
+                    "video",
+                    MediaTrackKind.Video,
+                    new Uri("https://upos-sz-mirrorbos.bilivideo.com/upgcxcode/45/15/41791391545/41791391545-1-100026.m4s?os=bos"),
+                    null,
+                    "mp4",
+                    null,
+                    445_523_331,
+                    ctx),
+                new MediaTrack(
+                    "audio",
+                    MediaTrackKind.Audio,
+                    new Uri("https://upos-sz-mirrorbos.bilivideo.com/upgcxcode/45/15/41791391545/41791391545-1-30280.m4s?os=bos"),
+                    null,
+                    "m4a",
+                    null,
+                    4_000_000,
+                    ctx)
+            ]);
+
+        Assert.True(BilibiliCdnPreference.SameDashObjects(videoOnly, renewed));
+        var aligned = BilibiliCdnPreference.AlignDashRenewal(videoOnly, renewed);
+        Assert.NotNull(aligned);
+        Assert.Single(aligned!.Tracks);
+        Assert.Equal(MediaTrackKind.Video, aligned.Tracks[0].Kind);
+        Assert.Contains("mirrorbos", aligned.Tracks[0].SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("41791391545-1-100026.m4s", BilibiliCdnPreference.ObjectKey(aligned.Tracks[0].SourceUrl));
+    }
+
+    [Fact]
     public async Task Detector_Picks_Bilivideo_Over_Akamai_For_Same_Object()
     {
         var detector = new BilibiliMediaDetector(
