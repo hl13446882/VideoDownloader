@@ -51,7 +51,10 @@ $manifest = [ordered]@{
   files = $entries
 }
 $manifestPath = Join-Path $stage 'manifest.json'
-$manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+$json = $manifest | ConvertTo-Json -Depth 6
+# UTF-8 without BOM — Python json.loads(utf-8) rejects BOM.
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+[System.IO.File]::WriteAllText($manifestPath, $json, $utf8NoBom)
 Write-Host "Update manifest: $Version ($($entries.Count) files)"
 
 if ($SkipUpload) {

@@ -204,7 +204,8 @@ def load_manifest(channel):
     manifest_path = root / "manifest.json"
     if not manifest_path.is_file():
         return None
-    return json.loads(manifest_path.read_text(encoding="utf-8"))
+    # PowerShell Set-Content -Encoding UTF8 may write a BOM; utf-8-sig strips it.
+    return json.loads(manifest_path.read_text(encoding="utf-8-sig"))
 
 
 def verify_full_license(document):
@@ -415,7 +416,10 @@ class Handler(BaseHTTPRequestHandler):
         if not ok:
             return self.send_json(HTTPStatus.FORBIDDEN, {"error": detail})
         channel = payload.get("channel", "beta")
-        manifest = load_manifest(channel)
+        try:
+            manifest = load_manifest(channel)
+        except (OSError, json.JSONDecodeError, UnicodeError) as ex:
+            return self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "manifest_unreadable", "detail": str(ex)})
         if not manifest:
             return self.send_json(HTTPStatus.NOT_FOUND, {"error": "no_release"})
         return self.send_json(HTTPStatus.OK, manifest)
