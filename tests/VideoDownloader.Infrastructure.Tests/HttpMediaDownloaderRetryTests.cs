@@ -567,13 +567,25 @@ public class HttpMediaDownloaderRetryTests
             Assert.Equal(ranges[i - 1].End + 1, ranges[i].Start);
     }
 
-    [Fact]
-    public async Task DownloadDirectAsync_ParallelRanges_AssemblesGoogleVideoObject()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DownloadDirectAsync_ParallelRanges_AssemblesGoogleVideoObject(bool redirect)
     {
         var data = ValidSizedMp4(5 * 1024 * 1024);
         var rangeHits = 0;
+        var redirectHits = 0;
         var handler = new StubHandler(request =>
         {
+            Assert.NotNull(request.Headers.Range!.Ranges.Single().To);
+            Assert.Equal("identity", request.Headers.AcceptEncoding.ToString());
+            if (redirect && request.RequestUri!.Host.StartsWith("rr1"))
+            {
+                Interlocked.Increment(ref redirectHits);
+                var response = new HttpResponseMessage(HttpStatusCode.Redirect);
+                response.Headers.Location = new Uri("https://rr2.googlevideo.com/videoplayback?id=1");
+                return response;
+            }
             Interlocked.Increment(ref rangeHits);
             Assert.NotNull(request.Headers.Range);
             var range = request.Headers.Range!.Ranges.Single();
@@ -607,7 +619,9 @@ public class HttpMediaDownloaderRetryTests
             await downloader.DownloadDirectAsync(job, null, null, CancellationToken.None);
             Assert.True(File.Exists(job.TargetPath));
             Assert.Equal(data.Length, new FileInfo(job.TargetPath).Length);
-            Assert.True(rangeHits >= 4);
+            Assert.Equal(4, rangeHits);
+            Assert.Equal(redirect ? 4 : 0, redirectHits);
+            Assert.Equal(data, await File.ReadAllBytesAsync(job.TargetPath));
             Assert.False(Directory.Exists(job.TargetPath + ".part.chunks"));
         }
         finally

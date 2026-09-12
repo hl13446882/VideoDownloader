@@ -495,13 +495,7 @@ public sealed class HttpMediaDownloader
             return;
 
         var from = rangeStart + have;
-        using var request = _requestFactory.Create(resource with { Url = url }, HttpMethod.Get);
-        request.Headers.Range = new RangeHeaderValue(from, rangeEnd);
-        request.Headers.Remove("If-Range");
-        request.Headers.AcceptEncoding.Clear();
-        request.Headers.AcceptEncoding.ParseAdd("identity");
-
-        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        using var response = await SendRangeAsync(resource, url, client, from, rangeEnd, ct);
         if (response.StatusCode == HttpStatusCode.Forbidden)
             throw new DownloadException(ErrorCodes.Http403, "Access denied (403).");
         if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
@@ -552,6 +546,32 @@ public sealed class HttpMediaDownloader
             throw new DownloadException(
                 ErrorCodes.IncompleteDownload,
                 $"Parallel chunk {index} got {file.Length} of {expected} bytes.");
+    }
+
+    private async Task<HttpResponseMessage> SendRangeAsync(
+        MediaResource resource, Uri url, HttpClient client, long from, long to, CancellationToken ct)
+    {
+        for (var redirects = 0; ; redirects++)
+        {
+            using var request = _requestFactory.Create(resource with { Url = url }, HttpMethod.Get);
+            request.Headers.Range = new RangeHeaderValue(from, to);
+            request.Headers.Remove("If-Range");
+            request.Headers.AcceptEncoding.Clear();
+            request.Headers.AcceptEncoding.ParseAdd("identity");
+
+            var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!IsRedirect(response.StatusCode))
+                return response;
+
+            // The shared client disables automatic redirects. Preserve the exact byte
+            // range and rebuild host-scoped cookies for every CDN hop, as in single GET.
+            Uri? next;
+            using (response)
+                next = ResolveRedirectUrl(url, response.Headers.Location);
+            if (next is null || next == url || redirects >= 8)
+                throw new DownloadException(ErrorCodes.NetTimeout, "Too many redirects.");
+            url = next;
+        }
     }
 
     private static async Task AssembleChunksAsync(
