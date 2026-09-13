@@ -6,30 +6,23 @@ using Microsoft.Extensions.Logging;
 using VideoDownloader.Infrastructure.Licensing;
 using VideoDownloader.Infrastructure.Update;
 using VideoDownloader.UI.Localization;
+using VideoDownloader.UI.ViewModels;
 
 namespace VideoDownloader.UI;
 
 internal static class ClientUpdateCoordinator
 {
+    private static int _busy;
+
+    public static bool IsBusy => Volatile.Read(ref _busy) != 0;
+
     public static async Task RunStartupCheckAsync(IServiceProvider services)
     {
         try
         {
-            var updates = services.GetRequiredService<UpdateService>();
-            var logger = services.GetRequiredService<ILoggerFactory>().CreateLogger("ClientUpdate");
-            var loc = services.GetRequiredService<LocalizationService>();
-
             // Let the main window paint first.
             await Task.Delay(1500);
-
-            var result = await updates.CheckAndPrepareAsync();
-            logger.LogInformation("Startup update check: {Outcome} remote={Version}", result.Outcome, result.RemoteVersion);
-
-            if (result.Outcome is UpdateCheckOutcome.Downloaded or UpdateCheckOutcome.ReadyToApply)
-            {
-                await Application.Current.Dispatcher.InvokeAsync(() =>
-                    PromptApply(services, result, loc));
-            }
+            await RunCheckCoreAsync(services, promptWhenReady: true, showProgress: true);
         }
         catch (Exception ex)
         {
@@ -47,27 +40,170 @@ internal static class ClientUpdateCoordinator
         }
     }
 
-    public static async Task<string> RunManualCheckAsync(IServiceProvider services)
+    /// <summary>
+    /// Starts a manual update check on a background task. Progress is shown on the main window
+    /// and continues even if the Settings dialog is closed.
+    /// </summary>
+    public static void BeginManualCheck(IServiceProvider services)
     {
-        var updates = services.GetRequiredService<UpdateService>();
-        var license = services.GetRequiredService<LicenseService>().Current;
-        var loc = services.GetRequiredService<LocalizationService>();
-
-        if (!license.IsFull || !license.IsValid)
-            return loc.T("update.licenseRequired");
-
-        var result = await updates.CheckAndPrepareAsync();
-        return result.Outcome switch
+        _ = Task.Run(async () =>
         {
-            UpdateCheckOutcome.SkippedNotLicensed => loc.T("update.licenseRequired"),
-            UpdateCheckOutcome.UpToDate => loc.Format("update.upToDate", AppVersionInfo.SemVer),
-            UpdateCheckOutcome.Downloaded or UpdateCheckOutcome.ReadyToApply =>
-                PromptApply(services, result, loc)
-                    ? loc.Format("update.restarting", result.RemoteVersion ?? "")
-                    : loc.Format("update.readyLater", result.RemoteVersion ?? ""),
-            UpdateCheckOutcome.Forbidden => loc.T("update.forbidden"),
-            _ => loc.Format("update.failed", result.Message ?? result.Outcome.ToString())
+            try
+            {
+                await RunCheckCoreAsync(services, promptWhenReady: true, showProgress: true);
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    services.GetRequiredService<ILoggerFactory>()
+                        .CreateLogger("ClientUpdate")
+                        .LogWarning(ex, "Manual update check crashed");
+                    var loc = services.GetRequiredService<LocalizationService>();
+                    ReportStatus(services, loc.Format("update.failed", ex.Message));
+                }
+                catch
+                {
+                    // ignore
+                }
+            }
+        });
+    }
+
+    private static async Task RunCheckCoreAsync(
+        IServiceProvider services,
+        bool promptWhenReady,
+        bool showProgress)
+    {
+        if (Interlocked.CompareExchange(ref _busy, 1, 0) != 0)
+        {
+            var locBusy = services.GetRequiredService<LocalizationService>();
+            ReportStatus(services, locBusy.T("update.alreadyRunning"));
+            return;
+        }
+
+        try
+        {
+            var updates = services.GetRequiredService<UpdateService>();
+            var license = services.GetRequiredService<LicenseService>().Current;
+            var loc = services.GetRequiredService<LocalizationService>();
+            var logger = services.GetRequiredService<ILoggerFactory>().CreateLogger("ClientUpdate");
+
+            if (!license.IsFull || !license.IsValid)
+            {
+                ReportStatus(services, loc.T("update.licenseRequired"));
+                return;
+            }
+
+            IProgress<UpdateProgress>? progress = showProgress
+                ? new Progress<UpdateProgress>(p => ReportProgress(services, loc, p))
+                : null;
+
+            var result = await updates.CheckAndPrepareAsync(progress);
+            logger.LogInformation("Update check: {Outcome} remote={Version}", result.Outcome, result.RemoteVersion);
+
+            var finalStatus = result.Outcome switch
+            {
+                UpdateCheckOutcome.SkippedNotLicensed => loc.T("update.licenseRequired"),
+                UpdateCheckOutcome.UpToDate => loc.Format("update.upToDate", AppVersionInfo.SemVer),
+                UpdateCheckOutcome.Downloaded or UpdateCheckOutcome.ReadyToApply =>
+                    await HandleReadyAsync(services, result, loc, promptWhenReady),
+                UpdateCheckOutcome.Forbidden => loc.T("update.forbidden"),
+                UpdateCheckOutcome.SkippedDisabled => loc.T("update.checking"),
+                _ => loc.Format("update.failed", result.Message ?? result.Outcome.ToString())
+            };
+
+            if (!string.IsNullOrWhiteSpace(finalStatus))
+                ReportStatus(services, finalStatus);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _busy, 0);
+            NotifyBusyChanged(services);
+        }
+    }
+
+    private static async Task<string> HandleReadyAsync(
+        IServiceProvider services,
+        UpdateCheckResult result,
+        LocalizationService loc,
+        bool promptWhenReady)
+    {
+        if (!promptWhenReady)
+            return loc.Format("update.readyLater", result.RemoteVersion ?? "");
+
+        var apply = false;
+        await Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            apply = PromptApply(services, result, loc);
+        });
+
+        return apply
+            ? loc.Format("update.restarting", result.RemoteVersion ?? "")
+            : loc.Format("update.readyLater", result.RemoteVersion ?? "");
+    }
+
+    private static void ReportProgress(IServiceProvider services, LocalizationService loc, UpdateProgress progress)
+    {
+        var text = progress.Kind switch
+        {
+            UpdateProgressKind.Checking => loc.T("update.checking"),
+            UpdateProgressKind.FoundVersion => loc.Format("update.foundVersion", progress.Version ?? "?"),
+            UpdateProgressKind.DownloadingFile => loc.Format(
+                "update.downloadingFile",
+                string.IsNullOrWhiteSpace(progress.FilePath) ? "?" : progress.FilePath),
+            _ => loc.T("update.checking")
         };
+        ReportStatus(services, text);
+    }
+
+    private static void ReportStatus(IServiceProvider services, string message)
+    {
+        void Apply()
+        {
+            if (Application.Current?.MainWindow?.DataContext is MainViewModel main)
+                main.SetStatus(message);
+
+            // Mirror onto the settings VM owned by the main window when still open.
+            if (Application.Current?.Windows is not null)
+            {
+                foreach (Window window in Application.Current.Windows)
+                {
+                    if (window is SettingsWindow { DataContext: SettingsViewModel settings })
+                        settings.StatusMessage = message;
+                }
+            }
+        }
+
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is null)
+            return;
+        if (dispatcher.CheckAccess())
+            Apply();
+        else
+            dispatcher.Invoke(Apply);
+    }
+
+    private static void NotifyBusyChanged(IServiceProvider services)
+    {
+        void Apply()
+        {
+            if (Application.Current?.Windows is null)
+                return;
+            foreach (Window window in Application.Current.Windows)
+            {
+                if (window is SettingsWindow { DataContext: SettingsViewModel settings })
+                    settings.CheckUpdateEnabled = !IsBusy;
+            }
+        }
+
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is null)
+            return;
+        if (dispatcher.CheckAccess())
+            Apply();
+        else
+            dispatcher.Invoke(Apply);
     }
 
     private static bool PromptApply(IServiceProvider services, UpdateCheckResult result, LocalizationService loc)

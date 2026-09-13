@@ -83,6 +83,18 @@ public enum UpdateCheckOutcome
     Failed
 }
 
+public enum UpdateProgressKind
+{
+    Checking,
+    FoundVersion,
+    DownloadingFile
+}
+
+public sealed record UpdateProgress(
+    UpdateProgressKind Kind,
+    string? Version = null,
+    string? FilePath = null);
+
 public sealed record UpdateCheckResult(
     UpdateCheckOutcome Outcome,
     string? RemoteVersion = null,

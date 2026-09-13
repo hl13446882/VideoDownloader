@@ -72,7 +72,9 @@ public sealed class UpdateService
         _options.Update.Enabled &&
         (!_options.Update.RequireFullLicense || (_license.Current.IsFull && _license.Current.IsValid));
 
-    public async Task<UpdateCheckResult> CheckAndPrepareAsync(CancellationToken ct = default)
+    public async Task<UpdateCheckResult> CheckAndPrepareAsync(
+        IProgress<UpdateProgress>? progress = null,
+        CancellationToken ct = default)
     {
         // Queue behind any in-flight check (e.g. startup auto-check vs Settings "检查更新")
         // instead of failing immediately with "busy".
@@ -80,6 +82,8 @@ public sealed class UpdateService
 
         try
         {
+            progress?.Report(new UpdateProgress(UpdateProgressKind.Checking));
+
             if (!_options.Update.Enabled)
                 return new UpdateCheckResult(UpdateCheckOutcome.SkippedDisabled);
 
@@ -101,6 +105,7 @@ public sealed class UpdateService
                 File.Exists(existing.ZipPath) &&
                 AppVersionInfo.CompareSemVer(existing.Version, AppVersionInfo.SemVer) > 0)
             {
+                progress?.Report(new UpdateProgress(UpdateProgressKind.FoundVersion, Version: existing.Version));
                 return new UpdateCheckResult(
                     UpdateCheckOutcome.ReadyToApply,
                     existing.Version,
@@ -149,6 +154,9 @@ public sealed class UpdateService
                 return new UpdateCheckResult(UpdateCheckOutcome.UpToDate, manifest.Version);
             }
 
+            progress?.Report(new UpdateProgress(UpdateProgressKind.FoundVersion, Version: manifest.Version));
+            await Task.Delay(TimeSpan.FromSeconds(3), ct);
+
             if (changed.Count == 0)
             {
                 // Only deletes: write empty zip pending so launcher can apply deletes.
@@ -156,32 +164,14 @@ public sealed class UpdateService
                 return new UpdateCheckResult(UpdateCheckOutcome.Downloaded, manifest.Version, Pending: pendingDeletesOnly);
             }
 
-            using var deltaRequest = new HttpRequestMessage(HttpMethod.Post, "/api/v1/update/delta")
-            {
-                Content = JsonContent(new UpdateDeltaRequest
-                {
-                    Channel = _options.Update.Channel,
-                    Paths = changed,
-                    License = document
-                })
-            };
-            using var deltaResponse = await _client.SendAsync(deltaRequest, HttpCompletionOption.ResponseHeadersRead, ct);
-            if (deltaResponse.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden)
-            {
-                ClearPending();
-                return new UpdateCheckResult(UpdateCheckOutcome.Forbidden);
-            }
-
-            deltaResponse.EnsureSuccessStatusCode();
-
             var versionDir = Path.Combine(UpdatesRoot, SanitizeFileName(manifest.Version));
             Directory.CreateDirectory(versionDir);
             var zipPath = Path.Combine(versionDir, "delta.zip");
             var tempZip = zipPath + ".partial";
-            await using (var input = await deltaResponse.Content.ReadAsStreamAsync(ct))
-            await using (var output = File.Create(tempZip))
-                await input.CopyToAsync(output, ct);
+            if (File.Exists(tempZip))
+                File.Delete(tempZip);
 
+            await DownloadChangedFilesAsZipAsync(changed, document, tempZip, progress, ct);
             await VerifyDeltaZipAsync(tempZip, manifest, changed, ct);
             if (File.Exists(zipPath))
                 File.Delete(zipPath);
@@ -202,6 +192,60 @@ public sealed class UpdateService
         finally
         {
             _gate.Release();
+        }
+    }
+
+    private async Task DownloadChangedFilesAsZipAsync(
+        IReadOnlyList<string> changed,
+        LicenseDocument document,
+        string tempZipPath,
+        IProgress<UpdateProgress>? progress,
+        CancellationToken ct)
+    {
+        await using var output = File.Create(tempZipPath);
+        using var outZip = new System.IO.Compression.ZipArchive(output, System.IO.Compression.ZipArchiveMode.Create);
+
+        foreach (var path in changed)
+        {
+            ct.ThrowIfCancellationRequested();
+            progress?.Report(new UpdateProgress(UpdateProgressKind.DownloadingFile, FilePath: path));
+
+            using var deltaRequest = new HttpRequestMessage(HttpMethod.Post, "/api/v1/update/delta")
+            {
+                Content = JsonContent(new UpdateDeltaRequest
+                {
+                    Channel = _options.Update.Channel,
+                    Paths = [path],
+                    License = document
+                })
+            };
+            using var deltaResponse = await _client.SendAsync(deltaRequest, HttpCompletionOption.ResponseHeadersRead, ct);
+            if (deltaResponse.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden)
+                throw new HttpRequestException("Update delta forbidden for " + path);
+            deltaResponse.EnsureSuccessStatusCode();
+
+            var partial = Path.Combine(Path.GetTempPath(), "vd-delta-" + Guid.NewGuid().ToString("N") + ".zip");
+            try
+            {
+                await using (var input = await deltaResponse.Content.ReadAsStreamAsync(ct))
+                await using (var partialStream = File.Create(partial))
+                    await input.CopyToAsync(partialStream, ct);
+
+                using var inZip = System.IO.Compression.ZipFile.OpenRead(partial);
+                foreach (var entry in inZip.Entries)
+                {
+                    if (string.IsNullOrEmpty(entry.Name) && entry.FullName.EndsWith('/'))
+                        continue;
+                    var dest = outZip.CreateEntry(entry.FullName, System.IO.Compression.CompressionLevel.Optimal);
+                    await using var entryStream = entry.Open();
+                    await using var destStream = dest.Open();
+                    await entryStream.CopyToAsync(destStream, ct);
+                }
+            }
+            finally
+            {
+                try { if (File.Exists(partial)) File.Delete(partial); } catch { /* ignore */ }
+            }
         }
     }
 

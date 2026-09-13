@@ -152,17 +152,17 @@ public sealed partial class SettingsViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private async Task CheckUpdateAsync()
+    private void CheckUpdate()
     {
+        if (ClientUpdateCoordinator.IsBusy)
+        {
+            StatusMessage = _loc.T("update.alreadyRunning");
+            return;
+        }
+
         CheckUpdateEnabled = false;
-        try
-        {
-            StatusMessage = _loc.T("update.checking");
-            StatusMessage = await ClientUpdateCoordinator.RunManualCheckAsync(_services);
-        }
-        finally
-        {
-            CheckUpdateEnabled = true;
-        }
+        StatusMessage = _loc.T("update.checking");
+        ClientUpdateCoordinator.BeginManualCheck(_services);
+        // Progress continues on the main window even if this Settings dialog closes.
     }
 }
