@@ -45,6 +45,10 @@ public sealed class LocalLibraryHost : IAsyncDisposable
         return uri.Host is "127.0.0.1" or "localhost" or "::1";
     }
 
+    public static bool IsLocalPlayerUrl(Uri? uri) =>
+        IsLocalLibraryHost(uri) &&
+        uri!.AbsolutePath.StartsWith("/play/", StringComparison.OrdinalIgnoreCase);
+
     public string GalleryUrl => (BaseUri ?? new Uri($"http://127.0.0.1:{PreferredPort}/")).AbsoluteUri;
 
     public string PlayUrl(Guid jobId) =>

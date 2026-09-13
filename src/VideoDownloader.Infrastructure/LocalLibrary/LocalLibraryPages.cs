@@ -249,19 +249,20 @@ load();
   .name { font-weight:600; word-break:break-all; }
   .caption { color:#cbd5e1; white-space:pre-wrap; }
   .pos { color:var(--muted); font-size:12px; margin-top:4px; }
-  #playerRoot:fullscreen {
-    max-width:none; width:100%; height:100%; margin:0; padding:16px;
-    display:flex; flex-direction:column; background:#000;
+  /* Host window is borderless fullscreen — fill the entire WebView. */
+  body.host-fs { overflow:hidden; background:#000; }
+  body.host-fs header { display:none; }
+  body.host-fs .wrap {
+    max-width:none; width:100%; height:100vh; margin:0; padding:16px;
+    display:flex; flex-direction:column; box-sizing:border-box;
   }
-  #playerRoot:fullscreen .stage { flex:1; min-height:0; display:block; }
-  body:not(.media-ready) #playerRoot:fullscreen .stage { display:none; }
-  #playerRoot:fullscreen video {
+  body.host-fs .stage { flex:1; min-height:0; }
+  body:not(.media-ready).host-fs .stage { display:none; }
+  body.host-fs video {
     width:100%; height:100%; max-height:none; border-radius:0; object-fit:contain;
   }
-  #playerRoot:fullscreen .meta {
-    margin-top:0; padding-top:12px; flex-shrink:0;
-  }
-  body:not(.media-ready) #playerRoot:fullscreen .meta {
+  body.host-fs .meta { margin-top:0; padding-top:12px; flex-shrink:0; }
+  body:not(.media-ready).host-fs .meta {
     margin:auto 0; padding:24px; max-width:720px;
   }
 </style>
@@ -291,8 +292,8 @@ let playlist = [];
 let index = -1;
 let wheelLock = 0;
 let loadToken = 0;
+let hostFs = false;
 const norm = id => String(id||'').replace(/-/g,'').toLowerCase();
-const playerRoot = document.getElementById('playerRoot');
 const video = document.getElementById('player');
 
 function idFromPath(pathname){
@@ -303,25 +304,30 @@ function setMediaReady(ready){
   document.body.classList.toggle('media-ready', !!ready);
 }
 
-function isFullscreen(){
-  return document.fullscreenElement === playerRoot;
+function postHostFs(active){
+  try {
+    if (window.chrome && chrome.webview && chrome.webview.postMessage)
+      chrome.webview.postMessage({ type: 'vd-local-fullscreen', active: !!active });
+  } catch (_) {}
 }
 
-async function enterFullscreen(){
+function isFullscreen(){
+  return hostFs || document.body.classList.contains('host-fs');
+}
+
+function enterFullscreen(){
   if(isFullscreen()) return;
-  try {
-    if(playerRoot.requestFullscreen) await playerRoot.requestFullscreen();
-    else if(playerRoot.webkitRequestFullscreen) playerRoot.webkitRequestFullscreen();
-  } catch (_) {}
+  hostFs = true;
+  document.body.classList.add('host-fs');
+  postHostFs(true);
   syncFsButton();
 }
 
-async function exitFullscreen(){
-  if(!document.fullscreenElement) return;
-  try {
-    if(document.exitFullscreen) await document.exitFullscreen();
-    else if(document.webkitExitFullscreen) document.webkitExitFullscreen();
-  } catch (_) {}
+function exitFullscreen(){
+  if(!isFullscreen()) return;
+  hostFs = false;
+  document.body.classList.remove('host-fs');
+  postHostFs(false);
   syncFsButton();
 }
 
@@ -329,6 +335,12 @@ function toggleFullscreen(){
   if(isFullscreen()) exitFullscreen();
   else enterFullscreen();
 }
+
+window.__vdSetHostFullscreen = function(active){
+  hostFs = !!active;
+  document.body.classList.toggle('host-fs', hostFs);
+  syncFsButton();
+};
 
 function syncFsButton(){
   const btn = document.getElementById('btnFs');
@@ -381,7 +393,11 @@ async function loadById(id, { push } = { push: false }){
   const onReady = () => {
     if(token !== loadToken) return;
     setMediaReady(true);
-    if(keepFs && !isFullscreen()) enterFullscreen();
+    if(keepFs){
+      hostFs = true;
+      document.body.classList.add('host-fs');
+      syncFsButton();
+    }
     video.play().catch(() => {});
   };
   video.onloadeddata = onReady;
@@ -420,8 +436,6 @@ async function boot(){
 document.getElementById('btnPrev').onclick = () => go(-1);
 document.getElementById('btnNext').onclick = () => go(1);
 document.getElementById('btnFs').onclick = () => toggleFullscreen();
-document.addEventListener('fullscreenchange', syncFsButton);
-document.addEventListener('webkitfullscreenchange', syncFsButton);
 
 video.addEventListener('dblclick', e => {
   e.preventDefault();
@@ -433,6 +447,7 @@ document.addEventListener('keydown', e => {
   if(e.key === 'ArrowLeft' || e.key === 'ArrowUp'){ e.preventDefault(); go(-1); }
   if(e.key === 'ArrowRight' || e.key === 'ArrowDown'){ e.preventDefault(); go(1); }
   if(e.key === 'f' || e.key === 'F'){ e.preventDefault(); toggleFullscreen(); }
+  if(e.key === 'Escape' && isFullscreen()){ e.preventDefault(); exitFullscreen(); }
 });
 
 window.addEventListener('wheel', e => {

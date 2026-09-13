@@ -421,11 +421,36 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private bool _isSidePanelVisible = true;
 
+    /// <summary>True when the local player asked the WPF host for true window fullscreen.</summary>
+    [ObservableProperty]
+    private bool _isAppFullscreen;
+
+    public bool IsAppChromeVisible => !IsAppFullscreen;
+
+    public Thickness WindowContentMargin =>
+        IsAppFullscreen ? new Thickness(0) : new Thickness(8);
+
     public Thickness BrowserPaneMargin =>
         IsSidePanelVisible ? new Thickness(0, 0, 8, 0) : new Thickness(0);
 
     partial void OnIsSidePanelVisibleChanged(bool value) =>
         OnPropertyChanged(nameof(BrowserPaneMargin));
+
+    partial void OnIsAppFullscreenChanged(bool value)
+    {
+        OnPropertyChanged(nameof(IsAppChromeVisible));
+        OnPropertyChanged(nameof(WindowContentMargin));
+    }
+
+    public void SetAppFullscreen(bool active)
+    {
+        if (IsAppFullscreen == active)
+            return;
+        IsAppFullscreen = active;
+        var tab = SelectedTab;
+        if (tab?.IsInitialized == true)
+            _ = tab.Host.NotifyLocalPlayerFullscreenAsync(active);
+    }
 
     partial void OnStatusMessageChanged(string value) => OnPropertyChanged(nameof(HasStatusMessage));
 
@@ -606,7 +631,21 @@ public sealed partial class MainViewModel : ObservableObject
             {
                 // Document navigation → same singleton full re-probe entry as manual Probe.
                 if (ReferenceEquals(SelectedTab, tab) && Uri.TryCreate(url, UriKind.Absolute, out var page))
+                {
+                    if (IsAppFullscreen && !LocalLibraryHost.IsLocalPlayerUrl(page))
+                        SetAppFullscreen(false);
                     RestartDetectionForPageChange(page, null, mediaSessionKey: null);
+                }
+            };
+            tab.Host.LocalPlayerFullscreenRequested += (_, active) =>
+            {
+                if (!ReferenceEquals(SelectedTab, tab))
+                    return;
+                var dispatcher = Application.Current?.Dispatcher;
+                if (dispatcher is null || dispatcher.CheckAccess())
+                    SetAppFullscreen(active);
+                else
+                    dispatcher.Invoke(() => SetAppFullscreen(active));
             };
             tab.Host.MediaSessionChanged += (_, e) =>
             {
@@ -669,6 +708,8 @@ public sealed partial class MainViewModel : ObservableObject
             CanGoBack = false;
             CanGoForward = false;
             RefreshSidePanelVisibility(null);
+            if (IsAppFullscreen)
+                SetAppFullscreen(false);
             return;
         }
 

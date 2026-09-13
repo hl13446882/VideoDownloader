@@ -78,6 +78,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
     public event EventHandler<PageIdentityChangedEventArgs>? PageIdentityChanged;
     public event EventHandler<string>? OpenInNewTabRequested;
     public event EventHandler<MediaSessionChangedEventArgs>? MediaSessionChanged;
+    public event EventHandler<bool>? LocalPlayerFullscreenRequested;
 
     public string? CurrentMediaSessionKey
     {
@@ -86,6 +87,16 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             lock (_mediaSessionLock)
                 return _mediaSessionKey;
         }
+    }
+
+    public Task NotifyLocalPlayerFullscreenAsync(bool active)
+    {
+        if (_core is null)
+            return Task.CompletedTask;
+        var flag = active ? "true" : "false";
+        var script =
+            "try{window.__vdSetHostFullscreen&&window.__vdSetHostFullscreen(" + flag + ");}catch(e){}";
+        return _core.ExecuteScriptAsync(script);
     }
 
     public async Task InitializeAsync(WebView2 webView, CancellationToken ct = default)
@@ -228,6 +239,15 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
 
     private void TryHandleMediaMessage(JsonElement root)
     {
+        if (root.TryGetProperty("type", out var fsType) &&
+            fsType.GetString() == "vd-local-fullscreen")
+        {
+            var active = root.TryGetProperty("active", out var activeEl) &&
+                         activeEl.ValueKind is JsonValueKind.True;
+            LocalPlayerFullscreenRequested?.Invoke(this, active);
+            return;
+        }
+
         if (root.TryGetProperty("type", out var messageType) && messageType.GetString() == "vd-video-identity")
         {
             if (_captureEnabled && root.TryGetProperty("identity", out var identity) &&

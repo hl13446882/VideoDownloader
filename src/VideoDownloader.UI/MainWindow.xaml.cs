@@ -332,10 +332,63 @@ public partial class MainWindow : Window
         UpdateWebViewVisibility();
     }
 
+    private WindowState _savedWindowState = WindowState.Normal;
+    private WindowStyle _savedWindowStyle = WindowStyle.SingleBorderWindow;
+    private ResizeMode _savedResizeMode = ResizeMode.CanResize;
+    private double _savedMinWidth;
+    private double _savedMinHeight;
+    private bool _appFullscreenApplied;
+
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(MainViewModel.SelectedTab))
             UpdateWebViewVisibility();
+        else if (e.PropertyName == nameof(MainViewModel.IsAppFullscreen))
+            ApplyAppFullscreen(_viewModel.IsAppFullscreen);
+    }
+
+    private void OnWindowPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape && _viewModel.IsAppFullscreen)
+        {
+            _viewModel.SetAppFullscreen(false);
+            e.Handled = true;
+        }
+    }
+
+    private void ApplyAppFullscreen(bool active)
+    {
+        if (active == _appFullscreenApplied)
+            return;
+
+        if (active)
+        {
+            _savedWindowState = WindowState;
+            _savedWindowStyle = WindowStyle;
+            _savedResizeMode = ResizeMode;
+            _savedMinWidth = MinWidth;
+            _savedMinHeight = MinHeight;
+            MinWidth = 0;
+            MinHeight = 0;
+            WindowStyle = WindowStyle.None;
+            ResizeMode = ResizeMode.NoResize;
+            // Ensure a style change takes effect before maximizing borderless.
+            if (WindowState == WindowState.Maximized)
+                WindowState = WindowState.Normal;
+            WindowState = WindowState.Maximized;
+            _appFullscreenApplied = true;
+        }
+        else
+        {
+            WindowStyle = _savedWindowStyle;
+            ResizeMode = _savedResizeMode;
+            MinWidth = _savedMinWidth > 0 ? _savedMinWidth : 1000;
+            MinHeight = _savedMinHeight > 0 ? _savedMinHeight : 700;
+            WindowState = _savedWindowState == WindowState.Minimized
+                ? WindowState.Normal
+                : _savedWindowState;
+            _appFullscreenApplied = false;
+        }
     }
 
     private async Task EnsureWebViewAsync(BrowserTabViewModel tab)

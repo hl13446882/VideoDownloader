@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="clr-namespace:VideoDownloader.UI.ViewModels"
         PreviewMouseLeftButtonDown="OnWindowPreviewMouseLeftButtonDown"
+        PreviewKeyDown="OnWindowPreviewKeyDown"
         Title="Video Downloader"
         Icon="pack://application:,,,/Assets/app.ico"
         Height="900"
@@ -12,14 +13,15 @@
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVis"/>
     </Window.Resources>
-    <Grid Margin="8">
+    <Grid Margin="{Binding WindowContentMargin}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
         <!-- Address(~50%) | Probe(*) | New | Back | Forward | Lang | Go | Probe | Settings -->
-        <Grid Grid.Row="0" Margin="0,0,0,6">
+        <Grid Grid.Row="0" Margin="0,0,0,6"
+              Visibility="{Binding IsAppChromeVisible, Converter={StaticResource BoolToVis}}">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="*"/>
@@ -119,7 +121,8 @@
                          BorderThickness="0"
                          ScrollViewer.HorizontalScrollBarVisibility="Auto"
                          ScrollViewer.VerticalScrollBarVisibility="Disabled"
-                         Margin="0,0,0,4">
+                         Margin="0,0,0,4"
+                         Visibility="{Binding IsAppChromeVisible, Converter={StaticResource BoolToVis}}">
                     <ListBox.ItemsPanel>
                         <ItemsPanelTemplate>
                             <StackPanel Orientation="Horizontal"/>
@@ -149,7 +152,19 @@
                         </DataTemplate>
                     </ListBox.ItemTemplate>
                 </ListBox>
-                <Border BorderBrush="#CCC" BorderThickness="1" CornerRadius="4">
+                <Border BorderBrush="#CCC" CornerRadius="4">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Setter Property="BorderThickness" Value="1"/>
+                            <Setter Property="CornerRadius" Value="4"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsAppFullscreen}" Value="True">
+                                    <Setter Property="BorderThickness" Value="0"/>
+                                    <Setter Property="CornerRadius" Value="0"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
                     <Grid x:Name="WebViewHostPanel"/>
                 </Border>
             </DockPanel>
