@@ -7,15 +7,14 @@ namespace VideoDownloader.Core.Naming;
 
 /// <summary>
 /// Queue/download stem: caption (文案) first; generic may use page title.
-/// Title (原名) hard-capped at 30 text characters; meta suffix is <b>not</b> counted:
+/// Title (原名) hard-capped at 30 text characters (keep head, drop tail); meta suffix is <b>not</b> counted:
 /// <c>{原名}_{分}_{P}_{MB|GB}</c> e.g. <c>标题_3分_1080P_256MB</c>.
+/// Illegal filename characters are filtered out only — they never truncate the rest of the title.
 /// Last-resort fallback title: <c>{host}_{yyyyMMdd}</c>.
 /// </summary>
 public static partial class DownloadFileNameBuilder
 {
     public const int MaxStemLength = 30;
-    // Windows reserves ASCII '*'. This full-width equivalent is valid in a filename.
-    private const string MiddleEllipsis = "\uFF0A";
     private const long OneGibibyte = 1024L * 1024 * 1024;
     private const long OneMebibyte = 1024L * 1024;
 
@@ -39,7 +38,7 @@ public static partial class DownloadFileNameBuilder
 
     /// <summary>
     /// Filename-only fallback used by <see cref="Build"/>:
-    /// <c>{host}_{yyyyMMdd}</c>. Host elided to keep the date within the title budget.
+    /// <c>{host}_{yyyyMMdd}</c>. Host head-truncated to keep the date within the title budget.
     /// Resolution / duration / size are appended separately via <see cref="FormatMetaSuffix"/>.
     /// </summary>
     public static string BuildHostDateResolutionFallback(
@@ -57,7 +56,7 @@ public static partial class DownloadFileNameBuilder
         var day = (now ?? DateTimeOffset.Now).ToString("yyyyMMdd", CultureInfo.InvariantCulture);
         var suffix = "_" + day;
         var budget = MaxStemLength - TextLength(suffix);
-        var head = ElideText(host, Math.Max(1, budget));
+        var head = TruncateHead(host, Math.Max(1, budget));
         if (string.IsNullOrWhiteSpace(head))
             head = "v";
         return head + suffix;
@@ -97,12 +96,13 @@ public static partial class DownloadFileNameBuilder
 
     /// <summary>
     /// Keeps a title stem ≤ <see cref="MaxStemLength"/> text characters (meta suffix excluded).
+    /// Illegal characters are filtered; length overflow drops the tail only (head preserved).
     /// </summary>
     public static string ClampStem(string stem)
     {
         TrySplitMetaSuffix(stem, out var head, out var meta);
         var sanitized = Sanitize(head);
-        var clamped = ElideText(sanitized, MaxStemLength);
+        var clamped = TruncateHead(sanitized, MaxStemLength);
         var result = string.IsNullOrWhiteSpace(clamped) ? "video" : clamped;
         return result + meta;
     }
@@ -113,7 +113,7 @@ public static partial class DownloadFileNameBuilder
     public static string FinalizeEnqueueStem(string displayName)
     {
         TrySplitMetaSuffix(Sanitize(displayName), out var head, out var meta);
-        var clamped = ElideText(head, MaxStemLength);
+        var clamped = TruncateHead(head, MaxStemLength);
         if (string.IsNullOrWhiteSpace(clamped))
             clamped = "video";
         return clamped + meta;
@@ -128,9 +128,9 @@ public static partial class DownloadFileNameBuilder
         var safeSuffix = suffix8.Length <= 8 ? suffix8 : suffix8[..8];
         var budget = MaxStemLength - 1 - TextLength(safeSuffix);
         if (budget < 1)
-            return ElideText(safeSuffix, MaxStemLength) + meta;
+            return TruncateHead(safeSuffix, MaxStemLength) + meta;
 
-        var title = ElideText(Sanitize(head), budget);
+        var title = TruncateHead(Sanitize(head), budget);
         if (string.IsNullOrWhiteSpace(title))
             title = "v";
         return title + "_" + safeSuffix + meta;
@@ -145,7 +145,7 @@ public static partial class DownloadFileNameBuilder
         TrySplitMetaSuffix(stem, out var head, out var meta);
         var suffix = "_" + sequence.ToString(CultureInfo.InvariantCulture);
         var budget = MaxStemLength - TextLength(suffix);
-        var title = ElideText(Sanitize(head), budget);
+        var title = TruncateHead(Sanitize(head), budget);
         return (string.IsNullOrWhiteSpace(title) ? "video" : title) + suffix + meta;
     }
 
@@ -199,7 +199,7 @@ public static partial class DownloadFileNameBuilder
         TrySplitMetaSuffix(currentStem, out _, out var meta);
         var head = FilterLiveInput(newTitleHead).Trim().TrimEnd('.');
         var sanitized = Sanitize(head);
-        var clamped = ElideText(sanitized, MaxStemLength);
+        var clamped = TruncateHead(sanitized, MaxStemLength);
         if (string.IsNullOrWhiteSpace(clamped))
             clamped = "video";
         return clamped + meta;
@@ -423,6 +423,7 @@ public static partial class DownloadFileNameBuilder
 
     private static string Sanitize(string value)
     {
+        // Filter illegal filename characters only — never truncate at the first bad char.
         var invalid = Path.GetInvalidFileNameChars();
         var builder = new StringBuilder(value.Length);
         foreach (var ch in value)
@@ -441,7 +442,10 @@ public static partial class DownloadFileNameBuilder
     private static int TextLength(string value) =>
         new StringInfo(value).LengthInTextElements;
 
-    private static string ElideText(string value, int maxTextElements)
+    /// <summary>
+    /// Length limit only: keep the head (e.g. 第130集：…), drop the overflowing tail.
+    /// </summary>
+    private static string TruncateHead(string value, int maxTextElements)
     {
         if (maxTextElements <= 0 || string.IsNullOrEmpty(value))
             return string.Empty;
@@ -450,16 +454,8 @@ public static partial class DownloadFileNameBuilder
         if (info.LengthInTextElements <= maxTextElements)
             return value.Trim(' ', '.', '_');
 
-        if (maxTextElements == 1)
-            return MiddleEllipsis;
-
-        var prefixLength = (maxTextElements - 1) / 2;
-        var suffixLength = maxTextElements - 1 - prefixLength;
-        var prefix = info.SubstringByTextElements(0, prefixLength).Trim(' ', '.', '_');
-        var suffix = info.SubstringByTextElements(info.LengthInTextElements - suffixLength, suffixLength)
-            .Trim(' ', '.', '_');
-        var elided = prefix + MiddleEllipsis + suffix;
-        return string.IsNullOrWhiteSpace(elided.Trim(MiddleEllipsis[0])) ? "video" : elided;
+        var head = info.SubstringByTextElements(0, maxTextElements).Trim(' ', '.', '_');
+        return string.IsNullOrWhiteSpace(head) ? "video" : head;
     }
 
     [GeneratedRegex(@"#[^\s#]+")]

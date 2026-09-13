@@ -46,6 +46,28 @@ public class DownloadFileNameBuilderTests
     }
 
     [Fact]
+    public void Build_CleansIllegalCharacters_AndKeepsHeadWithin30()
+    {
+        var video = CreateVideo(
+            SiteIds.Generic,
+            null,
+            "第130集:后面还有很长很长很长很长很长很长很长很长很长的剧情简介内容",
+            new Uri("http://localhost:5088/"),
+            null,
+            durationSec: 600,
+            contentLength: 2L * 1024 * 1024 * 1024);
+
+        var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
+
+        Assert.DoesNotContain(':', name);
+        Assert.StartsWith("第130集", name);
+        Assert.DoesNotContain("\uFF0A", name);
+        Assert.EndsWith("_10分_1080P_2GB", name);
+        DownloadFileNameBuilder.TrySplitMetaSuffix(name, out var head, out _);
+        Assert.Equal(30, new System.Globalization.StringInfo(head).LengthInTextElements);
+    }
+
+    [Fact]
     public void Build_StripsHashtags_AndHardCapsTitleAt30()
     {
         var video = CreateVideo(
@@ -106,27 +128,6 @@ public class DownloadFileNameBuilderTests
         Assert.DoesNotContain("9.8MB", name, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("mp4", name, StringComparison.OrdinalIgnoreCase);
         Assert.EndsWith("_2分_1080P_10MB", name);
-    }
-
-    [Fact]
-    public void Build_CleansIllegalCharacters_AndElidesMiddle()
-    {
-        var video = CreateVideo(
-            SiteIds.Generic,
-            null,
-            "Before:Illegal*Characters/Are?RemovedAndTheTailRemains",
-            new Uri("http://localhost:5088/"),
-            null,
-            durationSec: 600,
-            contentLength: 2L * 1024 * 1024 * 1024);
-
-        var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
-
-        Assert.DoesNotContain(':', name);
-        Assert.DoesNotContain('*', name);
-        Assert.DoesNotContain('/', name);
-        Assert.Contains("\uFF0A", name);
-        Assert.EndsWith("_10分_1080P_2GB", name);
     }
 
     [Fact]
@@ -229,13 +230,13 @@ public class DownloadFileNameBuilderTests
     [InlineData(21)]
     [InlineData(30)]
     [InlineData(31)]
-    public void ClampStem_PreservesUpTo30Characters(int length)
+    public void ClampStem_KeepsHeadUpTo30Characters(int length)
     {
         var input = new string('a', length);
         var name = DownloadFileNameBuilder.ClampStem(input);
         Assert.Equal(Math.Min(length, 30), name.Length);
         if (length <= 30) Assert.Equal(input, name);
-        else Assert.Contains("\uFF0A", name);
+        else Assert.Equal(new string('a', 30), name);
     }
 
     [Fact]
