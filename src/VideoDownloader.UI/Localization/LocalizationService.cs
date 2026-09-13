@@ -110,6 +110,7 @@ public sealed partial class LocalizationService : ObservableObject
         OnPropertyChanged(nameof(SettingsOpenLogsFolderTip));
         OnPropertyChanged(nameof(SettingsAutoRecover));
         OnPropertyChanged(nameof(SettingsAppVersion));
+        OnPropertyChanged(nameof(SettingsCopyright));
         OnPropertyChanged(nameof(SettingsCheckUpdate));
         OnPropertyChanged(nameof(SettingsSave));
         OnPropertyChanged(nameof(SettingsClose));
@@ -165,6 +166,7 @@ public sealed partial class LocalizationService : ObservableObject
     public string SettingsOpenLogsFolderTip => T("settings.openLogsFolderTip");
     public string SettingsAutoRecover => T("settings.autoRecover");
     public string SettingsAppVersion => T("settings.appVersion");
+    public string SettingsCopyright => T("settings.copyright");
     public string SettingsCheckUpdate => T("settings.checkUpdate");
     public string SettingsSave => T("settings.save");
     public string SettingsClose => T("settings.close");
@@ -231,6 +233,7 @@ public sealed partial class LocalizationService : ObservableObject
         ["settings.openLogsFolderFailed"] = ("无法打开日志目录：{0}", "Cannot open logs folder: {0}"),
         ["settings.autoRecover"] = ("启动时自动恢复已暂停的下载", "Auto-resume paused downloads on startup"),
         ["settings.appVersion"] = ("应用版本", "App version"),
+        ["settings.copyright"] = ("版权", "Copyright"),
         ["settings.checkUpdate"] = ("检查更新", "Check for updates"),
         ["settings.save"] = ("保存", "Save"),
         ["settings.close"] = ("关闭", "Close"),

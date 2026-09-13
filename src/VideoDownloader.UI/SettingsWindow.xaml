@@ -18,6 +18,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
@@ -76,10 +77,13 @@
             <TextBlock Text="{Binding AppVersionText}" VerticalAlignment="Center" TextWrapping="Wrap"/>
         </DockPanel>
 
-        <TextBlock Grid.Row="9" Grid.Column="0" Grid.ColumnSpan="2"
+        <TextBlock Grid.Row="9" Grid.Column="0" Text="{Binding L.SettingsCopyright}" VerticalAlignment="Center" Margin="0,0,8,8"/>
+        <TextBlock Grid.Row="9" Grid.Column="1" Text="刘志东" VerticalAlignment="Center" Margin="0,0,0,8"/>
+
+        <TextBlock Grid.Row="10" Grid.Column="0" Grid.ColumnSpan="2"
                    Text="{Binding StatusMessage}" Foreground="#047857" Margin="0,8,0,8" TextWrapping="Wrap"/>
 
-        <StackPanel Grid.Row="10" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right">
+        <StackPanel Grid.Row="11" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Content="{Binding L.SettingsSave}" Command="{Binding SaveCommand}" Width="80" Height="32" Margin="0,0,8,0"/>
             <Button Content="{Binding L.SettingsClose}" Width="80" Height="32" IsCancel="True"/>
         </StackPanel>
