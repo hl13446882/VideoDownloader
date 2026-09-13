@@ -1,7 +1,9 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Windows;
+using System.Windows.Media;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.DependencyInjection;
@@ -350,7 +352,7 @@ public sealed partial class BrowserTabViewModel : ObservableObject
     private bool _isAudiblePlaying;
 
     /// <summary>
-    /// Fixed pixel width for multi-tab equal split. Null = auto width (single-tab, max 200 via style).
+    /// Fixed pixel width when the strip must shrink under the 90% budget. Null = content width (MaxWidth 200).
     /// </summary>
     [ObservableProperty]
     private double? _fixedWidth;
@@ -664,7 +666,11 @@ public sealed partial class MainViewModel : ObservableObject
             tab.Host.TabAudibleChanged += (_, playing) =>
             {
                 var dispatcher = Application.Current?.Dispatcher;
-                void Apply() => tab.IsAudiblePlaying = playing;
+                void Apply()
+                {
+                    tab.IsAudiblePlaying = playing;
+                    RecalculateTabWidths();
+                }
                 if (dispatcher is null || dispatcher.CheckAccess())
                     Apply();
                 else
@@ -673,7 +679,11 @@ public sealed partial class MainViewModel : ObservableObject
             tab.Host.NavigationStarted += (_, _) =>
             {
                 var dispatcher = Application.Current?.Dispatcher;
-                void Clear() => tab.IsAudiblePlaying = false;
+                void Clear()
+                {
+                    tab.IsAudiblePlaying = false;
+                    RecalculateTabWidths();
+                }
                 if (dispatcher is null || dispatcher.CheckAccess())
                     Clear();
                 else
@@ -876,17 +886,78 @@ public sealed partial class MainViewModel : ObservableObject
 
     public void RecalculateTabWidths()
     {
+        const double maxTab = 200d;
+        // ContentPresenter 10+6, close 16+margin 4, optional speaker 14+margin 6, sep 1 (non-first).
+        const double contentMargin = 16d;
+        const double closeChrome = 20d;
+        const double speakerChrome = 20d;
+        const double sep = 1d;
+        const double minSqueeze = 48d;
+
         var count = Tabs.Count;
-        if (count <= 1)
+        if (count == 0)
+            return;
+
+        if (count == 1)
+        {
+            Tabs[0].FixedWidth = null;
+            return;
+        }
+
+        var budget = Math.Max(minSqueeze * count, BrowserPaneWidth * 0.9);
+        var desired = new double[count];
+        var sum = 0d;
+        for (var i = 0; i < count; i++)
+        {
+            var tab = Tabs[i];
+            var chrome = contentMargin + closeChrome + (i == 0 ? 0d : sep);
+            if (tab.IsAudiblePlaying)
+                chrome += speakerChrome;
+            desired[i] = Math.Min(maxTab, MeasureTabTitleWidth(tab.Title) + chrome);
+            sum += desired[i];
+        }
+
+        // Under budget: keep content-sized tabs (do not stretch to fill 90%).
+        if (sum <= budget)
         {
             foreach (var tab in Tabs)
                 tab.FixedWidth = null;
             return;
         }
 
-        var share = Math.Max(72, (BrowserPaneWidth * 0.9) / count);
-        foreach (var tab in Tabs)
-            tab.FixedWidth = share;
+        // Over budget: shrink proportionally from content widths; still ≤200 each.
+        var scale = budget / sum;
+        for (var i = 0; i < count; i++)
+            Tabs[i].FixedWidth = Math.Max(minSqueeze, Math.Min(maxTab, desired[i] * scale));
+    }
+
+    private static double MeasureTabTitleWidth(string? title)
+    {
+        var text = string.IsNullOrEmpty(title) ? " " : title;
+        var pixelsPerDip = 1.0;
+        try
+        {
+            if (Application.Current?.MainWindow is { } window)
+                pixelsPerDip = VisualTreeHelper.GetDpi(window).PixelsPerDip;
+        }
+        catch
+        {
+            // Headless / design-time: fall back to 1.0.
+        }
+
+        var formatted = new FormattedText(
+            text,
+            CultureInfo.CurrentUICulture,
+            FlowDirection.LeftToRight,
+            new Typeface(
+                SystemFonts.MessageFontFamily,
+                FontStyles.Normal,
+                FontWeights.Normal,
+                FontStretches.Normal),
+            SystemFonts.MessageFontSize,
+            Brushes.Black,
+            pixelsPerDip);
+        return formatted.Width;
     }
 
     [RelayCommand]

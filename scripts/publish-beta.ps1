@@ -1,6 +1,7 @@
 param(
   [string]$Configuration = 'Release',
   [switch]$SkipVerify,
+  [switch]$SkipVersionBump,
   [string[]]$VerifyUrls
 )
 $ErrorActionPreference = 'Stop'
@@ -9,14 +10,22 @@ if (-not $SkipVerify -and (-not $VerifyUrls -or $VerifyUrls.Count -eq 0)) {
 }
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
-# Each publish bumps SemVer patch (e.g. 0.2.1-beta -> 0.2.2-beta). published_at is recorded
-# later in the update manifest and is not part of version comparison.
-$bumpScript = Join-Path $root 'scripts\bump-release-version.ps1'
-$bumpedVersion = (& $bumpScript | Select-Object -Last 1)
-if (-not $bumpedVersion) { throw 'Version bump failed' }
-$bumpedVersion = $bumpedVersion.ToString().Trim()
+# Each publish bumps SemVer patch (e.g. 1.0.0 -> 1.0.1) unless -SkipVersionBump.
+# published_at is recorded later in the update manifest and is not part of version comparison.
+if ($SkipVersionBump) {
+  $propsPath = Join-Path $root 'Directory.Build.props'
+  $props = Get-Content -LiteralPath $propsPath -Raw
+  if ($props -notmatch '<Version>(?<ver>[^<]+)</Version>') { throw 'Directory.Build.props has no <Version> node' }
+  $bumpedVersion = $Matches['ver'].Trim()
+  Write-Host "Publishing version $bumpedVersion (SkipVersionBump)"
+} else {
+  $bumpScript = Join-Path $root 'scripts\bump-release-version.ps1'
+  $bumpedVersion = (& $bumpScript | Select-Object -Last 1)
+  if (-not $bumpedVersion) { throw 'Version bump failed' }
+  $bumpedVersion = $bumpedVersion.ToString().Trim()
+  Write-Host "Publishing version $bumpedVersion"
+}
 if ($bumpedVersion -notmatch '^\d+\.\d+\.\d+') { throw "Version bump returned unexpected value: $bumpedVersion" }
-Write-Host "Publishing version $bumpedVersion"
 
 $stage = Join-Path $root ('artifacts\release-' + [Guid]::NewGuid().ToString('N'))
 $appBuild = Join-Path $stage 'app'

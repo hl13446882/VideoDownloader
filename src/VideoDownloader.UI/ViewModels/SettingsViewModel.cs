@@ -49,7 +49,7 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     public LocalizationService L => _loc;
 
-    public string AppVersionText => AppVersionInfo.SemVer;
+    public string AppVersionText => "V" + AppVersionInfo.SemVer;
 
     public IReadOnlyList<int> ConcurrentOptions { get; } = [1, 2, 3, 4, 5];
 
