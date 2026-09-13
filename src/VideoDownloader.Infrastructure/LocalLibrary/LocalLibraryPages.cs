@@ -121,10 +121,9 @@ function setMode(m){
   load();
 }
 function playHref(item){
-  const base = item.playUrl || '';
-  if(mode==='site' || mode==='kind')
-    return base + (base.includes('?') ? '&' : '?') + 'group=' + encodeURIComponent(mode);
-  return base;
+  const base = (item.playUrl || '').split('?')[0];
+  if(!base) return base;
+  return base + '?group=' + encodeURIComponent(mode === 'site' || mode === 'kind' ? mode : 'time');
 }
 function esc(s){ return String(s??'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function kindOptions(selected){
@@ -349,6 +348,7 @@ function videosApiUrl(mode){
 function flattenPlaylist(data, mode){
   if(mode==='site' || mode==='kind'){
     if(!Array.isArray(data)) return [];
+    // Same top-to-bottom order as the gallery: groups in API order, items within each group as shown.
     const list = [];
     for(const g of data){
       if(Array.isArray(g?.items)) list.push(...g.items);
@@ -359,11 +359,10 @@ function flattenPlaylist(data, mode){
 }
 
 function playHref(item, mode){
-  const base = item?.playUrl || (item?.id ? ('/play/' + norm(item.id)) : '');
+  const base = (item?.playUrl || (item?.id ? ('/play/' + norm(item.id)) : '')).split('?')[0];
   if(!base) return base;
-  if(mode==='site' || mode==='kind')
-    return base + (base.includes('?') ? '&' : '?') + 'group=' + encodeURIComponent(mode);
-  return base.split('?')[0];
+  const g = (mode==='site' || mode==='kind') ? mode : 'time';
+  return base + '?group=' + encodeURIComponent(g);
 }
 
 function setMediaReady(ready){
@@ -495,10 +494,11 @@ async function boot(){
   setMediaReady(false);
   const mode = galleryMode();
   try { localStorage.setItem(MODE_KEY, mode); } catch (_) {}
+  const id = idFromPath(location.pathname);
   const listRes = await fetch(videosApiUrl(mode));
   const data = listRes.ok ? await listRes.json() : [];
+  // time / site / kind — always the same sequence the gallery currently shows.
   playlist = flattenPlaylist(data, mode);
-  const id = idFromPath(location.pathname);
   index = playlist.findIndex(x => itemId(x) === id);
   syncButtons();
   await loadById(id, { push: false });
