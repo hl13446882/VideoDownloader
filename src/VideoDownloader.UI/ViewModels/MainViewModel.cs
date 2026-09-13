@@ -342,7 +342,7 @@ public sealed partial class BrowserTabViewModel : ObservableObject
     private string _title = "New Tab";
 
     [ObservableProperty]
-    private string _address = $"http://127.0.0.1:{LocalLibraryHost.PreferredPort}/";
+    private string _address = $"http://127.0.0.1:{LocalLibraryHost.PreferredPort}/?group=time";
 
     [ObservableProperty]
     private bool _isInitialized;
@@ -409,7 +409,7 @@ public sealed partial class MainViewModel : ObservableObject
     public ObservableCollection<AddressPreset> AddressPresets { get; } = new();
 
     [ObservableProperty]
-    private string _addressBar = $"http://127.0.0.1:{LocalLibraryHost.PreferredPort}/";
+    private string _addressBar = $"http://127.0.0.1:{LocalLibraryHost.PreferredPort}/?group=time";
 
     [ObservableProperty]
     private string _statusMessage = string.Empty;

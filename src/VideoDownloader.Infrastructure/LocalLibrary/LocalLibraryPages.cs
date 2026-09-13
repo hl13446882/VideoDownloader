@@ -88,6 +88,10 @@ internal static class LocalLibraryPages
 const MODE_KEY = 'vd-local-gallery-mode';
 function readSavedMode(){
   try {
+    const q = new URLSearchParams(location.search).get('group');
+    if(q==='site' || q==='kind' || q==='time') return q;
+  } catch (_) {}
+  try {
     const s = localStorage.getItem(MODE_KEY);
     if(s==='site' || s==='kind' || s==='time') return s;
   } catch (_) {}
@@ -97,6 +101,7 @@ function saveMode(m){
   try { localStorage.setItem(MODE_KEY, m); } catch (_) {}
 }
 let mode = readSavedMode();
+saveMode(mode);
 let editingId = null;
 const kinds = [
   { value:'', label:'未分类' },
@@ -115,6 +120,11 @@ document.getElementById('editCancel').onclick = () => dlg.close();
 function setMode(m){
   mode = m;
   saveMode(mode);
+  try {
+    const u = new URL(location.href);
+    u.searchParams.set('group', m);
+    history.replaceState(null, '', u.pathname + u.search);
+  } catch (_) {}
   document.getElementById('btnTime').classList.toggle('active', mode==='time');
   document.getElementById('btnSite').classList.toggle('active', mode==='site');
   document.getElementById('btnKind').classList.toggle('active', mode==='kind');

@@ -49,7 +49,15 @@ public sealed class LocalLibraryHost : IAsyncDisposable
         IsLocalLibraryHost(uri) &&
         uri!.AbsolutePath.StartsWith("/play/", StringComparison.OrdinalIgnoreCase);
 
-    public string GalleryUrl => (BaseUri ?? new Uri($"http://127.0.0.1:{PreferredPort}/")).AbsoluteUri;
+    public string GalleryUrl
+    {
+        get
+        {
+            var root = (BaseUri ?? new Uri($"http://127.0.0.1:{PreferredPort}/")).AbsoluteUri;
+            // Cold start / “本地视频” always open time-ordered gallery (not last site/kind mode).
+            return root.Contains('?', StringComparison.Ordinal) ? root : root + "?group=time";
+        }
+    }
 
     public string PlayUrl(Guid jobId) =>
         new Uri(BaseUri ?? new Uri($"http://127.0.0.1:{PreferredPort}/"), $"play/{jobId:N}").AbsoluteUri;
