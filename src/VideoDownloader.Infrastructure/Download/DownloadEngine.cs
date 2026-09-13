@@ -14,6 +14,7 @@ using VideoDownloader.Infrastructure.Detection.Sites.TikTok;
 using VideoDownloader.Infrastructure.Diagnostics;
 using VideoDownloader.Infrastructure.Http;
 using VideoDownloader.Infrastructure.Licensing;
+using VideoDownloader.Infrastructure.LocalLibrary;
 using VideoDownloader.Infrastructure.Security;
 
 namespace VideoDownloader.Infrastructure.Download;
@@ -30,6 +31,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
     private readonly AppOptions _options;
     private readonly ILogger<DownloadEngine> _logger;
     private readonly LicenseService _license;
+    private readonly LocalVideoThumbnailStore _thumbs;
     private readonly IReadOnlyList<IExternalSiteResolver> _resolvers;
     private readonly MediaAvailabilityValidator? _availability;
     private readonly IMediaAddressRediscoverer? _rediscoverer;
@@ -53,6 +55,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         IOptions<AppOptions> options,
         ILogger<DownloadEngine> logger,
         LicenseService license,
+        LocalVideoThumbnailStore thumbs,
         IEnumerable<IExternalSiteResolver>? resolvers = null,
         MediaAvailabilityValidator? availability = null,
         IMediaAddressRediscoverer? rediscoverer = null)
@@ -67,6 +70,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         _options = options.Value;
         _logger = logger;
         _license = license;
+        _thumbs = thumbs;
         _resolvers = (resolvers ?? []).ToArray();
         _availability = availability;
         _rediscoverer = rediscoverer;
@@ -487,6 +491,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
 
         _logger.LogInformation("Recovered {Count} download jobs from persistence.", persisted.Count);
         _ = BackfillCompletedFileNamesAsync(_lifetime.Token);
+        _ = BackfillMissingThumbnailsAsync(_lifetime.Token);
     }
 
     private async Task BackfillCompletedFileNamesAsync(CancellationToken ct)
@@ -516,6 +521,20 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         {
             _logger.LogDebug(ex, "Completed-name backfill stopped");
         }
+    }
+
+    private Task BackfillMissingThumbnailsAsync(CancellationToken ct)
+    {
+        foreach (var job in _jobs.Values)
+        {
+            if (ct.IsCancellationRequested)
+                break;
+            if (job.Status != DownloadStatus.Completed)
+                continue;
+            _thumbs.EnsureAsyncFireAndForget(job.Id, job.TargetPath);
+        }
+
+        return Task.CompletedTask;
     }
 
     private async Task ApplyCompletedFileNameAsync(DownloadJob job, CancellationToken ct)
@@ -847,6 +866,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             CleanupJobScratch(job, deleteTarget: false);
             await ApplyCompletedFileNameAsync(job, CancellationToken.None);
             await _repository.SaveAsync(job, CancellationToken.None);
+            // Poster once on complete; library reuses the cached jpg thereafter.
+            _thumbs.EnsureAsyncFireAndForget(job.Id, job.TargetPath);
         }
         catch (OperationCanceledException) when (cts.IsCancellationRequested)
         {

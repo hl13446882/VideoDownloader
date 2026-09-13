@@ -14,6 +14,7 @@ using VideoDownloader.Infrastructure.Download;
 using VideoDownloader.Infrastructure.Ffmpeg;
 using VideoDownloader.Infrastructure.Http;
 using VideoDownloader.Infrastructure.Licensing;
+using VideoDownloader.Infrastructure.LocalLibrary;
 
 namespace VideoDownloader.Infrastructure.Tests;
 
@@ -93,7 +94,8 @@ public class CancelScratchCleanupTests
                 new DownloadBackendRouter(),
                 options,
                 NullLogger<DownloadEngine>.Instance,
-                new LicenseService(new HttpClient(), options, NullLogger<LicenseService>.Instance));
+                new LicenseService(new HttpClient(), options, NullLogger<LicenseService>.Instance),
+                new LocalVideoThumbnailStore(ffmpeg, NullLogger<LocalVideoThumbnailStore>.Instance));
 
             await engine.EnqueueAsync(variant, "cancel-scratch", new Uri("https://www.douyin.com/video/1"));
             var job = await WaitForAsync(

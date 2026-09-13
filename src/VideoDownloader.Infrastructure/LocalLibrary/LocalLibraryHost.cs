@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
 using System.Text;
@@ -17,27 +16,20 @@ public sealed class LocalLibraryHost : IAsyncDisposable
 {
     public const int PreferredPort = 17890;
     private readonly IDownloadRepository _repository;
-    private readonly IFfmpegAdapter _ffmpeg;
+    private readonly LocalVideoThumbnailStore _thumbs;
     private readonly ILogger<LocalLibraryHost> _logger;
-    private readonly ConcurrentDictionary<Guid, byte> _thumbQueued = new();
     private HttpListener? _listener;
     private CancellationTokenSource? _cts;
     private Task? _loop;
-    private readonly string _thumbRoot;
 
     public LocalLibraryHost(
         IDownloadRepository repository,
-        IFfmpegAdapter ffmpeg,
+        LocalVideoThumbnailStore thumbs,
         ILogger<LocalLibraryHost> logger)
     {
         _repository = repository;
-        _ffmpeg = ffmpeg;
+        _thumbs = thumbs;
         _logger = logger;
-        _thumbRoot = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VideoDownloader",
-            "thumbs");
-        Directory.CreateDirectory(_thumbRoot);
     }
 
     public Uri? BaseUri { get; private set; }
@@ -262,20 +254,22 @@ public sealed class LocalLibraryHost : IAsyncDisposable
             return;
         }
 
-        var thumb = ThumbPath(id);
-        if (!File.Exists(thumb))
+        var thumb = _thumbs.GetPath(id);
+        if (!_thumbs.Exists(id))
         {
-            QueueThumb(job);
-            // Tiny SVG placeholder
+            _thumbs.EnsureAsyncFireAndForget(id, job.TargetPath);
+            // Tiny SVG placeholder (16:10)
+            ctx.Response.Headers["Cache-Control"] = "no-store";
             ctx.Response.ContentType = "image/svg+xml";
             var svg = Encoding.UTF8.GetBytes(
-                "<svg xmlns='http://www.w3.org/2000/svg' width='320' height='180'><rect fill='#1f2937' width='100%' height='100%'/><text x='50%' y='50%' fill='#9ca3af' font-size='14' text-anchor='middle' dy='.3em'>…</text></svg>");
+                "<svg xmlns='http://www.w3.org/2000/svg' width='320' height='200'><rect fill='#1f2937' width='100%' height='100%'/><text x='50%' y='50%' fill='#9ca3af' font-size='14' text-anchor='middle' dy='.3em'>…</text></svg>");
             ctx.Response.ContentLength64 = svg.Length;
             await ctx.Response.OutputStream.WriteAsync(svg);
             return;
         }
 
         ctx.Response.ContentType = "image/jpeg";
+        ctx.Response.Headers["Cache-Control"] = "public, max-age=31536000, immutable";
         await using var fs = File.OpenRead(thumb);
         ctx.Response.ContentLength64 = fs.Length;
         await fs.CopyToAsync(ctx.Response.OutputStream);
@@ -354,7 +348,8 @@ public sealed class LocalLibraryHost : IAsyncDisposable
             if (string.IsNullOrWhiteSpace(job.TargetPath) || !File.Exists(job.TargetPath))
                 continue;
 
-            QueueThumb(job);
+            // Only generate when missing — never re-extract an existing jpg.
+            _thumbs.EnsureAsyncFireAndForget(job.Id, job.TargetPath);
             var fileName = Path.GetFileName(job.TargetPath);
             var caption = string.IsNullOrWhiteSpace(job.Caption) ? job.DisplayName : job.Caption!;
             list.Add(new LibraryItem(
@@ -370,35 +365,6 @@ public sealed class LocalLibraryHost : IAsyncDisposable
 
         return list;
     }
-
-    private void QueueThumb(DownloadJob job)
-    {
-        var thumb = ThumbPath(job.Id);
-        if (File.Exists(thumb))
-            return;
-        if (!_thumbQueued.TryAdd(job.Id, 0))
-            return;
-
-        var path = job.TargetPath;
-        var id = job.Id;
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await _ffmpeg.TryExtractThumbnailAsync(path, thumb, CancellationToken.None);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "Thumb extract failed for {JobId}", id);
-            }
-            finally
-            {
-                _thumbQueued.TryRemove(id, out _);
-            }
-        });
-    }
-
-    private string ThumbPath(Guid id) => Path.Combine(_thumbRoot, id.ToString("N") + ".jpg");
 
     private static string GuessContentType(string path) =>
         Path.GetExtension(path).ToLowerInvariant() switch

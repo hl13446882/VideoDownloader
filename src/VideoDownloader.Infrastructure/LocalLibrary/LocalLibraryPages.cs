@@ -24,8 +24,8 @@ internal static class LocalLibraryPages
   .group > summary::-webkit-details-marker { display:none; }
   .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:14px; }
   .card { background:var(--card); border-radius:12px; overflow:hidden; border:1px solid #334155; display:flex; flex-direction:column; }
-  .cover { display:block; aspect-ratio:16/9; background:#0b1220; cursor:pointer; position:relative; }
-  .cover img { width:100%; height:100%; object-fit:cover; display:block; }
+  .cover { display:block; aspect-ratio:16/10; background:#0b1220; cursor:pointer; position:relative; overflow:hidden; }
+  .cover img { width:100%; height:100%; object-fit:cover; object-position:center; display:block; }
   .meta { padding:10px 12px 12px; display:flex; flex-direction:column; gap:4px; min-height:88px; }
   .time { color:var(--muted); font-size:12px; }
   .name { font-size:13px; font-weight:600; word-break:break-all; }
@@ -53,9 +53,9 @@ function sync(){
 }
 function esc(s){ return String(s??'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function card(item){
-  return `<article class="card">
+    return `<article class="card">
     <a class="cover" href="${esc(item.playUrl)}" title="播放">
-      <img src="${esc(item.thumbUrl)}" alt="" loading="lazy" onerror="this.style.opacity=.25"/>
+      <img src="${esc(item.thumbUrl)}" alt="" loading="lazy" decoding="async" onerror="this.style.opacity=.25"/>
     </a>
     <div class="meta">
       <div class="time">${esc(item.downloadedAtText)}</div>
