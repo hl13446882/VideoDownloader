@@ -101,8 +101,8 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
     }
 
     /// <summary>
-    /// Try feed-next shortcuts without site-specific logic: ArrowDown then Shift+N.
-    /// Pages that accept either will advance; others no-op until idle timeout.
+    /// Try feed-next shortcuts without site-specific logic: ArrowDown, Shift+N, then ].
+    /// Pages that accept any will advance; others no-op until idle timeout.
     /// </summary>
     public Task SendFeedNextAsync(CancellationToken ct = default)
     {
@@ -119,10 +119,13 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
                 ? document.activeElement : (document.body || document.documentElement);
               const down = { key:'ArrowDown', code:'ArrowDown', keyCode:40, which:40, bubbles:true, cancelable:true };
               const shiftN = { key:'N', code:'KeyN', keyCode:78, which:78, shiftKey:true, bubbles:true, cancelable:true };
+              const bracket = { key:']', code:'BracketRight', keyCode:221, which:221, bubbles:true, cancelable:true };
               fire(t, down);
               fire(window, down);
               fire(t, shiftN);
               fire(window, shiftN);
+              fire(t, bracket);
+              fire(window, bracket);
               try {
                 const scroller = document.scrollingElement || document.documentElement;
                 if (scroller) scroller.scrollBy(0, Math.max(240, Math.floor(window.innerHeight * 0.85)));

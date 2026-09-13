@@ -194,7 +194,7 @@ public sealed partial class LocalizationService : ObservableObject
         ["tip.forward"] = ("前进", "Go forward"),
         ["tip.go"] = ("打开地址", "Open address"),
         ["tip.probe"] = ("重置全部探测状态并重新探测（不刷新网页）", "Reset all probe state and re-detect without reloading"),
-        ["tip.auto"] = ("自动探测并下载；↓ 或 Shift+N 切下一条；超时停止自动，进行中任务保留", "Auto probe/download; ↓ or Shift+N next; idle timeout stops auto, keeps running jobs"),
+        ["tip.auto"] = ("自动探测并下载；↓ / Shift+N / ] 切下一条；超时停止自动，进行中任务保留", "Auto probe/download; ↓ / Shift+N / ] next; idle timeout stops auto, keeps running jobs"),
         ["tip.newTab"] = ("新标签", "New tab"),
         ["auto.delayTitle"] = ("自动模式", "Auto mode"),
         ["auto.delayPrompt"] = ("自动模式延时（分钟，正整数）", "Auto idle timeout (minutes, positive integer)"),

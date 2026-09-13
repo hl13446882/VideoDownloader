@@ -370,7 +370,10 @@ public partial class MainWindow : Window
                      (Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift &&
                      (Keyboard.Modifiers & ModifierKeys.Control) == 0 &&
                      (Keyboard.Modifiers & ModifierKeys.Alt) == 0;
-        if (e.Key != Key.Down && !shiftN)
+        // OemCloseBrackets = "]" on US layout; also accept Oem6 where mapped.
+        var bracketNext = (e.Key is Key.OemCloseBrackets or Key.Oem6) &&
+                          (Keyboard.Modifiers & (ModifierKeys.Control | ModifierKeys.Alt)) == 0;
+        if (e.Key != Key.Down && !shiftN && !bracketNext)
             return;
 
         e.Handled = true;
