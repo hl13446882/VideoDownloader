@@ -16,6 +16,7 @@ public sealed class LocalLibraryHost : IAsyncDisposable
 {
     public const int PreferredPort = 17890;
     private readonly IDownloadRepository _repository;
+    private readonly IDownloadEngine _engine;
     private readonly LocalVideoThumbnailStore _thumbs;
     private readonly ILogger<LocalLibraryHost> _logger;
     private HttpListener? _listener;
@@ -24,10 +25,12 @@ public sealed class LocalLibraryHost : IAsyncDisposable
 
     public LocalLibraryHost(
         IDownloadRepository repository,
+        IDownloadEngine engine,
         LocalVideoThumbnailStore thumbs,
         ILogger<LocalLibraryHost> logger)
     {
         _repository = repository;
+        _engine = engine;
         _thumbs = thumbs;
         _logger = logger;
     }
@@ -164,6 +167,19 @@ public sealed class LocalLibraryHost : IAsyncDisposable
                 return;
             }
 
+            if (path.Equals("/api/kinds", StringComparison.OrdinalIgnoreCase))
+            {
+                await WriteJsonAsync(ctx, LibraryVideoKinds.All.Select(x => new { value = x.Value, label = x.Label }));
+                return;
+            }
+
+            if (path.Equals("/api/edit", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(ctx.Request.HttpMethod, "POST", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleEditAsync(ctx);
+                return;
+            }
+
             if (path.StartsWith("/api/thumb/", StringComparison.OrdinalIgnoreCase) &&
                 Guid.TryParseExact(path["/api/thumb/".Length..].TrimEnd('/'), "N", out var thumbId))
             {
@@ -207,24 +223,87 @@ public sealed class LocalLibraryHost : IAsyncDisposable
         }
     }
 
+    private async Task HandleEditAsync(HttpListenerContext ctx)
+    {
+        using var reader = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding);
+        var raw = await reader.ReadToEndAsync();
+        EditRequest? req;
+        try
+        {
+            req = JsonSerializer.Deserialize<EditRequest>(raw, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+        }
+        catch
+        {
+            ctx.Response.StatusCode = 400;
+            await WriteTextAsync(ctx, "bad json");
+            return;
+        }
+
+        if (req is null || !Guid.TryParse(req.Id, out var id))
+        {
+            ctx.Response.StatusCode = 400;
+            await WriteTextAsync(ctx, "missing id");
+            return;
+        }
+
+        try
+        {
+            await _engine.UpdateLibraryItemAsync(
+                id,
+                req.TitleHead,
+                req.Caption,
+                req.VideoKind,
+                CancellationToken.None);
+
+            var items = await LoadCompletedAsync();
+            var item = items.FirstOrDefault(i => i.Id == id);
+            if (item is null)
+            {
+                ctx.Response.StatusCode = 404;
+                await WriteTextAsync(ctx, "missing");
+                return;
+            }
+
+            await WriteJsonAsync(ctx, item);
+        }
+        catch (Exception ex)
+        {
+            ctx.Response.StatusCode = 400;
+            await WriteTextAsync(ctx, ex.Message);
+        }
+    }
+
     private async Task WriteVideosJsonAsync(HttpListenerContext ctx)
     {
-        var group = string.Equals(ctx.Request.QueryString["group"], "site", StringComparison.OrdinalIgnoreCase);
-        var items = await LoadCompletedAsync();
-        items = items
+        var groupMode = (ctx.Request.QueryString["group"] ?? "").Trim().ToLowerInvariant();
+        var items = (await LoadCompletedAsync())
             .OrderByDescending(i => i.DownloadedAt)
             .ToList();
 
-        object payload = group
-            ? items.GroupBy(i => i.Group)
+        object payload = groupMode switch
+        {
+            "site" => items.GroupBy(i => i.SiteGroup)
                 .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
                 .Select(g => new
                 {
                     group = g.Key,
                     items = g.OrderByDescending(i => i.DownloadedAt).ToArray()
                 })
-                .ToArray()
-            : items;
+                .ToArray(),
+            "kind" => items.GroupBy(i => i.VideoKindLabel)
+                .OrderBy(g => g.Key == "未分类" ? 1 : 0)
+                .ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(g => new
+                {
+                    group = g.Key,
+                    items = g.OrderByDescending(i => i.DownloadedAt).ToArray()
+                })
+                .ToArray(),
+            _ => items
+        };
 
         await WriteJsonAsync(ctx, payload);
     }
@@ -258,7 +337,6 @@ public sealed class LocalLibraryHost : IAsyncDisposable
         if (!_thumbs.Exists(id))
         {
             _thumbs.EnsureAsyncFireAndForget(id, job.TargetPath);
-            // Tiny SVG placeholder (16:10)
             ctx.Response.Headers["Cache-Control"] = "no-store";
             ctx.Response.ContentType = "image/svg+xml";
             var svg = Encoding.UTF8.GetBytes(
@@ -348,14 +426,23 @@ public sealed class LocalLibraryHost : IAsyncDisposable
             if (string.IsNullOrWhiteSpace(job.TargetPath) || !File.Exists(job.TargetPath))
                 continue;
 
-            // Only generate when missing — never re-extract an existing jpg.
             _thumbs.EnsureAsyncFireAndForget(job.Id, job.TargetPath);
             var fileName = Path.GetFileName(job.TargetPath);
+            var stem = Path.GetFileNameWithoutExtension(job.TargetPath);
+            DownloadFileNameBuilder.TrySplitMetaSuffix(stem, out var titleHead, out var metaSuffix);
+            if (string.IsNullOrWhiteSpace(titleHead))
+                titleHead = stem;
             var caption = string.IsNullOrWhiteSpace(job.Caption) ? job.DisplayName : job.Caption!;
+            var kind = LibraryVideoKinds.Normalize(job.VideoKind);
             list.Add(new LibraryItem(
                 job.Id,
                 fileName,
+                titleHead,
+                metaSuffix,
+                Path.GetExtension(job.TargetPath),
                 caption,
+                kind,
+                LibraryVideoKinds.LabelOf(kind),
                 job.UpdatedAt,
                 DownloadSiteFolder.Resolve(job.PageUrl),
                 $"/api/thumb/{job.Id:N}",
@@ -404,12 +491,25 @@ public sealed class LocalLibraryHost : IAsyncDisposable
         await ctx.Response.OutputStream.WriteAsync(bytes);
     }
 
+    private sealed class EditRequest
+    {
+        public string? Id { get; set; }
+        public string? TitleHead { get; set; }
+        public string? Caption { get; set; }
+        public string? VideoKind { get; set; }
+    }
+
     private sealed record LibraryItem(
         Guid Id,
         string FileName,
+        string TitleHead,
+        string MetaSuffix,
+        string Extension,
         string Caption,
+        string VideoKind,
+        string VideoKindLabel,
         DateTimeOffset DownloadedAt,
-        string Group,
+        string SiteGroup,
         string ThumbUrl,
         string StreamUrl,
         string PlayUrl)

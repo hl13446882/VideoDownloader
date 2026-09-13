@@ -192,6 +192,20 @@ public static partial class DownloadFileNameBuilder
     }
 
     /// <summary>
+    /// Replaces only the title head of a stem; keeps <c>_分_P_MB</c> meta suffix unchanged.
+    /// </summary>
+    public static string ReplaceTitleHead(string? currentStem, string? newTitleHead)
+    {
+        TrySplitMetaSuffix(currentStem, out _, out var meta);
+        var head = FilterLiveInput(newTitleHead).Trim().TrimEnd('.');
+        var sanitized = Sanitize(head);
+        var clamped = ElideText(sanitized, MaxStemLength);
+        if (string.IsNullOrWhiteSpace(clamped))
+            clamped = "video";
+        return clamped + meta;
+    }
+
+    /// <summary>
     /// Builds <c>_3分_1080P_256MB</c>-style suffix. Duration is always whole minutes.
     /// Missing fields are omitted (no empty segments).
     /// </summary>

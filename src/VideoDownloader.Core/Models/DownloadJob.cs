@@ -8,6 +8,9 @@ public sealed class DownloadJob
     /// <summary>Full caption / title at enqueue (not filename-clamped).</summary>
     public string? Caption { get; set; }
 
+    /// <summary>Optional library category: movie / series / song / short / variety.</summary>
+    public string? VideoKind { get; set; }
+
     /// <summary>Content duration in seconds when known at enqueue or later probe.</summary>
     public double? DurationSec { get; set; }
 

@@ -282,6 +282,47 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         return stem;
     }
 
+    public async Task UpdateLibraryItemAsync(
+        Guid jobId,
+        string? titleHead = null,
+        string? caption = null,
+        string? videoKind = null,
+        CancellationToken ct = default)
+    {
+        if (!_jobs.TryGetValue(jobId, out var job))
+            throw new InvalidOperationException("任务不存在。");
+
+        if (job.Status != DownloadStatus.Completed)
+            throw new InvalidOperationException("仅已完成任务可编辑。");
+
+        if (titleHead is not null)
+        {
+            var currentStem = Path.GetFileNameWithoutExtension(job.TargetPath);
+            if (string.IsNullOrWhiteSpace(currentStem))
+                currentStem = job.DisplayName;
+            var newStem = DownloadFileNameBuilder.ReplaceTitleHead(currentStem, titleHead);
+            await RenameAsync(jobId, newStem, ct);
+        }
+
+        var dirty = false;
+        if (caption is not null)
+        {
+            job.Caption = caption;
+            dirty = true;
+        }
+
+        if (videoKind is not null)
+        {
+            if (!LibraryVideoKinds.IsKnown(videoKind))
+                throw new InvalidOperationException("无效的视频类型。");
+            job.VideoKind = LibraryVideoKinds.Normalize(videoKind);
+            dirty = true;
+        }
+
+        if (dirty)
+            await _repository.SaveAsync(job, ct);
+    }
+
     private static void TryMoveFile(string source, string destination)
     {
         if (string.Equals(source, destination, StringComparison.Ordinal))

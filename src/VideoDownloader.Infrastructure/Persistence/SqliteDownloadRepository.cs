@@ -50,6 +50,7 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
         await TryAddColumnAsync(conn, "duration_sec", "REAL NULL");
         await TryAddColumnAsync(conn, "expected_total_bytes", "INTEGER NULL");
         await TryAddColumnAsync(conn, "content_prefix_hash", "TEXT NULL");
+        await TryAddColumnAsync(conn, "video_kind", "TEXT NULL");
     }
 
     private static async Task TryAddColumnAsync(SqliteConnection conn, string name, string definition)
@@ -78,12 +79,14 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
                 downloaded_bytes, total_bytes, etag, last_modified, context_version,
                 request_context_meta_json, request_context_secret, page_url, last_error_code,
                 caption, duration_sec, expected_total_bytes, content_prefix_hash,
+                video_kind,
                 created_at, updated_at)
             VALUES (
                 @Id, @DisplayName, @SourceUrl, @TargetPath, @MediaFamily, @Status,
                 @DownloadedBytes, @TotalBytes, @ETag, @LastModified, @ContextVersion,
                 @MetaJson, @Secret, @PageUrl, @LastErrorCode,
                 @Caption, @DurationSec, @ExpectedTotalBytes, @ContentPrefixHash,
+                @VideoKind,
                 @CreatedAt, @UpdatedAt)
             ON CONFLICT(id) DO UPDATE SET
                 display_name = excluded.display_name,
@@ -104,6 +107,7 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
                 duration_sec = excluded.duration_sec,
                 expected_total_bytes = excluded.expected_total_bytes,
                 content_prefix_hash = excluded.content_prefix_hash,
+                video_kind = excluded.video_kind,
                 updated_at = excluded.updated_at;
             """;
 
@@ -128,6 +132,7 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
             job.DurationSec,
             job.ExpectedTotalBytes,
             job.ContentPrefixHash,
+            VideoKind = job.VideoKind,
             CreatedAt = job.CreatedAt.ToString("O"),
             UpdatedAt = job.UpdatedAt.ToString("O")
         });
@@ -177,6 +182,7 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
             DisplayName = row.display_name,
             Caption = row.caption,
             DurationSec = row.duration_sec,
+            VideoKind = row.video_kind,
             Variant = variant,
             TargetPath = row.target_path,
             PageUrl = pageUrl,
@@ -222,6 +228,7 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
         public double? duration_sec { get; set; }
         public long? expected_total_bytes { get; set; }
         public string? content_prefix_hash { get; set; }
+        public string? video_kind { get; set; }
         public string created_at { get; set; } = string.Empty;
         public string updated_at { get; set; } = string.Empty;
     }

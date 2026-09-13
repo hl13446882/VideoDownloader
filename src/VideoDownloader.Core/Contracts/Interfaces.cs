@@ -86,6 +86,16 @@ public interface IDownloadEngine
     /// <summary>Renames the job stem (not extension). Keeps queue name and on-disk file in sync.</summary>
     Task<string> RenameAsync(Guid jobId, string newStem, CancellationToken ct = default);
 
+    /// <summary>
+    /// Updates completed-library fields: optional title head (meta suffix preserved), caption, video kind.
+    /// </summary>
+    Task UpdateLibraryItemAsync(
+        Guid jobId,
+        string? titleHead = null,
+        string? caption = null,
+        string? videoKind = null,
+        CancellationToken ct = default);
+
     Task RecoverOnStartupAsync(CancellationToken ct = default);
 
     IReadOnlyList<DownloadJob> GetActiveJobs();
