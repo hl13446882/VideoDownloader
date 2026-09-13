@@ -284,7 +284,10 @@ public sealed partial class LocalizationService : ObservableObject
         ["status.playIncomplete"] = ("未下载完成，无法播放。", "Download not finished; cannot play."),
         ["status.fileMissing"] = ("文件不存在或已被删除。", "File missing or deleted."),
         ["status.played"] = ("已用系统默认播放器打开：{0}", "Opened with system player: {0}"),
+        ["status.playedLocal"] = ("已在本地视频页播放：{0}", "Playing in local library: {0}"),
         ["status.playFailed"] = ("无法播放：{0}", "Cannot play: {0}"),
+        ["status.localLibraryUnavailable"] = ("本地视频服务未启动。", "Local video library is unavailable."),
+        ["status.localLibraryNoProbe"] = ("本地视频页不进行地址探测。", "Local library pages do not run address probing."),
         ["status.noPageUrl"] = ("该任务没有保存原始页面地址。", "This job has no saved page URL."),
         ["status.openedPage"] = ("已打开原始页面：{0}", "Opened original page: {0}"),
         ["status.folderMissing"] = ("找不到该任务的保存目录。", "Containing folder is missing."),
@@ -322,8 +325,8 @@ public sealed partial class LocalizationService : ObservableObject
         ["error.MSE_TRACK_NOT_DOWNLOADABLE"] = ("该地址不是完整视频", "MSE track not downloadable"),
         ["error.INVALID_SAVE_PATH"] = ("保存目录无效", "Invalid save folder"),
         ["error.UNEXPECTED_ERROR"] = ("未知错误", "Unexpected error"),
-        ["queue.tooltip"] = ("Ctrl 点击多选；右键只作用于当前行；双击已完成项播放",
-            "Ctrl+click to multi-select; right-click acts on that row; double-click plays a completed file"),
+        ["queue.tooltip"] = ("Ctrl 点击多选；右键只作用于当前行；双击已完成项在本地视频页播放",
+            "Ctrl+click to multi-select; right-click acts on that row; double-click plays in local library"),
         ["dialog.playIncomplete"] = ("下载尚未完成，无法播放。", "Download not finished; cannot play."),
         ["dialog.fileMissing"] = ("文件不存在或已被删除。", "File missing or deleted."),
         ["tab.new"] = ("新标签页", "New tab"),
@@ -332,5 +335,6 @@ public sealed partial class LocalizationService : ObservableObject
         ["preset.douyin"] = ("抖音", "Douyin"),
         ["preset.tiktok"] = ("TikTok", "TikTok"),
         ["preset.bilibili"] = ("B站", "Bilibili"),
+        ["preset.localVideos"] = ("本地视频", "Local videos"),
     };
 }

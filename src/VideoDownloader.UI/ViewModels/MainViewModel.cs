@@ -14,6 +14,7 @@ using VideoDownloader.Infrastructure.Browser;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Detection;
 using VideoDownloader.Infrastructure.Diagnostics;
+using VideoDownloader.Infrastructure.LocalLibrary;
 using VideoDownloader.UI.Localization;
 
 namespace VideoDownloader.UI.ViewModels;
@@ -373,6 +374,7 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly LocalizationService _loc;
     private readonly AppOptions _options;
     private readonly UserSettingsStore _settingsStore;
+    private readonly LocalLibraryHost _localLibrary;
     private readonly HashSet<string> _collapsedQueueGroups = new(StringComparer.OrdinalIgnoreCase);
     private bool _queueGrouped;
     private readonly Dictionary<Guid, DetectedVideoViewModel> _videoMap = new();
@@ -506,7 +508,8 @@ public sealed partial class MainViewModel : ObservableObject
         IDownloadEngine downloadEngine,
         IMediaAggregator aggregator,
         SettingsViewModel settingsViewModel,
-        LocalizationService loc)
+        LocalizationService loc,
+        LocalLibraryHost localLibrary)
     {
         _services = services;
         _hostLocator = hostLocator;
@@ -515,6 +518,7 @@ public sealed partial class MainViewModel : ObservableObject
         _aggregator = aggregator;
         _settingsViewModel = settingsViewModel;
         _loc = loc;
+        _localLibrary = localLibrary;
         _options = services.GetRequiredService<AppOptions>();
         _settingsStore = services.GetRequiredService<UserSettingsStore>();
         _queueGrouped = _options.Ui.QueueGrouped;
@@ -528,6 +532,7 @@ public sealed partial class MainViewModel : ObservableObject
     private void RebuildAddressPresets()
     {
         AddressPresets.Clear();
+        AddressPresets.Add(new AddressPreset(_loc.T("preset.localVideos"), _localLibrary.GalleryUrl));
         AddressPresets.Add(new AddressPreset(_loc.T("preset.google"), "https://www.google.com/"));
         AddressPresets.Add(new AddressPreset(_loc.T("preset.youtube"), "https://www.youtube.com/"));
         AddressPresets.Add(new AddressPreset(_loc.T("preset.douyin"), "https://www.douyin.com/"));
@@ -717,7 +722,7 @@ public sealed partial class MainViewModel : ObservableObject
     {
         SelectOnlyQueueJob(job);
         if (CanPlaySelected)
-            OpenSelectedDownloadWithSystemPlayer();
+            _ = PlaySelectedDownloadAsync();
     }
 
     public void ToggleQueueGroup(string domain)
@@ -804,12 +809,16 @@ public sealed partial class MainViewModel : ObservableObject
             tab.Address = url;
             ClearStatus();
 
+            if (LocalLibraryHost.IsLocalLibraryHost(pageUrl))
+                EnterLocalLibraryMode(pageUrl);
+
             if (tab.IsInitialized)
                 await tab.Host.NavigateAsync(url);
             else
             {
                 tab.PendingNavigationUrl = url;
-                RestartDetectionForPageChange(pageUrl, null, mediaSessionKey: null);
+                if (!LocalLibraryHost.IsLocalLibraryHost(pageUrl))
+                    RestartDetectionForPageChange(pageUrl, null, mediaSessionKey: null);
             }
         }
         catch (Exception ex)
@@ -852,6 +861,22 @@ public sealed partial class MainViewModel : ObservableObject
             return false;
         }
 
+        // Any 127.0.0.1 / localhost navigation targets the local video library.
+        if (LocalLibraryHost.IsLocalLibraryHost(uri))
+        {
+            if (!_localLibrary.IsRunning || _localLibrary.BaseUri is null)
+            {
+                error = _loc.T("status.localLibraryUnavailable");
+                return false;
+            }
+
+            var path = uri.AbsolutePath;
+            url = path.StartsWith("/play/", StringComparison.OrdinalIgnoreCase)
+                ? new Uri(_localLibrary.BaseUri, path.TrimStart('/')).AbsoluteUri
+                : _localLibrary.GalleryUrl;
+            return true;
+        }
+
         url = uri.AbsoluteUri;
         return true;
     }
@@ -865,6 +890,12 @@ public sealed partial class MainViewModel : ObservableObject
         if (pageUrl is null)
         {
             SetStatusKey("status.probeNoPage");
+            return;
+        }
+
+        if (LocalLibraryHost.IsLocalLibraryHost(pageUrl))
+        {
+            SetStatusKey("status.localLibraryNoProbe");
             return;
         }
 
@@ -887,6 +918,12 @@ public sealed partial class MainViewModel : ObservableObject
         string? pageTitle,
         string? mediaSessionKey)
     {
+        if (LocalLibraryHost.IsLocalLibraryHost(pageUrl))
+        {
+            EnterLocalLibraryMode(pageUrl);
+            return;
+        }
+
         var enriched = EnrichPageUrlWithContentId(pageUrl, mediaSessionKey);
         StartPageDetectionSession(
             enriched,
@@ -897,6 +934,21 @@ public sealed partial class MainViewModel : ObservableObject
             resetMediaSession: true,
             forceFullRestart: true,
             destroySameContent: true);
+    }
+
+    private void EnterLocalLibraryMode(Uri pageUrl)
+    {
+        lock (_pageSync)
+        {
+            _probeCts.Cancel();
+            _detectionRunning = false;
+            _currentPageIdentity = BuildPageIdentity(pageUrl);
+            _lastNavigatedPageUrl = _currentPageIdentity;
+        }
+
+        DetectedVideos.Clear();
+        _videoMap.Clear();
+        SelectedDetectedVideo = null;
     }
 
     /// <summary>
@@ -1872,12 +1924,7 @@ public sealed partial class MainViewModel : ObservableObject
     public void CancelRename(DownloadJobViewModel? vm) => vm?.CancelEdit();
 
     [RelayCommand(CanExecute = nameof(CanPlaySelected))]
-    private void PlaySelectedDownload() => OpenSelectedDownloadWithSystemPlayer();
-
-    [RelayCommand]
-    private void OpenSelectedDownload() => OpenSelectedDownloadWithSystemPlayer();
-
-    private void OpenSelectedDownloadWithSystemPlayer()
+    private async Task PlaySelectedDownloadAsync()
     {
         var job = EffectiveSelectedJobs.Count == 1
             ? EffectiveSelectedJobs[0].Job
@@ -1908,14 +1955,23 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
+        if (!_localLibrary.IsRunning)
+        {
+            SetStatusKey("status.localLibraryUnavailable");
+            MessageBox.Show(
+                _loc.T("status.localLibraryUnavailable"),
+                _loc.DialogTitle,
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
+
         try
         {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = job.TargetPath,
-                UseShellExecute = true
-            });
-            SetStatusKey("status.played", Path.GetFileName(job.TargetPath));
+            var playUrl = _localLibrary.PlayUrl(job.Id);
+            AddressBar = playUrl;
+            await NavigateAsync();
+            SetStatusKey("status.playedLocal", Path.GetFileName(job.TargetPath));
         }
         catch (Exception ex)
         {
@@ -1927,6 +1983,9 @@ public sealed partial class MainViewModel : ObservableObject
                 MessageBoxImage.Error);
         }
     }
+
+    [RelayCommand]
+    private void OpenSelectedDownload() => _ = PlaySelectedDownloadAsync();
 
     [RelayCommand(CanExecute = nameof(CanOpenSelectedPage))]
     private async Task OpenSelectedPageAsync()

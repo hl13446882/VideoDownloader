@@ -420,6 +420,67 @@ public sealed class FfmpegAdapter : IFfmpegAdapter
         }
     }
 
+    public async Task<bool> TryExtractThumbnailAsync(string videoPath, string jpegPath, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(videoPath) || !File.Exists(videoPath) || string.IsNullOrWhiteSpace(jpegPath))
+            return false;
+
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(jpegPath)!);
+            var tmp = jpegPath + ".part.jpg";
+            if (File.Exists(tmp))
+                File.Delete(tmp);
+
+            var ffmpegPath = PathExpander.Expand(_options.Ffmpeg.ExecutablePath);
+            if (!File.Exists(ffmpegPath))
+                return false;
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = ffmpegPath,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            psi.ArgumentList.Add("-y");
+            psi.ArgumentList.Add("-ss");
+            psi.ArgumentList.Add("1");
+            psi.ArgumentList.Add("-i");
+            psi.ArgumentList.Add(videoPath);
+            psi.ArgumentList.Add("-frames:v");
+            psi.ArgumentList.Add("1");
+            psi.ArgumentList.Add("-q:v");
+            psi.ArgumentList.Add("4");
+            psi.ArgumentList.Add(tmp);
+
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(20));
+            using var process = Process.Start(psi);
+            if (process is null)
+                return false;
+
+            _ = await process.StandardError.ReadToEndAsync(timeout.Token);
+            await process.WaitForExitAsync(timeout.Token);
+            if (process.ExitCode != 0 || !File.Exists(tmp) || new FileInfo(tmp).Length < 32)
+            {
+                try { File.Delete(tmp); } catch { /* ignore */ }
+                return false;
+            }
+
+            if (File.Exists(jpegPath))
+                File.Delete(jpegPath);
+            File.Move(tmp, jpegPath);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "thumbnail extract failed for {Path}", videoPath);
+            return false;
+        }
+    }
+
     internal static (double? DurationSec, int? Height) ParseProbeJson(string json)
     {
         if (string.IsNullOrWhiteSpace(json))

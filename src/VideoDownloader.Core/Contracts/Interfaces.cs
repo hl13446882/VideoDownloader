@@ -192,4 +192,7 @@ public interface IFfmpegAdapter
 
     /// <summary>Reads duration (seconds) and video height from a local completed file.</summary>
     Task<(double? DurationSec, int? Height)> ProbeLocalFileAsync(string path, CancellationToken ct);
+
+    /// <summary>Extract a JPEG poster frame for local library cards. Returns false on soft failure.</summary>
+    Task<bool> TryExtractThumbnailAsync(string videoPath, string jpegPath, CancellationToken ct);
 }

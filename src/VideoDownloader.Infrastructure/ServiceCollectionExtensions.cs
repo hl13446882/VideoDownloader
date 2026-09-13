@@ -79,6 +79,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IDownloadEngine, DownloadEngine>();
         services.AddSingleton<IMediaAddressRediscoverer, BrowserMediaAddressRediscoverer>();
         services.AddSingleton<IFfmpegAdapter, FfmpegAdapter>();
+        services.AddSingleton<VideoDownloader.Infrastructure.LocalLibrary.LocalLibraryHost>();
         services.AddHttpClient("license", client =>
         {
             client.BaseAddress = new Uri(options.License.Endpoint.TrimEnd('/') + "/");
@@ -224,5 +225,15 @@ public static class ServiceCollectionExtensions
 
         var engine = services.GetRequiredService<IDownloadEngine>();
         await engine.RecoverOnStartupAsync();
+
+        try
+        {
+            await services.GetRequiredService<VideoDownloader.Infrastructure.LocalLibrary.LocalLibraryHost>()
+                .StartAsync();
+        }
+        catch (Exception)
+        {
+            // Gallery is optional; downloads still work if the port cannot bind.
+        }
     }
 }
