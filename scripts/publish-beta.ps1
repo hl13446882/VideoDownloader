@@ -55,7 +55,17 @@ Copy-Item -LiteralPath $appSrc -Destination (Join-Path $appDir 'VideoDownloader.
 
 $launcherSrc = Join-Path $launcherOut 'VideoDownloader.exe'
 if (-not (Test-Path -LiteralPath $launcherSrc)) { throw 'Missing launcher: VideoDownloader.exe' }
-Copy-Item -LiteralPath $launcherSrc -Destination (Join-Path $package 'VideoDownloader.exe') -Force
+# net48 launcher depends on NuGet assemblies (System.Text.Json etc.); copy the full
+# runtime set next to the root exe — not only VideoDownloader.exe.
+Get-ChildItem -LiteralPath $launcherOut -File | Where-Object {
+  $_.Extension -in '.exe', '.dll', '.config'
+} | ForEach-Object {
+  Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $package $_.Name) -Force
+}
+$launcherJson = Join-Path $package 'System.Text.Json.dll'
+if (-not (Test-Path -LiteralPath $launcherJson)) {
+  throw 'Launcher package missing System.Text.Json.dll (NuGet deps not copied).'
+}
 
 foreach ($tool in 'ffmpeg.exe', 'ffprobe.exe') {
   $src = Join-Path $root "tools\external\$tool"
