@@ -6,7 +6,9 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net.Http;
 using System.Runtime.InteropServices;
-using System.Text.Json;
+using System.Runtime.Serialization;
+using System.Runtime.Serialization.Json;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -189,96 +191,92 @@ internal static class Program
             StopHelperProcesses();
 
             var json = File.ReadAllText(pendingPath);
-            using (var doc = JsonDocument.Parse(json))
+            var pending = ReadPendingUpdate(json);
+            var installRoot = !string.IsNullOrWhiteSpace(pending.InstallRoot)
+                ? pending.InstallRoot
+                : launcherDir;
+            var zipPath = pending.ZipPath;
+            if (string.IsNullOrWhiteSpace(installRoot))
+                installRoot = launcherDir;
+
+            installRoot = Path.GetFullPath(installRoot);
+            if (!string.Equals(
+                    Path.GetFullPath(launcherDir).TrimEnd('\\'),
+                    installRoot.TrimEnd('\\'),
+                    StringComparison.OrdinalIgnoreCase))
             {
-                var root = doc.RootElement;
-                var installRoot = root.TryGetProperty("installRoot", out var ir)
-                    ? ir.GetString()
-                    : launcherDir;
-                var zipPath = root.TryGetProperty("zipPath", out var zp) ? zp.GetString() : null;
-                if (string.IsNullOrWhiteSpace(installRoot))
-                    installRoot = launcherDir;
-
-                installRoot = Path.GetFullPath(installRoot);
-                if (!string.Equals(
-                        Path.GetFullPath(launcherDir).TrimEnd('\\'),
-                        installRoot.TrimEnd('\\'),
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    // Safety: only apply into the directory that started us.
-                    installRoot = Path.GetFullPath(launcherDir);
-                }
-
-                var staging = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "VideoDownloader",
-                    "updates",
-                    "staging-" + Guid.NewGuid().ToString("N"));
-                Directory.CreateDirectory(staging);
-
-                if (!string.IsNullOrWhiteSpace(zipPath) && File.Exists(zipPath))
-                {
-                    splash.SetStatus("正在解压更新包…");
-                    Application.DoEvents();
-                    ExtractZipSafe(zipPath, staging);
-
-                    splash.SetStatus("正在替换文件…");
-                    Application.DoEvents();
-                    string deferredLauncherSource = null;
-                    string currentLauncherPath = null;
-                    try
-                    {
-                        if (Process.GetCurrentProcess().MainModule != null)
-                            currentLauncherPath = Path.GetFullPath(Process.GetCurrentProcess().MainModule.FileName);
-                    }
-                    catch
-                    {
-                        currentLauncherPath = Path.GetFullPath(Path.Combine(installRoot, "VideoDownloader.exe"));
-                    }
-
-                    foreach (var file in Directory.EnumerateFiles(staging, "*", SearchOption.AllDirectories))
-                    {
-                        var relative = file.Substring(staging.Length)
-                            .TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                        if (relative.IndexOf("..", StringComparison.Ordinal) >= 0)
-                            throw new InvalidDataException("Unsafe update path: " + relative);
-
-                        var dest = Path.Combine(installRoot, relative);
-                        var destFull = Path.GetFullPath(dest);
-                        if (currentLauncherPath != null &&
-                            string.Equals(destFull, currentLauncherPath, StringComparison.OrdinalIgnoreCase))
-                        {
-                            deferredLauncherSource = file;
-                            continue;
-                        }
-
-                        Directory.CreateDirectory(Path.GetDirectoryName(dest));
-                        File.Copy(file, dest, true);
-                    }
-
-                    if (deferredLauncherSource != null)
-                    {
-                        var newPath = Path.Combine(installRoot, "VideoDownloader.exe.new");
-                        File.Copy(deferredLauncherSource, newPath, true);
-                        ScheduleLauncherReplace(installRoot, newPath);
-                    }
-                }
-
-                if (root.TryGetProperty("deletes", out var deletes) && deletes.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (var item in deletes.EnumerateArray())
-                    {
-                        var relative = item.GetString();
-                        if (string.IsNullOrWhiteSpace(relative) || relative.IndexOf("..", StringComparison.Ordinal) >= 0)
-                            continue;
-                        var target = Path.Combine(installRoot, relative.Replace('/', Path.DirectorySeparatorChar));
-                        if (File.Exists(target))
-                            File.Delete(target);
-                    }
-                }
-
-                try { Directory.Delete(staging, true); } catch { /* ignore */ }
+                // Safety: only apply into the directory that started us.
+                installRoot = Path.GetFullPath(launcherDir);
             }
+
+            var staging = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "VideoDownloader",
+                "updates",
+                "staging-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(staging);
+
+            if (!string.IsNullOrWhiteSpace(zipPath) && File.Exists(zipPath))
+            {
+                splash.SetStatus("正在解压更新包…");
+                Application.DoEvents();
+                ExtractZipSafe(zipPath, staging);
+
+                splash.SetStatus("正在替换文件…");
+                Application.DoEvents();
+                string deferredLauncherSource = null;
+                string currentLauncherPath = null;
+                try
+                {
+                    if (Process.GetCurrentProcess().MainModule != null)
+                        currentLauncherPath = Path.GetFullPath(Process.GetCurrentProcess().MainModule.FileName);
+                }
+                catch
+                {
+                    currentLauncherPath = Path.GetFullPath(Path.Combine(installRoot, "VideoDownloader.exe"));
+                }
+
+                foreach (var file in Directory.EnumerateFiles(staging, "*", SearchOption.AllDirectories))
+                {
+                    var relative = file.Substring(staging.Length)
+                        .TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                    if (relative.IndexOf("..", StringComparison.Ordinal) >= 0)
+                        throw new InvalidDataException("Unsafe update path: " + relative);
+
+                    var dest = Path.Combine(installRoot, relative);
+                    var destFull = Path.GetFullPath(dest);
+                    if (currentLauncherPath != null &&
+                        string.Equals(destFull, currentLauncherPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        deferredLauncherSource = file;
+                        continue;
+                    }
+
+                    Directory.CreateDirectory(Path.GetDirectoryName(dest));
+                    File.Copy(file, dest, true);
+                }
+
+                if (deferredLauncherSource != null)
+                {
+                    var newPath = Path.Combine(installRoot, "VideoDownloader.exe.new");
+                    File.Copy(deferredLauncherSource, newPath, true);
+                    ScheduleLauncherReplace(installRoot, newPath);
+                }
+            }
+
+            if (pending.Deletes != null)
+            {
+                foreach (var relative in pending.Deletes)
+                {
+                    if (string.IsNullOrWhiteSpace(relative) || relative.IndexOf("..", StringComparison.Ordinal) >= 0)
+                        continue;
+                    var target = Path.Combine(installRoot, relative.Replace('/', Path.DirectorySeparatorChar));
+                    if (File.Exists(target))
+                        File.Delete(target);
+                }
+            }
+
+            try { Directory.Delete(staging, true); } catch { /* ignore */ }
 
             File.Delete(pendingPath);
             splash.SetStatus("更新完成，正在启动…");
@@ -711,5 +709,31 @@ internal static class Program
                 // ignore temp cleanup
             }
         }
+    }
+
+    /// <summary>
+    /// Framework-built-in JSON for pending-update.json — keeps the net48 launcher
+    /// free of NuGet side-by-side DLLs in the install root.
+    /// </summary>
+    private static PendingUpdateDto ReadPendingUpdate(string json)
+    {
+        using (var ms = new MemoryStream(Encoding.UTF8.GetBytes(json)))
+        {
+            var ser = new DataContractJsonSerializer(typeof(PendingUpdateDto));
+            return (PendingUpdateDto)ser.ReadObject(ms) ?? new PendingUpdateDto();
+        }
+    }
+
+    [DataContract]
+    private sealed class PendingUpdateDto
+    {
+        [DataMember(Name = "installRoot")]
+        public string InstallRoot { get; set; }
+
+        [DataMember(Name = "zipPath")]
+        public string ZipPath { get; set; }
+
+        [DataMember(Name = "deletes")]
+        public string[] Deletes { get; set; }
     }
 }
