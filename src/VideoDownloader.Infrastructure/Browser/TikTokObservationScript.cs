@@ -16,6 +16,23 @@ internal static class TikTokObservationScript
             const id = u.searchParams.get('item_id') || u.pathname.match(/\/video\/(\d{10,})/)?.[1];
             return u.origin + u.pathname + (id ? JSON.stringify([['id',id]]) : '[]');
           };
+          const pickTikTokAuthor = record => {
+            if(record){
+              const a = record.author || record.authorMeta;
+              if(typeof a==='string' && a.trim()) return a.trim();
+              if(a && typeof a==='object'){
+                const n = a.nickname || a.nick_name || a.name || a.uniqueId || a.unique_id;
+                if(n) return String(n).trim();
+              }
+              const u = record.authorInfo || record.author_info || record.owner || record.user;
+              if(u && typeof u==='object'){
+                const n = u.nickname || u.nick_name || u.name || u.uniqueId || u.unique_id;
+                if(n) return String(n).trim();
+              }
+            }
+            const handle=(location.pathname.match(/\/@([^/?#]+)/)||[])[1];
+            return handle ? String(handle).trim() : '';
+          };
           const playerWorkId=el=>{
             if(!el) return null;
             for(let scope=el,i=0;scope&&i<12;i++,scope=scope.parentElement){
@@ -210,7 +227,8 @@ internal static class TikTokObservationScript
             };
             pushAudio(music.playUrl||music.play_url||music);
             const caption=String(record.desc||record.description||record.title||'').trim();
-            return { type:'vd-video-identity', identity:location.host+':content:'+id, caption, href:location.href,
+            const author=pickTikTokAuthor(record);
+            return { type:'vd-video-identity', identity:location.host+':content:'+id, caption, author, href:location.href,
               media:[...new Set(audio)], images, album:true };
           };
           window.__vdObserve = () => {
@@ -270,7 +288,8 @@ internal static class TikTokObservationScript
             media.sort((a,b)=>Number(isStrongPlayUrl(b))-Number(isStrongPlayUrl(a))
               -Number(/webapp-prime/i.test(b))+Number(/webapp-prime/i.test(a)));
             const durationSec=(Number.isFinite(active.duration)&&active.duration>0)?active.duration:null;
-            return { type:'vd-video-identity', identity: location.host+':'+explicit, caption, href:location.href,
+            const author=pickTikTokAuthor(record);
+            return { type:'vd-video-identity', identity: location.host+':'+explicit, caption, author, href:location.href,
               media, durationSec };
           };
           window.__vdProbe=()=>{

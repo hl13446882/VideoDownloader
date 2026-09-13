@@ -16,10 +16,12 @@ internal static class YouTubeObservationScript
             const active=[...document.querySelectorAll('video')].filter(e=>visible(e)>0).sort((a,b)=>visible(b)-visible(a))[0];
             const caption=(document.querySelector('h1.ytd-watch-metadata yt-formatted-string,h1.title')?.textContent
               || document.title || '').replace(/\s*-\s*YouTube\s*$/i,'').trim();
+            const author=(document.querySelector('#channel-name a,#upload-info ytd-channel-name a,#owner #channel-name')?.textContent
+              || document.querySelector('ytd-channel-name a')?.textContent || '').trim();
             const media=[];
             if(active){ for(const u of [active.currentSrc,active.src]) if(/^https?:/i.test(u||'')) media.push(u); }
             const durationSec=(active&&Number.isFinite(active.duration)&&active.duration>0)?active.duration:null;
-            return { type:'vd-video-identity', identity:location.host+':content:youtube:'+v, caption, href:location.href, media:[...new Set(media)], durationSec };
+            return { type:'vd-video-identity', identity:location.host+':content:youtube:'+v, caption, author, href:location.href, media:[...new Set(media)], durationSec };
           };
           window.__vdProbe=()=>window.__vdObserve();
           let scheduled=false;

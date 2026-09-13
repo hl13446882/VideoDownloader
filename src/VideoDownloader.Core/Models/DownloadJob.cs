@@ -8,6 +8,9 @@ public sealed class DownloadJob
     /// <summary>Full caption / title at enqueue (not filename-clamped).</summary>
     public string? Caption { get; set; }
 
+    /// <summary>Uploader / channel / nickname at enqueue (immutable after create).</summary>
+    public string? Author { get; set; }
+
     /// <summary>Optional library category: movie / series / song / short / variety.</summary>
     public string? VideoKind { get; set; }
 

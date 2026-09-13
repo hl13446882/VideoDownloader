@@ -85,6 +85,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         string? caption = null,
         double? durationSec = null,
         IReadOnlyList<MediaVariant>? siblingVariants = null,
+        string? author = null,
         CancellationToken ct = default)
     {
         RejectMseOrdinaryDownload(variant);
@@ -126,6 +127,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                 Id = Guid.NewGuid(),
                 DisplayName = stem,
                 Caption = string.IsNullOrWhiteSpace(caption) ? null : caption.Trim(),
+                Author = string.IsNullOrWhiteSpace(author) ? null : author.Trim(),
                 DurationSec = durationSec is > 0 ? durationSec : null,
                 Variant = variant,
                 PageUrl = pageUrl,

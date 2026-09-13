@@ -283,9 +283,8 @@ public sealed class LocalLibraryHost : IAsyncDisposable
     private async Task WriteVideosJsonAsync(HttpListenerContext ctx)
     {
         var groupMode = (ctx.Request.QueryString["group"] ?? "").Trim().ToLowerInvariant();
-        var items = (await LoadCompletedAsync())
-            .OrderByDescending(i => i.DownloadedAt)
-            .ToList();
+        var items = (await LoadCompletedAsync()).ToList();
+        var timeOrdered = items.OrderByDescending(i => i.DownloadedAt).ToList();
 
         object payload = groupMode switch
         {
@@ -294,7 +293,9 @@ public sealed class LocalLibraryHost : IAsyncDisposable
                 .Select(g => new
                 {
                     group = g.Key,
-                    items = g.OrderByDescending(i => i.DownloadedAt).ToArray()
+                    items = LocalLibraryOrdering
+                        .OrderByAuthorThenDownloadedAtDesc(g, i => i.Author, i => i.DownloadedAt)
+                        .ToArray()
                 })
                 .ToArray(),
             "kind" => items.GroupBy(i => i.VideoKindLabel)
@@ -303,10 +304,12 @@ public sealed class LocalLibraryHost : IAsyncDisposable
                 .Select(g => new
                 {
                     group = g.Key,
-                    items = g.OrderByDescending(i => i.DownloadedAt).ToArray()
+                    items = LocalLibraryOrdering
+                        .OrderByAuthorThenDownloadedAtDesc(g, i => i.Author, i => i.DownloadedAt)
+                        .ToArray()
                 })
                 .ToArray(),
-            _ => items
+            _ => timeOrdered
         };
 
         await WriteJsonAsync(ctx, payload);
@@ -449,7 +452,7 @@ public sealed class LocalLibraryHost : IAsyncDisposable
                 kind,
                 LibraryVideoKinds.LabelOf(kind),
                 downloadedAt,
-                job.EditedAt,
+                job.Author,
                 DownloadSiteFolder.Resolve(job.PageUrl),
                 $"/api/thumb/{job.Id:N}",
                 $"/api/stream/{job.Id:N}",
@@ -515,7 +518,7 @@ public sealed class LocalLibraryHost : IAsyncDisposable
         string VideoKind,
         string VideoKindLabel,
         DateTimeOffset DownloadedAt,
-        DateTimeOffset? EditedAt,
+        string? Author,
         string SiteGroup,
         string ThumbUrl,
         string StreamUrl,
@@ -524,7 +527,7 @@ public sealed class LocalLibraryHost : IAsyncDisposable
         public string DownloadedAtText =>
             DownloadedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
 
-        public string? EditedAtText =>
-            EditedAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+        public string AuthorDisplay =>
+            "作者：" + AuthorNameResolver.DisplayOrUnknown(Author);
     }
 }

@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Infrastructure.Detection;
 
 namespace VideoDownloader.Infrastructure.Detection.Sites.Douyin;
 
@@ -556,7 +557,8 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 images,
                 ctx,
                 Confidence: 0.9,
-                DisplayTitle: _session.Caption)
+                DisplayTitle: _session.Caption,
+                Author: _session.Author)
             {
                 SessionId = _session.SessionId,
                 DurationSec = _session.ObservedDurationSec is > 0 ? _session.ObservedDurationSec : null
@@ -607,7 +609,8 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             [],
             ctx,
             Confidence: video.BrowserObserved ? 0.95 : 0.75,
-            DisplayTitle: _session.Caption)
+            DisplayTitle: _session.Caption,
+            Author: _session.Author)
         {
             SessionId = _session.SessionId,
             Formats = formats,
@@ -800,6 +803,10 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 caption.ValueKind == JsonValueKind.String &&
                 !string.IsNullOrWhiteSpace(caption.GetString()))
                 _session.Caption = caption.GetString()!.Trim();
+
+            _session.Author = ExclusiveAuthorHints.Merge(
+                _session.Author,
+                ExclusiveAuthorHints.ReadFromObservationJson(json));
 
             if (root.TryGetProperty("images", out var images) && images.ValueKind == JsonValueKind.Array)
             {

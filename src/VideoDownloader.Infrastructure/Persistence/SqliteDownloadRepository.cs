@@ -53,6 +53,7 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
         await TryAddColumnAsync(conn, "video_kind", "TEXT NULL");
         await TryAddColumnAsync(conn, "completed_at", "TEXT NULL");
         await TryAddColumnAsync(conn, "edited_at", "TEXT NULL");
+        await TryAddColumnAsync(conn, "author", "TEXT NULL");
         // One-time backfill: treat updated_at as completion time for already-finished rows.
         await conn.ExecuteAsync("""
             UPDATE download_jobs
@@ -88,14 +89,14 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
                 downloaded_bytes, total_bytes, etag, last_modified, context_version,
                 request_context_meta_json, request_context_secret, page_url, last_error_code,
                 caption, duration_sec, expected_total_bytes, content_prefix_hash,
-                video_kind, completed_at, edited_at,
+                video_kind, completed_at, edited_at, author,
                 created_at, updated_at)
             VALUES (
                 @Id, @DisplayName, @SourceUrl, @TargetPath, @MediaFamily, @Status,
                 @DownloadedBytes, @TotalBytes, @ETag, @LastModified, @ContextVersion,
                 @MetaJson, @Secret, @PageUrl, @LastErrorCode,
                 @Caption, @DurationSec, @ExpectedTotalBytes, @ContentPrefixHash,
-                @VideoKind, @CompletedAt, @EditedAt,
+                @VideoKind, @CompletedAt, @EditedAt, @Author,
                 @CreatedAt, @UpdatedAt)
             ON CONFLICT(id) DO UPDATE SET
                 display_name = excluded.display_name,
@@ -119,6 +120,7 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
                 video_kind = excluded.video_kind,
                 completed_at = excluded.completed_at,
                 edited_at = excluded.edited_at,
+                author = COALESCE(excluded.author, download_jobs.author),
                 updated_at = excluded.updated_at;
             """;
 
@@ -146,6 +148,7 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
             VideoKind = job.VideoKind,
             CompletedAt = job.CompletedAt?.ToString("O"),
             EditedAt = job.EditedAt?.ToString("O"),
+            Author = job.Author,
             CreatedAt = job.CreatedAt.ToString("O"),
             UpdatedAt = job.UpdatedAt.ToString("O")
         });
@@ -194,6 +197,7 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
             Id = Guid.Parse(row.id),
             DisplayName = row.display_name,
             Caption = row.caption,
+            Author = row.author,
             DurationSec = row.duration_sec,
             VideoKind = row.video_kind,
             Variant = variant,
@@ -251,6 +255,7 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
         public string? video_kind { get; set; }
         public string? completed_at { get; set; }
         public string? edited_at { get; set; }
+        public string? author { get; set; }
         public string created_at { get; set; } = string.Empty;
         public string updated_at { get; set; } = string.Empty;
     }

@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Infrastructure.Detection;
 
 namespace VideoDownloader.Infrastructure.Detection.Sites.Bilibili;
 
@@ -17,6 +18,7 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
     private Uri? _pageUrl;
     private string? _contentId;
     private string? _caption;
+    private string? _author;
     private RequestContext _context = RequestContext.CreateEmpty();
     private readonly List<MediaTrack> _tracks = [];
     private readonly List<MediaVariant> _formats = [];
@@ -126,6 +128,7 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
                 _contentId = contentId;
                 _formats.Clear();
                 _tracks.Clear();
+                _author = null;
                 _failed = false;
                 _failureReason = null;
                 _externalAttempted = false;
@@ -166,6 +169,7 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
                         continue;
                     if (string.IsNullOrWhiteSpace(_caption) && !string.IsNullOrWhiteSpace(v.DisplayTitle))
                         _caption = v.DisplayTitle;
+                    _author = ExclusiveAuthorHints.MergeFromMetadata(_author, v.Metadata, _pageUrl);
                     foreach (var variant in v.Variants)
                     {
                         if (variant.Tracks.Any(t => t.Kind == MediaTrackKind.Combined) &&
@@ -250,7 +254,7 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
             return new MediaDescriptor(SiteIds.Bilibili, _pageUrl, _contentId, MediaContentType.Video,
                 best?.Tracks.FirstOrDefault(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined),
                 best?.Tracks.FirstOrDefault(t => t.Kind == MediaTrackKind.Audio),
-                [], _context, 0.95, _caption)
+                [], _context, 0.95, _caption, _author)
             {
                 SessionId = _sessionId,
                 Formats = formats
@@ -263,10 +267,10 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
         winningMethod = ProbeMethods.NetworkPlayurl;
         if (video is null)
             return new MediaDescriptor(SiteIds.Bilibili, _pageUrl, _contentId, MediaContentType.Audio,
-                null, audio, [], _context, 0.7, _caption) { SessionId = _sessionId };
+                null, audio, [], _context, 0.7, _caption, _author) { SessionId = _sessionId };
         return new MediaDescriptor(SiteIds.Bilibili, _pageUrl, _contentId, MediaContentType.Video,
             video, video.Kind == MediaTrackKind.Combined ? null : audio, [], _context,
-            video.BrowserObserved ? 0.95 : 0.8, _caption) { SessionId = _sessionId };
+            video.BrowserObserved ? 0.95 : 0.8, _caption, _author) { SessionId = _sessionId };
     }
 
     private MediaTrack? PickBestTrack(Func<MediaTrack, bool> match)
@@ -324,6 +328,7 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
             using var doc = JsonDocument.Parse(json);
             if (doc.RootElement.TryGetProperty("caption", out var c) && c.ValueKind == JsonValueKind.String)
                 _caption = c.GetString()?.Trim() ?? _caption;
+            _author = ExclusiveAuthorHints.Merge(_author, ExclusiveAuthorHints.ReadFromObservationJson(json));
             if (doc.RootElement.TryGetProperty("media", out var media) && media.ValueKind == JsonValueKind.Array)
             {
                 foreach (var item in media.EnumerateArray())
@@ -368,6 +373,7 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
         _pageUrl = null;
         _contentId = null;
         _caption = null;
+        _author = null;
         _context = RequestContext.CreateEmpty();
         _tracks.Clear();
         _formats.Clear();

@@ -23,6 +23,21 @@ internal static class DouyinObservationScript
             const query = ids.filter(k => u.searchParams.has(k)).map(k => [k,u.searchParams.get(k)]);
             return u.origin + u.pathname + JSON.stringify(query);
           };
+          const pickDouyinAuthor = record => {
+            if(!record) return '';
+            const a = record.author || record.author_info || record.authorInfo;
+            if(typeof a==='string' && a.trim()) return a.trim();
+            if(a && typeof a==='object'){
+              const n = a.nickname || a.nick_name || a.name || a.unique_id;
+              if(n) return String(n).trim();
+            }
+            const u = record.owner || record.user;
+            if(u && typeof u==='object'){
+              const n = u.nickname || u.nick_name || u.name || u.unique_id;
+              if(n) return String(n).trim();
+            }
+            return '';
+          };
           const playerRecord = active => {
             const seen=new WeakSet();let budget=280;
             const find=(value,depth)=>{
@@ -403,8 +418,9 @@ internal static class DouyinObservationScript
                 ? ((record.image_post_info||record.imagePost).image_count|0) : 0),
               // Full hydration lists are an authoritative total when longer than the pager-less DOM set.
               slots >= images.length ? slots : 0);
+            const author=pickDouyinAuthor(record);
             const out={ type:'vd-video-identity', identity: id ? (location.host+':content:'+id) : pageKey(location.href),
-              caption, href:location.href, media:[...new Set(audioUrls)], images, imageCount, album:true };
+              caption, author, href:location.href, media:[...new Set(audioUrls)], images, imageCount, album:true };
             if(declared>0) out.declaredImageCount=declared;
             return out;
           };
@@ -447,7 +463,8 @@ internal static class DouyinObservationScript
             }) : [];
             caption=dataRecord ? String(dataRecord.desc||dataRecord.description||dataRecord.title||'').trim() : (samePlayer ? caption : '');
             const durationSec=(Number.isFinite(active.duration)&&active.duration>0)?active.duration:null;
-            return { type:'vd-video-identity', identity:'content:'+awemeId, caption, href:location.href,
+            const author=pickDouyinAuthor(dataRecord||record);
+            return { type:'vd-video-identity', identity:'content:'+awemeId, caption, author, href:location.href,
               media:[...new Set([...fromPlayer, ...fromData, ...fromFiber, ...fromPerf])], durationSec };
           };
           window.__vdProbe=()=>{

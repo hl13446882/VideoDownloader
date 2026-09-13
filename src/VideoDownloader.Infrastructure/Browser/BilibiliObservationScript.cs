@@ -12,6 +12,11 @@ internal static class BilibiliObservationScript
               || document.querySelector('meta[property="og:title"]')?.getAttribute('content')
               || document.title || '').trim();
             caption=caption.replace(/\s*[_|].*哔哩哔哩.*$/u,'').replace(/\s*[_-]\s*bilibili.*$/i,'').trim();
+            let author=(document.querySelector('.up-name,.username,.upinfo .name,.video-info-detail .up-name')?.textContent||'').trim();
+            try{
+              const owner=window.__INITIAL_STATE__?.videoData?.owner||window.__INITIAL_STATE__?.data?.owner;
+              if(owner?.name && !author) author=String(owner.name).trim();
+            }catch{}
             const active=[...document.querySelectorAll('video')].find(e=>{const r=e.getBoundingClientRect();return r.width>80&&r.height>80;});
             const durationSec=(active&&Number.isFinite(active.duration)&&active.duration>0)?active.duration:null;
             const media=[];
@@ -34,7 +39,7 @@ internal static class BilibiliObservationScript
               };
               if(dash){ pushDash(dash.video); pushDash(dash.audio); }
             }catch{}
-            return { type:'vd-video-identity', identity:location.host+':content:'+bvid, caption, href:location.href, media:[...new Set(media)], durationSec };
+            return { type:'vd-video-identity', identity:location.host+':content:'+bvid, caption, author, href:location.href, media:[...new Set(media)], durationSec };
           };
           window.__vdProbe=()=>window.__vdObserve();
           let scheduled=false;

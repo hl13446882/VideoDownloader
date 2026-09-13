@@ -72,6 +72,7 @@ public interface IDownloadEngine
         string? caption = null,
         double? durationSec = null,
         IReadOnlyList<MediaVariant>? siblingVariants = null,
+        string? author = null,
         CancellationToken ct = default);
 
     Task PauseAsync(Guid jobId, CancellationToken ct = default);

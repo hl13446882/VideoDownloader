@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Infrastructure.Detection;
 
 namespace VideoDownloader.Infrastructure.Detection.Sites.TikTok;
 
@@ -25,6 +26,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
     private Uri? _pageUrl;
     private string? _contentId;
     private string? _caption;
+    private string? _author;
     private RequestContext _context = RequestContext.CreateEmpty();
     private readonly List<MediaTrack> _videos = [];
     private readonly List<MediaTrack> _audios = [];
@@ -94,6 +96,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         _pageUrl = null;
         _contentId = null;
         _caption = null;
+        _author = null;
         _context = RequestContext.CreateEmpty();
         _videos.Clear();
         _audios.Clear();
@@ -212,6 +215,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 _album = false;
                 _failed = false;
                 _failureReason = null;
+                _author = null;
                 _contentId = id;
                 _externalAttempted = false;
                 _externalFinished = false;
@@ -298,6 +302,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                     if (!string.IsNullOrWhiteSpace(v.DisplayTitle) &&
                         (string.IsNullOrWhiteSpace(_caption) || _caption is "视频"))
                         _caption = v.DisplayTitle;
+                    _author = ExclusiveAuthorHints.MergeFromMetadata(_author, v.Metadata, _pageUrl);
                     foreach (var variant in v.Variants)
                     {
                         if (variant.Tracks.Any(t => t.Kind == MediaTrackKind.Combined) &&
@@ -398,7 +403,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
             if (_images.Count == 0) return null;
             winningMethod = ProbeMethods.Album;
             return new MediaDescriptor(SiteIds.TikTok, _pageUrl, _contentId, MediaContentType.Album,
-                null, Best(_audios), _images.OrderBy(i => i.Index).ToArray(), _context, 0.9, _caption)
+                null, Best(_audios), _images.OrderBy(i => i.Index).ToArray(), _context, 0.9, _caption, _author)
             { SessionId = _sessionId };
         }
 
@@ -417,7 +422,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 return new MediaDescriptor(SiteIds.TikTok, _pageUrl, _contentId, MediaContentType.Video,
                     best.Tracks.FirstOrDefault(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined),
                     best.Tracks.FirstOrDefault(t => t.Kind == MediaTrackKind.Audio),
-                    [], _context, 0.95, _caption)
+                    [], _context, 0.95, _caption, _author)
                 {
                     SessionId = _sessionId,
                     Formats = MergeFormats()
@@ -437,7 +442,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                     : ProbeMethods.NetworkMedia;
         var formats = MergeFormats();
         return new MediaDescriptor(SiteIds.TikTok, _pageUrl, _contentId, MediaContentType.Video,
-            video, audio, [], _context, video.BrowserObserved ? 0.95 : 0.75, _caption)
+            video, audio, [], _context, video.BrowserObserved ? 0.95 : 0.75, _caption, _author)
         {
             SessionId = _sessionId,
             Formats = formats
@@ -599,6 +604,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                     (string.IsNullOrWhiteSpace(_caption) || _caption is "视频" || text.Length > _caption.Length))
                     _caption = text;
             }
+            _author = ExclusiveAuthorHints.Merge(_author, ExclusiveAuthorHints.ReadFromObservationJson(json));
             if (root.TryGetProperty("durationSec", out var dur) &&
                 dur.ValueKind is JsonValueKind.Number &&
                 dur.TryGetDouble(out var seconds) &&
