@@ -6,10 +6,10 @@ using VideoDownloader.Core.Models;
 namespace VideoDownloader.Core.Naming;
 
 /// <summary>
-/// Queue/download stem: caption (文案) first; generic may use page title.
-/// Title (原名) hard-capped at 30 text characters (keep head, drop tail); meta suffix is <b>not</b> counted:
+/// Queue/download stem from caption / page title.
+/// Caption text is not cleaned: filename only drops illegal path characters, then hard-caps
+/// the title head at 30 text characters (keep head, drop tail). Meta suffix is <b>not</b> counted:
 /// <c>{原名}_{分}_{P}_{MB|GB}</c> e.g. <c>标题_3分_1080P_256MB</c>.
-/// Illegal filename characters are filtered out only — they never truncate the rest of the title.
 /// Last-resort fallback title: <c>{host}_{yyyyMMdd}</c>.
 /// </summary>
 public static partial class DownloadFileNameBuilder
@@ -20,12 +20,12 @@ public static partial class DownloadFileNameBuilder
 
     public static string Build(DetectedVideo video, MediaVariant variant)
     {
-        // 1) Prefer 文案 / page title carried on DisplayTitle (meta stripped).
+        // 1) Prefer 文案 / page title on DisplayTitle — keep every character except illegal filename chars.
         // 2) Never use SiteContentId / author / container as the stem.
         // 3) Bare transport names (public.mp4) are not captions — fall back to host+date.
         var title = LooksLikeBareMediaFileName(video.DisplayTitle)
             ? string.Empty
-            : CleanTitle(video.DisplayTitle);
+            : StripOwnDownloadMetaSuffix(video.DisplayTitle);
         if (!IsUsableStemTitle(title))
         {
             title = BuildHostDateResolutionFallback(video.PageUrl, now: null);
@@ -373,57 +373,20 @@ public static partial class DownloadFileNameBuilder
             or "LPT1" or "LPT2" or "LPT3" or "LPT4" or "LPT5" or "LPT6" or "LPT7" or "LPT8" or "LPT9";
     }
 
-    private static string CleanTitle(string? value)
+    /// <summary>
+    /// Remove only a prior <see cref="Build"/> meta suffix if a built filename was reused as title.
+    /// Does not alter caption/hashtag/mention text.
+    /// </summary>
+    private static string StripOwnDownloadMetaSuffix(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
             return string.Empty;
-
-        // Prefer non-topic caption text; hashtags/mentions usually bloat Douyin/TikTok titles.
-        var withoutTags = HashtagRegex().Replace(value, " ");
-        withoutTags = MentionRegex().Replace(withoutTags, " ");
-        var cleaned = FinalizeTitleCleanup(withoutTags);
-
-        // If stripping topics left nothing (caption was only #话题…), keep topic bodies as the stem.
-        if (string.IsNullOrWhiteSpace(cleaned))
-        {
-            var topics = ExtractHashtagBodies(value);
-            if (topics.Count > 0)
-                cleaned = FinalizeTitleCleanup(string.Join(" ", topics));
-        }
-
-        return cleaned;
-    }
-
-    private static string FinalizeTitleCleanup(string value)
-    {
-        var cleaned = WhitespaceRegex().Replace(value, " ").Trim();
-        // Remove spaces to preserve more title text within the filename budget.
-        cleaned = cleaned.Replace(" ", "", StringComparison.Ordinal);
-        // Strip detection meta glued onto DisplayTitle (resolution/size/container).
-        cleaned = TrailingDetectionMetaRegex().Replace(cleaned, string.Empty);
-        // Strip download meta if a prior Build result was reused as a title.
-        cleaned = DownloadMetaSuffixRegex().Replace(cleaned, string.Empty);
-        // Drop "· 2" multi-card suffixes that are not part of the caption.
-        cleaned = MultiCardSuffixRegex().Replace(cleaned, string.Empty);
-        return cleaned;
-    }
-
-    private static List<string> ExtractHashtagBodies(string value)
-    {
-        var topics = new List<string>();
-        foreach (Match match in HashtagRegex().Matches(value))
-        {
-            var body = match.Value.TrimStart('#').Trim();
-            if (body.Length > 0)
-                topics.Add(body);
-        }
-
-        return topics;
+        return DownloadMetaSuffixRegex().Replace(value, string.Empty);
     }
 
     private static string Sanitize(string value)
     {
-        // Filter illegal filename characters only — never truncate at the first bad char.
+        // Filter illegal filename characters only — never strip # @ spaces or caption punctuation.
         var invalid = Path.GetInvalidFileNameChars();
         var builder = new StringBuilder(value.Length);
         foreach (var ch in value)
@@ -435,7 +398,8 @@ public static partial class DownloadFileNameBuilder
             builder.Append(ch);
         }
 
-        var sanitized = DuplicateSeparatorRegex().Replace(builder.ToString(), "_").Trim(' ', '.', '_');
+        // Windows rejects trailing dots/spaces in file names; keep interior spaces and underscores.
+        var sanitized = builder.ToString().Trim(' ', '.');
         return string.IsNullOrWhiteSpace(sanitized) ? "video" : sanitized;
     }
 
@@ -452,32 +416,11 @@ public static partial class DownloadFileNameBuilder
 
         var info = new StringInfo(value);
         if (info.LengthInTextElements <= maxTextElements)
-            return value.Trim(' ', '.', '_');
+            return value.Trim(' ', '.');
 
-        var head = info.SubstringByTextElements(0, maxTextElements).Trim(' ', '.', '_');
+        var head = info.SubstringByTextElements(0, maxTextElements).Trim(' ', '.');
         return string.IsNullOrWhiteSpace(head) ? "video" : head;
     }
-
-    [GeneratedRegex(@"#[^\s#]+")]
-    private static partial Regex HashtagRegex();
-
-    [GeneratedRegex(@"@[^\s@]+")]
-    private static partial Regex MentionRegex();
-
-    [GeneratedRegex(@"\s+")]
-    private static partial Regex WhitespaceRegex();
-
-    [GeneratedRegex(@"_+")]
-    private static partial Regex DuplicateSeparatorRegex();
-
-    [GeneratedRegex(@"·\d+$")]
-    private static partial Regex MultiCardSuffixRegex();
-
-    // height + size + container as appended by MediaDescriptorMapper after spaces are removed.
-    [GeneratedRegex(
-        @"(?:\d{3,4}[pP])?(?:\d+(?:\.\d+)?(?:B|KB|MB|GB))?(?:mp4|webm|mkv|m4a|mka|hls|dash)?$",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex TrailingDetectionMetaRegex();
 
     // Download meta: at least one of _N分 / _NP / _NMB|_NGB (order fixed).
     [GeneratedRegex(

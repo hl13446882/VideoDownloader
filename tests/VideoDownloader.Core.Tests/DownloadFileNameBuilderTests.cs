@@ -41,8 +41,8 @@ public class DownloadFileNameBuilderTests
 
         Assert.DoesNotContain("CreatorName", name);
         Assert.DoesNotContain("abc123", name);
-        Assert.Contains("UsefulClip", name);
-        Assert.Equal("UsefulClip_2分_1080P_50MB", name);
+        Assert.Contains("Useful Clip", name);
+        Assert.Equal("Useful Clip_2分_1080P_50MB", name);
     }
 
     [Fact]
@@ -68,7 +68,30 @@ public class DownloadFileNameBuilderTests
     }
 
     [Fact]
-    public void Build_StripsHashtags_AndHardCapsTitleAt30()
+    public void Build_KeepsEpisodePrefix_AndDoesNotStripHashtagsOrMentions()
+    {
+        var video = CreateVideo(
+            SiteIds.Douyin,
+            "aweme174",
+            "@笑里藏叨第174集：《119令》 4#社会语录 #葫芦相声社 #葫芦相声",
+            new Uri("https://www.douyin.com/video/aweme174"),
+            null,
+            durationSec: 60,
+            contentLength: 12L * 1024 * 1024);
+
+        var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
+
+        Assert.StartsWith("@笑里藏叨第174集", name);
+        Assert.Contains("119令", name);
+        Assert.Contains("#", name);
+        DownloadFileNameBuilder.TrySplitMetaSuffix(name, out var head, out _);
+        Assert.StartsWith("@笑里藏叨第174集", head);
+        Assert.True(new System.Globalization.StringInfo(head).LengthInTextElements
+                    <= DownloadFileNameBuilder.MaxStemLength);
+    }
+
+    [Fact]
+    public void Build_PreservesHashtagsWithin30CharHead()
     {
         var video = CreateVideo(
             SiteIds.Douyin,
@@ -81,10 +104,9 @@ public class DownloadFileNameBuilderTests
 
         var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
 
-        Assert.DoesNotContain("#", name);
-        Assert.DoesNotContain("发布者", name);
         Assert.Contains("山歌追上云朵夫妻版", name);
-        Assert.DoesNotContain("舞蹈", name); // topics still stripped when caption remains
+        Assert.Contains("#", name);
+        Assert.DoesNotContain("发布者", name);
         Assert.EndsWith("_1分_1080P_12MB", name);
         DownloadFileNameBuilder.TrySplitMetaSuffix(name, out var head, out _);
         Assert.True(new System.Globalization.StringInfo(head).LengthInTextElements
@@ -92,7 +114,7 @@ public class DownloadFileNameBuilderTests
     }
 
     [Fact]
-    public void Build_HashtagOnlyCaption_UsesTopicTextAsStem()
+    public void Build_HashtagOnlyCaption_KeepsHashTopicsAsStem()
     {
         var video = CreateVideo(
             SiteIds.Douyin,
@@ -105,14 +127,14 @@ public class DownloadFileNameBuilderTests
 
         var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
 
-        Assert.DoesNotContain("#", name);
-        Assert.Contains("舞蹈", name);
+        Assert.StartsWith("#舞蹈", name);
+        Assert.Contains("#", name);
         Assert.DoesNotContain("douyin.com", name, StringComparison.OrdinalIgnoreCase);
         Assert.EndsWith("_1分_1080P_8MB", name);
     }
 
     [Fact]
-    public void Build_StripsGluedDetectionMeta_BeforeClamp()
+    public void Build_KeepsCaptionSizeText_OnlyAddsFilenameMetaSuffix()
     {
         var video = CreateVideo(
             SiteIds.Douyin,
@@ -125,8 +147,8 @@ public class DownloadFileNameBuilderTests
 
         var name = DownloadFileNameBuilder.Build(video, video.Variants[0]);
 
-        Assert.DoesNotContain("9.8MB", name, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("mp4", name, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("蓝天白云下听蒙语鸿雁太治愈了", name);
+        Assert.Contains("9.8MB", name);
         Assert.EndsWith("_2分_1080P_10MB", name);
     }
 

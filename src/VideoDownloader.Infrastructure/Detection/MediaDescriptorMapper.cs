@@ -50,13 +50,14 @@ public static class MediaDescriptorMapper
             ?? variants.FirstOrDefault(v =>
                 !v.Tracks.Any(t => t.IsMseTrack || MediaUrlNormalizer.IsByteDanceMseTrack(t.SourceUrl)))
             ?? variants.FirstOrDefault();
-        var title = AppendDetectedMeta(baseTitle, preferred);
+        // Caption/文案 stays verbatim — resolution/size belong on the variant, not the title.
+        _ = preferred;
 
         return new DetectedVideo(
             videoId,
             descriptor.Site,
             descriptor.MediaId,
-            title,
+            baseTitle,
             descriptor.PageUrl,
             family,
             variants,
