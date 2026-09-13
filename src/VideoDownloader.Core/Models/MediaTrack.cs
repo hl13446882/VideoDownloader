@@ -48,4 +48,10 @@ public sealed record MediaTrack(
     /// Examples: aweme_detail, network_media, ytdlp.pot_mweb.
     /// </summary>
     public string? ProbeMethod { get; init; }
+
+    /// <summary>
+    /// yt-dlp <c>http_dash_segments</c> / YouTube hang archives: download <c>sq=0..N-1</c> and concat.
+    /// Null/≤1 means ordinary progressive HTTP.
+    /// </summary>
+    public int? HttpDashFragmentCount { get; init; }
 }

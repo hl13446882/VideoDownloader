@@ -36,7 +36,10 @@ internal static class DownloadJobMapper
         long? Bandwidth,
         long? ContentLength,
         RequestContext? Context = null,
-        byte[]? Secret = null);
+        byte[]? Secret = null)
+    {
+        public int? HttpDashFragmentCount { get; init; }
+    }
 
     public static (string MetaJson, byte[]? Secret) SerializeVariant(MediaVariant variant)
     {
@@ -52,7 +55,10 @@ internal static class DownloadJobMapper
             t.Bandwidth,
             t.ContentLength,
             RequestContextProtector.StripSecrets(t.RequestContext),
-            RequestContextProtector.Protect(t.RequestContext))).ToList();
+            RequestContextProtector.Protect(t.RequestContext))
+        {
+            HttpDashFragmentCount = t.HttpDashFragmentCount
+        }).ToList();
 
         var meta = JsonSerializer.Serialize(new VariantMeta(
             variant.VariantId,
@@ -107,7 +113,10 @@ internal static class DownloadJobMapper
             t.Container,
             t.Bandwidth,
             t.ContentLength,
-            t.Context is null ? context : RequestContextProtector.Restore(t.Context, t.Secret))).ToList();
+            t.Context is null ? context : RequestContextProtector.Restore(t.Context, t.Secret))
+        {
+            HttpDashFragmentCount = t.HttpDashFragmentCount
+        }).ToList();
 
         if (tracks.Count == 0)
         {

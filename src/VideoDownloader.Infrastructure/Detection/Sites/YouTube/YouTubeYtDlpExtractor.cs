@@ -412,42 +412,19 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
 
         if (bestVideo.ValueKind != JsonValueKind.Undefined)
         {
-            var vUrl = GetFormatUrl(bestVideo);
-            if (!string.IsNullOrWhiteSpace(vUrl))
+            if (TryResolveDownloadUrl(bestVideo, out _, out _))
             {
                 var height = JsonNumber.TryInt32Prop(bestVideo, "height", out var hv) ? hv : (int?)null;
                 var vcodec = bestVideo.TryGetProperty("vcodec", out var vc) ? vc.GetString() : null;
                 var videoContainer = bestVideo.TryGetProperty("ext", out var ext) ? ext.GetString() : "mp4";
-                var videoContext = BuildRequestContext(bestVideo, context);
-                var vTrack = new MediaTrack(
-                    "video",
-                    MediaTrackKind.Video,
-                    new Uri(vUrl),
-                    vcodec,
-                    videoContainer,
-                    null,
-                    TryGetSize(bestVideo),
-                    videoContext);
+                var vTrack = BuildMediaTrack("video", MediaTrackKind.Video, bestVideo, context, videoContainer);
 
                 MediaTrack? aTrack = null;
                 string? audioContainer = null;
-                if (bestAudio.ValueKind != JsonValueKind.Undefined)
+                if (bestAudio.ValueKind != JsonValueKind.Undefined &&
+                    TryBuildAudioTrack(bestAudio, context, out aTrack))
                 {
-                    var aUrl = GetFormatUrl(bestAudio);
-                    if (!string.IsNullOrWhiteSpace(aUrl))
-                    {
-                        audioContainer = bestAudio.TryGetProperty("ext", out var aext) ? aext.GetString() : "m4a";
-                        var audioContext = BuildRequestContext(bestAudio, context);
-                        aTrack = new MediaTrack(
-                            "audio",
-                            MediaTrackKind.Audio,
-                            new Uri(aUrl),
-                            bestAudio.TryGetProperty("acodec", out var ac) ? ac.GetString() : null,
-                            audioContainer,
-                            null,
-                            TryGetSize(bestAudio),
-                            audioContext);
-                    }
+                    audioContainer = aTrack.Container;
                 }
 
                 if (aTrack is not null)
@@ -461,18 +438,15 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                         outputContainer,
                         [vTrack, aTrack]));
                 }
-                else if (aTrack is null)
+                else
                 {
-                    variants.Add(MediaVariant.FromCombinedTrack(
+                    variants.Add(MediaVariant.FromTracks(
                         height is not null ? $"{height}p" : "default",
-                        vTrack.SourceUrl,
-                        videoContext,
                         null,
                         height,
                         null,
-                        vcodec,
                         vTrack.Container,
-                        vTrack.ContentLength));
+                        [vTrack with { TrackId = "combined", Kind = MediaTrackKind.Combined, Codec = vcodec }]));
                 }
             }
         }
@@ -484,22 +458,19 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
         var preferredAudio = audioFormats.FirstOrDefault();
         foreach (var videoFormat in SelectVideoFormats(formats))
         {
-            var videoUrl = GetFormatUrl(videoFormat);
-            if (string.IsNullOrWhiteSpace(videoUrl) ||
-                variants.Any(v => string.Equals(v.SourceUrl.AbsoluteUri, videoUrl, StringComparison.OrdinalIgnoreCase)))
+            if (!TryResolveDownloadUrl(videoFormat, out var videoUrl, out _))
+                continue;
+            if (variants.Any(v => string.Equals(v.SourceUrl.AbsoluteUri, videoUrl, StringComparison.OrdinalIgnoreCase)))
                 continue;
 
             var height = JsonNumber.TryInt32Prop(videoFormat, "height", out var heightValue) ? heightValue : (int?)null;
             var videoContainer = videoFormat.TryGetProperty("ext", out var ext) ? ext.GetString() : "mp4";
-            var videoTrack = new MediaTrack(
+            var videoTrack = BuildMediaTrack(
                 "video-" + FormatId(videoFormat),
                 MediaTrackKind.Video,
-                new Uri(videoUrl),
-                StringProperty(videoFormat, "vcodec"),
-                videoContainer,
-                TryGetBitrate(videoFormat),
-                TryGetSize(videoFormat),
-                BuildRequestContext(videoFormat, context));
+                videoFormat,
+                context,
+                videoContainer);
 
             if (preferredAudio.ValueKind != JsonValueKind.Undefined &&
                 TryBuildAudioTrack(preferredAudio, context, out var audioTrack))
@@ -710,22 +681,18 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
 
     private bool TryBuildAudioTrack(JsonElement format, RequestContext fallback, out MediaTrack track)
     {
-        var url = GetFormatUrl(format);
-        if (string.IsNullOrWhiteSpace(url))
+        if (!TryResolveDownloadUrl(format, out _, out _))
         {
             track = null!;
             return false;
         }
 
-        track = new MediaTrack(
+        track = BuildMediaTrack(
             "audio-" + FormatId(format),
             MediaTrackKind.Audio,
-            new Uri(url),
-            StringProperty(format, "acodec"),
-            StringProperty(format, "ext") ?? "m4a",
-            TryGetBitrate(format),
-            TryGetSize(format),
-            BuildRequestContext(format, fallback));
+            format,
+            fallback,
+            StringProperty(format, "ext") ?? "m4a");
         return true;
     }
 
@@ -858,8 +825,95 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
             !protocol.StartsWith("http", StringComparison.OrdinalIgnoreCase))
             return false;
 
+        // Progressive-only pass: hang / dash-segment archives need fragment concat, not Range.
+        if (directOnly && IsHttpDashSegmentsFormat(format, url))
+            return false;
+
         return !url.Contains(".m3u8", StringComparison.OrdinalIgnoreCase) &&
                !url.Contains("/manifest/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsHttpDashSegmentsFormat(JsonElement format, string? url)
+    {
+        if (format.TryGetProperty("protocol", out var p) &&
+            p.ValueKind == JsonValueKind.String &&
+            string.Equals(p.GetString(), "http_dash_segments", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return IsYoutubeHangUrl(url);
+    }
+
+    internal static bool IsYoutubeHangUrl(string? url) =>
+        !string.IsNullOrWhiteSpace(url) &&
+        (url.Contains("hang=1", StringComparison.OrdinalIgnoreCase) ||
+         url.Contains("source=yt_live_broadcast", StringComparison.OrdinalIgnoreCase));
+
+    private static bool TryResolveDownloadUrl(JsonElement format, out string url, out int? fragmentCount)
+    {
+        url = string.Empty;
+        fragmentCount = null;
+
+        if (format.TryGetProperty("fragments", out var fragments) &&
+            fragments.ValueKind == JsonValueKind.Array &&
+            fragments.GetArrayLength() > 0)
+        {
+            var count = fragments.GetArrayLength();
+            var first = fragments[0];
+            if (first.TryGetProperty("fragment_count", out var fc) &&
+                fc.ValueKind == JsonValueKind.Number &&
+                fc.TryGetInt32(out var declared) &&
+                declared > count)
+                count = declared;
+
+            if (first.TryGetProperty("url", out var fragUrl) &&
+                fragUrl.ValueKind == JsonValueKind.String &&
+                !string.IsNullOrWhiteSpace(fragUrl.GetString()))
+            {
+                url = fragUrl.GetString()!;
+                if (count > 1)
+                    fragmentCount = count;
+                return true;
+            }
+        }
+
+        var fallback = GetFormatUrl(format);
+        if (string.IsNullOrWhiteSpace(fallback))
+            return false;
+
+        url = fallback;
+        if (IsYoutubeHangUrl(url) &&
+            format.TryGetProperty("fragments", out var fr2) &&
+            fr2.ValueKind == JsonValueKind.Array &&
+            fr2.GetArrayLength() > 1)
+            fragmentCount = fr2.GetArrayLength();
+
+        return true;
+    }
+
+    private MediaTrack BuildMediaTrack(
+        string trackId,
+        MediaTrackKind kind,
+        JsonElement format,
+        RequestContext fallback,
+        string? containerOverride = null)
+    {
+        if (!TryResolveDownloadUrl(format, out var url, out var fragmentCount))
+            throw new InvalidOperationException("format missing url");
+
+        return new MediaTrack(
+            trackId,
+            kind,
+            new Uri(url),
+            kind == MediaTrackKind.Audio
+                ? StringProperty(format, "acodec")
+                : StringProperty(format, "vcodec"),
+            containerOverride ?? StringProperty(format, "ext") ?? (kind == MediaTrackKind.Audio ? "m4a" : "mp4"),
+            TryGetBitrate(format),
+            TryGetSize(format),
+            BuildRequestContext(format, fallback))
+        {
+            HttpDashFragmentCount = fragmentCount
+        };
     }
 
     private static async Task<string?> WriteCookieFileAsync(

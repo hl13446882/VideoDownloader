@@ -55,6 +55,19 @@ public sealed class HttpMediaDownloader
         Func<Task>? checkpointAsync,
         CancellationToken ct)
     {
+        if (TryGetHttpDashFragmentCount(job) is int fragCount)
+        {
+            await DownloadHttpDashFragmentsAsync(job, fragCount, progress, checkpointAsync, ct);
+            return;
+        }
+
+        if (LooksLikeYoutubeHangUrl(job.Variant.SourceUrl))
+        {
+            throw new DownloadException(
+                ErrorCodes.ContextExpired,
+                "YouTube hang/DASH segment URL is missing fragment metadata; renew the media address.");
+        }
+
         var maxAttempts = Math.Max(1, _options.Download.RetryCount + 1);
         Exception? lastError = null;
         var lastPartBytes = PartLength(job);
@@ -320,6 +333,10 @@ public sealed class HttpMediaDownloader
         totalBytes = 0;
         var opts = _options.Download;
         if (opts.ParallelConnections <= 1)
+            return false;
+        if (TryGetHttpDashFragmentCount(job) is not null)
+            return false;
+        if (LooksLikeYoutubeHangUrl(job.Variant.SourceUrl))
             return false;
         if (!IsParallelRangeHost(job.Variant.SourceUrl))
             return false;
@@ -884,7 +901,9 @@ public sealed class HttpMediaDownloader
         if (job.TotalBytes is long expected && actualLength != expected)
         {
             if ((softMedia && actualLength >= 1024) ||
-                (tiktokSigned && actualLength >= 256L * 1024))
+                (tiktokSigned && actualLength >= 256L * 1024) ||
+                (job.Variant.Tracks.Any(t => t.HttpDashFragmentCount is > 1) &&
+                 actualLength >= MediaResourceSizeFilter.MinProgressiveVideoBytes))
             {
                 job.TotalBytes = actualLength;
             }
@@ -1113,5 +1132,212 @@ public sealed class HttpMediaDownloader
     {
         var delayMs = (int)Math.Min(10_000, 500 * Math.Pow(2, attempt - 1));
         await Task.Delay(delayMs, ct);
+    }
+
+    private static int? TryGetHttpDashFragmentCount(DownloadJob job)
+    {
+        foreach (var track in job.Variant.Tracks)
+        {
+            if (track.HttpDashFragmentCount is int n and > 1)
+                return n;
+        }
+
+        return null;
+    }
+
+    private static bool LooksLikeYoutubeHangUrl(Uri url)
+    {
+        var s = url.Query;
+        return s.Contains("hang=1", StringComparison.OrdinalIgnoreCase) ||
+               s.Contains("source=yt_live_broadcast", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task DownloadHttpDashFragmentsAsync(
+        DownloadJob job,
+        int fragmentCount,
+        IProgress<long>? progress,
+        Func<Task>? checkpointAsync,
+        CancellationToken ct)
+    {
+        var partPath = job.TargetPath + ".part";
+        var indexPath = partPath + ".fragidx";
+        Directory.CreateDirectory(Path.GetDirectoryName(partPath)!);
+        ClearChunkDir(partPath);
+
+        var startIndex = 0;
+        if (File.Exists(partPath) && File.Exists(indexPath) &&
+            int.TryParse(await File.ReadAllTextAsync(indexPath, ct), out var parsed) &&
+            parsed >= 0 &&
+            parsed < fragmentCount)
+        {
+            startIndex = parsed;
+            job.DownloadedBytes = new FileInfo(partPath).Length;
+        }
+        else
+        {
+            if (File.Exists(partPath))
+                File.Delete(partPath);
+            if (File.Exists(indexPath))
+                File.Delete(indexPath);
+            if (File.Exists(job.TargetPath))
+                File.Delete(job.TargetPath);
+            job.DownloadedBytes = 0;
+            startIndex = 0;
+        }
+
+        if (job.TotalBytes is null or <= 0)
+            job.TotalBytes = job.Variant.TotalContentLength;
+
+        _logger.LogInformation(
+            "HTTP DASH fragment download job={JobId} fragments={Count} start={Start} host={Host}",
+            job.Id,
+            fragmentCount,
+            startIndex,
+            job.Variant.SourceUrl.Host);
+
+        await using (var output = new FileStream(
+                         partPath,
+                         FileMode.OpenOrCreate,
+                         FileAccess.Write,
+                         FileShare.Read))
+        {
+            if (startIndex == 0)
+                output.SetLength(0);
+            else
+                output.Seek(0, SeekOrigin.End);
+
+            const int batchSize = 4;
+            var template = job.Variant.SourceUrl;
+            var resource = BuildResource(job.Variant, job);
+
+            for (var index = startIndex; index < fragmentCount; index += batchSize)
+            {
+                ct.ThrowIfCancellationRequested();
+                var batchCount = Math.Min(batchSize, fragmentCount - index);
+
+                var fetchTasks = Enumerable.Range(0, batchCount).Select(async offset =>
+                {
+                    var fragIndex = index + offset;
+                    var bytes = await DownloadOneDashFragmentAsync(
+                        resource,
+                        WithFragmentSequence(template, fragIndex),
+                        ct);
+                    return (Offset: offset, Bytes: bytes);
+                });
+
+                var results = await Task.WhenAll(fetchTasks);
+                foreach (var item in results.OrderBy(x => x.Offset))
+                {
+                    if (item.Bytes.Length == 0)
+                        throw new DownloadException(
+                            ErrorCodes.IncompleteDownload,
+                            $"Empty DASH fragment {index + item.Offset}.");
+
+                    await output.WriteAsync(item.Bytes, ct);
+                    job.DownloadedBytes += item.Bytes.Length;
+                    progress?.Report(job.DownloadedBytes);
+                }
+
+                var nextIndex = index + batchCount;
+                await File.WriteAllTextAsync(
+                    indexPath,
+                    nextIndex.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    ct);
+
+                if (checkpointAsync is not null && (nextIndex % 16 == 0 || nextIndex >= fragmentCount))
+                    await checkpointAsync();
+            }
+
+            await output.FlushAsync(ct);
+        }
+
+        TryDeleteFile(indexPath);
+        EnsureDownloadLooksComplete(job, job.DownloadedBytes);
+        await FinalizeDownloadAsync(job, partPath, ct);
+    }
+
+    private async Task<byte[]> DownloadOneDashFragmentAsync(
+        MediaResource resource,
+        Uri fragmentUrl,
+        CancellationToken ct)
+    {
+        Exception? last = null;
+        for (var attempt = 1; attempt <= 3; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                using var request = _requestFactory.Create(
+                    resource with { Url = fragmentUrl },
+                    HttpMethod.Get);
+                using var response = await _client.SendAsync(
+                    request,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    ct);
+
+                if ((int)response.StatusCode is >= 300 and < 400)
+                {
+                    var location = response.Headers.Location;
+                    var redirected = ResolveRedirectUrl(fragmentUrl, location);
+                    if (redirected is null)
+                        throw new DownloadException(ErrorCodes.IncompleteDownload, "Fragment redirect without Location.");
+                    fragmentUrl = redirected;
+                    continue;
+                }
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    if (IsRetriableStatus(response.StatusCode) && attempt < 3)
+                    {
+                        await DelayRetryAsync(attempt, ct);
+                        continue;
+                    }
+
+                    throw new DownloadException(
+                        response.StatusCode == HttpStatusCode.Forbidden ? ErrorCodes.Http403 : ErrorCodes.IncompleteDownload,
+                        $"Fragment HTTP {(int)response.StatusCode}");
+                }
+
+                return await response.Content.ReadAsByteArrayAsync(ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException && attempt < 3)
+            {
+                last = ex;
+                await DelayRetryAsync(attempt, ct);
+            }
+        }
+
+        throw last ?? new DownloadException(ErrorCodes.NetTimeout, "Fragment download failed.");
+    }
+
+    internal static Uri WithFragmentSequence(Uri url, int sequence)
+    {
+        var text = url.AbsoluteUri;
+        const string marker = "sq=";
+        var idx = text.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (idx >= 0)
+        {
+            var start = idx + marker.Length;
+            var end = start;
+            while (end < text.Length && char.IsDigit(text[end]))
+                end++;
+            return new Uri(string.Concat(text.AsSpan(0, start), sequence.ToString(System.Globalization.CultureInfo.InvariantCulture), text.AsSpan(end)));
+        }
+
+        var join = text.Contains('?', StringComparison.Ordinal) ? '&' : '?';
+        return new Uri(text + join + marker + sequence.ToString(System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+        catch
+        {
+            // ignore
+        }
     }
 }
