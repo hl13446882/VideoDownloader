@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup Condition="'$(MSBuildProjectName)' == 'VideoDownloader' or $(MSBuildProjectName.StartsWith('VideoDownloader.'))">
-    <Version>0.2.7-beta</Version>
+    <Version>0.2.8-beta</Version>
     <AssemblyTitle>Video Downloader</AssemblyTitle>
     <Product>Video Downloader</Product>
     <Company>VideoDownloader</Company>
