@@ -85,7 +85,18 @@ internal static class LocalLibraryPages
   </form>
 </dialog>
 <script>
-let mode = 'time';
+const MODE_KEY = 'vd-local-gallery-mode';
+function readSavedMode(){
+  try {
+    const s = localStorage.getItem(MODE_KEY);
+    if(s==='site' || s==='kind' || s==='time') return s;
+  } catch (_) {}
+  return 'time';
+}
+function saveMode(m){
+  try { localStorage.setItem(MODE_KEY, m); } catch (_) {}
+}
+let mode = readSavedMode();
 let editingId = null;
 const kinds = [
   { value:'', label:'未分类' },
@@ -103,10 +114,17 @@ document.getElementById('btnKind').onclick = () => setMode('kind');
 document.getElementById('editCancel').onclick = () => dlg.close();
 function setMode(m){
   mode = m;
+  saveMode(mode);
   document.getElementById('btnTime').classList.toggle('active', mode==='time');
   document.getElementById('btnSite').classList.toggle('active', mode==='site');
   document.getElementById('btnKind').classList.toggle('active', mode==='kind');
   load();
+}
+function playHref(item){
+  const base = item.playUrl || '';
+  if(mode==='site' || mode==='kind')
+    return base + (base.includes('?') ? '&' : '?') + 'group=' + encodeURIComponent(mode);
+  return base;
 }
 function esc(s){ return String(s??'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function kindOptions(selected){
@@ -116,7 +134,7 @@ function card(item){
   const meta = item.metaSuffix || '';
   const ext = item.extension || '';
   return `<article class="card" data-id="${esc(item.id)}">
-    <a class="cover" href="${esc(item.playUrl)}" title="播放">
+    <a class="cover" href="${esc(playHref(item))}" title="播放">
       <img src="${esc(item.thumbUrl)}" alt="" loading="lazy" decoding="async" onerror="this.style.opacity=.25"/>
     </a>
     <div class="meta">
@@ -204,6 +222,9 @@ async function load(){
   }
   bindCardEvents(root);
 }
+document.getElementById('btnTime').classList.toggle('active', mode==='time');
+document.getElementById('btnSite').classList.toggle('active', mode==='site');
+document.getElementById('btnKind').classList.toggle('active', mode==='kind');
 load();
 </script>
 </body>
@@ -293,11 +314,56 @@ let index = -1;
 let wheelLock = 0;
 let loadToken = 0;
 let hostFs = false;
+const MODE_KEY = 'vd-local-gallery-mode';
 const norm = id => String(id||'').replace(/-/g,'').toLowerCase();
 const video = document.getElementById('player');
 
 function idFromPath(pathname){
-  return norm((pathname||location.pathname).split('/').filter(Boolean).pop());
+  const last = (pathname||location.pathname).split('/').filter(Boolean).pop() || '';
+  return norm(last.split('?')[0]);
+}
+
+function itemId(item){
+  if(!item) return '';
+  if(item.id) return norm(item.id);
+  const last = String(item.playUrl||'').split('/').pop() || '';
+  return norm(last.split('?')[0]);
+}
+
+function galleryMode(){
+  const q = new URLSearchParams(location.search).get('group');
+  if(q==='site' || q==='kind') return q;
+  if(q==='time') return 'time';
+  try {
+    const s = localStorage.getItem(MODE_KEY);
+    if(s==='site' || s==='kind' || s==='time') return s;
+  } catch (_) {}
+  return 'time';
+}
+
+function videosApiUrl(mode){
+  if(mode==='site' || mode==='kind') return '/api/videos?group=' + encodeURIComponent(mode);
+  return '/api/videos';
+}
+
+function flattenPlaylist(data, mode){
+  if(mode==='site' || mode==='kind'){
+    if(!Array.isArray(data)) return [];
+    const list = [];
+    for(const g of data){
+      if(Array.isArray(g?.items)) list.push(...g.items);
+    }
+    return list;
+  }
+  return Array.isArray(data) ? data : [];
+}
+
+function playHref(item, mode){
+  const base = item?.playUrl || (item?.id ? ('/play/' + norm(item.id)) : '');
+  if(!base) return base;
+  if(mode==='site' || mode==='kind')
+    return base + (base.includes('?') ? '&' : '?') + 'group=' + encodeURIComponent(mode);
+  return base.split('?')[0];
 }
 
 function setMediaReady(ready){
@@ -383,11 +449,14 @@ async function loadById(id, { push } = { push: false }){
   const item = await itemRes.json();
   if(token !== loadToken) return;
   applyMeta(item);
-  index = playlist.findIndex(x => norm(x.id) === norm(item.id) || norm(x.playUrl?.split('/').pop()) === norm(item.id));
+  index = playlist.findIndex(x => itemId(x) === norm(item.id));
   syncButtons();
 
-  if(push && item.playUrl){
-    try { history.pushState({ id: norm(item.id) }, '', item.playUrl); } catch (_) {}
+  if(push){
+    const href = playHref(item, galleryMode());
+    if(href){
+      try { history.pushState({ id: norm(item.id) }, '', href); } catch (_) {}
+    }
   }
 
   const onReady = () => {
@@ -415,8 +484,8 @@ function go(delta){
   const next = index + delta;
   if(next < 0 || next >= playlist.length) return;
   const item = playlist[next];
-  if(!item?.id && !item?.playUrl) return;
-  const id = norm(item.id) || idFromPath(item.playUrl);
+  const id = itemId(item);
+  if(!id) return;
   index = next;
   syncButtons();
   loadById(id, { push: true });
@@ -424,11 +493,13 @@ function go(delta){
 
 async function boot(){
   setMediaReady(false);
-  const listRes = await fetch('/api/videos');
-  playlist = listRes.ok ? await listRes.json() : [];
-  if(!Array.isArray(playlist)) playlist = [];
+  const mode = galleryMode();
+  try { localStorage.setItem(MODE_KEY, mode); } catch (_) {}
+  const listRes = await fetch(videosApiUrl(mode));
+  const data = listRes.ok ? await listRes.json() : [];
+  playlist = flattenPlaylist(data, mode);
   const id = idFromPath(location.pathname);
-  index = playlist.findIndex(x => norm(x.id) === id || norm(x.playUrl?.split('/').pop()) === id);
+  index = playlist.findIndex(x => itemId(x) === id);
   syncButtons();
   await loadById(id, { push: false });
 }
@@ -436,6 +507,10 @@ async function boot(){
 document.getElementById('btnPrev').onclick = () => go(-1);
 document.getElementById('btnNext').onclick = () => go(1);
 document.getElementById('btnFs').onclick = () => toggleFullscreen();
+
+video.addEventListener('ended', () => {
+  if(index >= 0 && index < playlist.length - 1) go(1);
+});
 
 video.addEventListener('dblclick', e => {
   e.preventDefault();
@@ -461,7 +536,7 @@ window.addEventListener('wheel', e => {
 
 window.addEventListener('popstate', () => {
   const id = idFromPath(location.pathname);
-  index = playlist.findIndex(x => norm(x.id) === id || norm(x.playUrl?.split('/').pop()) === id);
+  index = playlist.findIndex(x => itemId(x) === id);
   loadById(id, { push: false });
 });
 
