@@ -624,7 +624,7 @@ public sealed partial class MainViewModel : ObservableObject
     private string DefaultHomeUrl =>
         !string.IsNullOrWhiteSpace(_localLibrary.GalleryUrl)
             ? _localLibrary.GalleryUrl
-            : $"http://127.0.0.1:{LocalLibraryHost.PreferredPort}/";
+            : $"http://127.0.0.1:{LocalLibraryHost.PreferredPort}/?group=time";
 
     [RelayCommand]
     private async Task GoLocalLibraryAsync()
