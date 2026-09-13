@@ -99,37 +99,113 @@ setInterval(() => { if(document.visibilityState==='visible') load(); }, 15000);
   body { margin:0; font-family:"Segoe UI",system-ui,sans-serif; background:var(--bg); color:var(--fg); }
   header { display:flex; gap:12px; align-items:center; padding:12px 16px; border-bottom:1px solid #334155; }
   a { color:var(--accent); text-decoration:none; }
-  .wrap { max-width:1100px; margin:0 auto; padding:16px; }
-  video { width:100%; max-height:75vh; background:#000; border-radius:10px; }
+  .nav-hint { margin-left:auto; color:var(--muted); font-size:12px; }
+  .wrap { max-width:1100px; margin:0 auto; padding:16px; position:relative; }
+  .stage { position:relative; }
+  video { width:100%; max-height:75vh; background:#000; border-radius:10px; display:block; }
+  .arrow {
+    position:absolute; top:50%; transform:translateY(-50%);
+    width:44px; height:44px; border:0; border-radius:999px;
+    background:rgba(15,23,42,.72); color:var(--fg); font-size:22px; cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+    z-index:2;
+  }
+  .arrow:hover { background:rgba(56,189,248,.9); color:#0f172a; }
+  .arrow:disabled { opacity:.25; cursor:default; }
+  .arrow.prev { left:10px; }
+  .arrow.next { right:10px; }
   .meta { margin-top:12px; display:flex; flex-direction:column; gap:6px; }
   .time { color:var(--muted); font-size:13px; }
   .name { font-weight:600; }
   .caption { color:#cbd5e1; white-space:pre-wrap; }
+  .pos { color:var(--muted); font-size:12px; margin-top:4px; }
 </style>
 </head>
 <body>
-<header><a href="/">← 本地视频</a><strong id="title">播放</strong></header>
+<header>
+  <a href="/">← 本地视频</a>
+  <strong id="title">播放</strong>
+  <span class="nav-hint">滚轮或 ← → 切换</span>
+</header>
 <div class="wrap">
-  <video id="player" controls autoplay playsinline></video>
+  <div class="stage" id="stage">
+    <button type="button" class="arrow prev" id="btnPrev" title="上一条" aria-label="上一条">‹</button>
+    <video id="player" controls autoplay playsinline></video>
+    <button type="button" class="arrow next" id="btnNext" title="下一条" aria-label="下一条">›</button>
+  </div>
   <div class="meta">
     <div class="time" id="time"></div>
     <div class="name" id="name"></div>
     <div class="caption" id="caption"></div>
+    <div class="pos" id="pos"></div>
   </div>
 </div>
 <script>
-const id = location.pathname.split('/').filter(Boolean).pop();
+let playlist = [];
+let index = -1;
+let wheelLock = 0;
+const norm = id => String(id||'').replace(/-/g,'').toLowerCase();
+const currentId = norm(location.pathname.split('/').filter(Boolean).pop());
+
+function go(delta){
+  if(index < 0 || !playlist.length) return;
+  const next = index + delta;
+  if(next < 0 || next >= playlist.length) return;
+  const item = playlist[next];
+  if(!item?.playUrl) return;
+  location.href = item.playUrl;
+}
+
+function syncButtons(){
+  document.getElementById('btnPrev').disabled = index <= 0;
+  document.getElementById('btnNext').disabled = index < 0 || index >= playlist.length - 1;
+  if(index >= 0)
+    document.getElementById('pos').textContent = (index+1) + ' / ' + playlist.length;
+}
+
 async function boot(){
-  const res = await fetch('/api/item?id='+id);
-  if(!res.ok){ document.getElementById('name').textContent='文件不存在或未完成'; return; }
-  const item = await res.json();
+  const [itemRes, listRes] = await Promise.all([
+    fetch('/api/item?id='+currentId),
+    fetch('/api/videos')
+  ]);
+  if(!itemRes.ok){
+    document.getElementById('name').textContent='文件不存在或未完成';
+    syncButtons();
+    return;
+  }
+  const item = await itemRes.json();
   document.getElementById('title').textContent = item.fileName || '播放';
   document.getElementById('time').textContent = item.downloadedAtText || '';
   document.getElementById('name').textContent = item.fileName || '';
   document.getElementById('caption').textContent = item.caption || '';
   const v = document.getElementById('player');
   v.src = item.streamUrl;
+
+  playlist = listRes.ok ? await listRes.json() : [];
+  if(!Array.isArray(playlist)) playlist = [];
+  index = playlist.findIndex(x => norm(x.id) === currentId || norm(x.playUrl?.split('/').pop()) === currentId);
+  syncButtons();
 }
+
+document.getElementById('btnPrev').onclick = () => go(-1);
+document.getElementById('btnNext').onclick = () => go(1);
+
+document.addEventListener('keydown', e => {
+  if(e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+  if(e.key === 'ArrowLeft' || e.key === 'ArrowUp'){ e.preventDefault(); go(-1); }
+  if(e.key === 'ArrowRight' || e.key === 'ArrowDown'){ e.preventDefault(); go(1); }
+});
+
+// Wheel: down/next, up/previous. Ignore while interacting with native scrubber heavily by debounce.
+window.addEventListener('wheel', e => {
+  const now = Date.now();
+  if(now < wheelLock) return;
+  if(Math.abs(e.deltaY) < 20) return;
+  wheelLock = now + 450;
+  e.preventDefault();
+  go(e.deltaY > 0 ? 1 : -1);
+}, { passive: false });
+
 boot();
 </script>
 </body>
