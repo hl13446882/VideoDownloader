@@ -31,6 +31,7 @@ internal static class LocalLibraryPages
   .meta { padding:10px 12px 12px; display:flex; flex-direction:column; gap:4px; min-height:96px; }
   .row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
   .time { color:var(--muted); font-size:12px; line-height:1.2; }
+  .edited { color:#64748b; font-size:11px; }
   button.edit { background:transparent; border:0; color:var(--accent); font-size:12px; line-height:1.2; padding:0; cursor:pointer; }
   button.edit:hover { text-decoration:underline; }
   select.kind { background:#0b1220; color:var(--fg); border:1px solid #475569; border-radius:4px; font-size:12px; line-height:1.2; padding:1px 4px; max-width:7.5em; }
@@ -124,6 +125,7 @@ function card(item){
         <button type="button" class="edit" data-edit="${esc(item.id)}">编辑</button>
         <select class="kind" data-kind="${esc(item.id)}" title="视频类型">${kindOptions(item.videoKind)}</select>
       </div>
+      ${item.editedAtText ? `<div class="edited">编辑于 ${esc(item.editedAtText)}</div>` : ''}
       <div class="name">${esc(item.titleHead)}<span class="meta-sfx">${esc(meta)}${esc(ext)}</span></div>
       <div class="caption">${esc(item.caption)}</div>
     </div>

@@ -434,6 +434,7 @@ public sealed class LocalLibraryHost : IAsyncDisposable
                 titleHead = stem;
             var caption = string.IsNullOrWhiteSpace(job.Caption) ? job.DisplayName : job.Caption!;
             var kind = LibraryVideoKinds.Normalize(job.VideoKind);
+            var downloadedAt = job.CompletedAt ?? job.UpdatedAt;
             list.Add(new LibraryItem(
                 job.Id,
                 fileName,
@@ -443,7 +444,8 @@ public sealed class LocalLibraryHost : IAsyncDisposable
                 caption,
                 kind,
                 LibraryVideoKinds.LabelOf(kind),
-                job.UpdatedAt,
+                downloadedAt,
+                job.EditedAt,
                 DownloadSiteFolder.Resolve(job.PageUrl),
                 $"/api/thumb/{job.Id:N}",
                 $"/api/stream/{job.Id:N}",
@@ -509,6 +511,7 @@ public sealed class LocalLibraryHost : IAsyncDisposable
         string VideoKind,
         string VideoKindLabel,
         DateTimeOffset DownloadedAt,
+        DateTimeOffset? EditedAt,
         string SiteGroup,
         string ThumbUrl,
         string StreamUrl,
@@ -516,5 +519,8 @@ public sealed class LocalLibraryHost : IAsyncDisposable
     {
         public string DownloadedAtText =>
             DownloadedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+
+        public string? EditedAtText =>
+            EditedAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
     }
 }

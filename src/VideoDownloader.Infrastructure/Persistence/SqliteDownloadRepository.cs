@@ -51,6 +51,15 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
         await TryAddColumnAsync(conn, "expected_total_bytes", "INTEGER NULL");
         await TryAddColumnAsync(conn, "content_prefix_hash", "TEXT NULL");
         await TryAddColumnAsync(conn, "video_kind", "TEXT NULL");
+        await TryAddColumnAsync(conn, "completed_at", "TEXT NULL");
+        await TryAddColumnAsync(conn, "edited_at", "TEXT NULL");
+        // One-time backfill: treat updated_at as completion time for already-finished rows.
+        await conn.ExecuteAsync("""
+            UPDATE download_jobs
+            SET completed_at = updated_at
+            WHERE status = @Completed
+              AND (completed_at IS NULL OR completed_at = '')
+            """, new { Completed = (int)DownloadStatus.Completed });
     }
 
     private static async Task TryAddColumnAsync(SqliteConnection conn, string name, string definition)
@@ -79,14 +88,14 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
                 downloaded_bytes, total_bytes, etag, last_modified, context_version,
                 request_context_meta_json, request_context_secret, page_url, last_error_code,
                 caption, duration_sec, expected_total_bytes, content_prefix_hash,
-                video_kind,
+                video_kind, completed_at, edited_at,
                 created_at, updated_at)
             VALUES (
                 @Id, @DisplayName, @SourceUrl, @TargetPath, @MediaFamily, @Status,
                 @DownloadedBytes, @TotalBytes, @ETag, @LastModified, @ContextVersion,
                 @MetaJson, @Secret, @PageUrl, @LastErrorCode,
                 @Caption, @DurationSec, @ExpectedTotalBytes, @ContentPrefixHash,
-                @VideoKind,
+                @VideoKind, @CompletedAt, @EditedAt,
                 @CreatedAt, @UpdatedAt)
             ON CONFLICT(id) DO UPDATE SET
                 display_name = excluded.display_name,
@@ -108,6 +117,8 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
                 expected_total_bytes = excluded.expected_total_bytes,
                 content_prefix_hash = excluded.content_prefix_hash,
                 video_kind = excluded.video_kind,
+                completed_at = excluded.completed_at,
+                edited_at = excluded.edited_at,
                 updated_at = excluded.updated_at;
             """;
 
@@ -133,6 +144,8 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
             job.ExpectedTotalBytes,
             job.ContentPrefixHash,
             VideoKind = job.VideoKind,
+            CompletedAt = job.CompletedAt?.ToString("O"),
+            EditedAt = job.EditedAt?.ToString("O"),
             CreatedAt = job.CreatedAt.ToString("O"),
             UpdatedAt = job.UpdatedAt.ToString("O")
         });
@@ -195,9 +208,16 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
             LastModified = row.last_modified,
             LastErrorCode = row.last_error_code,
             CreatedAt = DateTimeOffset.Parse(row.created_at),
-            UpdatedAt = DateTimeOffset.Parse(row.updated_at)
+            UpdatedAt = DateTimeOffset.Parse(row.updated_at),
+            CompletedAt = ParseOptionalOffset(row.completed_at),
+            EditedAt = ParseOptionalOffset(row.edited_at)
         };
     }
+
+    private static DateTimeOffset? ParseOptionalOffset(string? value) =>
+        !string.IsNullOrWhiteSpace(value) && DateTimeOffset.TryParse(value, out var parsed)
+            ? parsed
+            : null;
 
     private static MediaFamily ResolveMediaFamily(string? container) =>
         container?.ToLowerInvariant() switch
@@ -229,6 +249,8 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
         public long? expected_total_bytes { get; set; }
         public string? content_prefix_hash { get; set; }
         public string? video_kind { get; set; }
+        public string? completed_at { get; set; }
+        public string? edited_at { get; set; }
         public string created_at { get; set; } = string.Empty;
         public string updated_at { get; set; } = string.Empty;
     }

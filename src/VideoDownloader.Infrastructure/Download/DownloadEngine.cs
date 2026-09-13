@@ -275,7 +275,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
 
             job.DisplayName = stem;
             job.TargetPath = targetPath;
-            job.UpdatedAt = DateTimeOffset.UtcNow;
+            job.EditedAt = DateTimeOffset.UtcNow;
         }
 
         await _repository.SaveAsync(job, ct);
@@ -320,7 +320,10 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         }
 
         if (dirty)
+        {
+            job.EditedAt = DateTimeOffset.UtcNow;
             await _repository.SaveAsync(job, ct);
+        }
     }
 
     private static void TryMoveFile(string source, string destination)
@@ -485,6 +488,9 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
 
             if (job.Status == DownloadStatus.Completed && File.Exists(job.TargetPath))
                 UpdateCompletedFileSize(job);
+
+            if (job.Status == DownloadStatus.Completed && job.CompletedAt is null)
+                job.CompletedAt = job.UpdatedAt;
 
             _jobs[job.Id] = job;
             await _repository.SaveAsync(job, ct);

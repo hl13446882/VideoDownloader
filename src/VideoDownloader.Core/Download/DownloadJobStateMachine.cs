@@ -45,5 +45,7 @@ public sealed class DownloadJobStateMachine : IDownloadJobStateMachine
         // Queue order uses the first UpdatedAt; do not refresh it on Preparing/Downloading/Muxing/Pause.
         if (target is DownloadStatus.Completed or DownloadStatus.Failed or DownloadStatus.Cancelled)
             job.UpdatedAt = DateTimeOffset.UtcNow;
+        if (target == DownloadStatus.Completed)
+            job.CompletedAt ??= DateTimeOffset.UtcNow;
     }
 }

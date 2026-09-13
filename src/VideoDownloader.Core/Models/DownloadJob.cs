@@ -34,5 +34,12 @@ public sealed class DownloadJob
     public string? LastModified { get; internal set; }
     public string? LastErrorCode { get; internal set; }
     public DateTimeOffset UpdatedAt { get; internal set; }
+
+    /// <summary>When the job first reached <see cref="DownloadStatus.Completed"/>; used for library time sort.</summary>
+    public DateTimeOffset? CompletedAt { get; set; }
+
+    /// <summary>Last library/queue rename or metadata edit; does not affect download-time sort.</summary>
+    public DateTimeOffset? EditedAt { get; set; }
+
     public DateTimeOffset CreatedAt { get; init; }
 }
