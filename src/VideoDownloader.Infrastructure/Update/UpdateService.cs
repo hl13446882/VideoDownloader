@@ -74,8 +74,9 @@ public sealed class UpdateService
 
     public async Task<UpdateCheckResult> CheckAndPrepareAsync(CancellationToken ct = default)
     {
-        if (!await _gate.WaitAsync(0, ct))
-            return new UpdateCheckResult(UpdateCheckOutcome.Failed, Message: "busy");
+        // Queue behind any in-flight check (e.g. startup auto-check vs Settings "检查更新")
+        // instead of failing immediately with "busy".
+        await _gate.WaitAsync(ct);
 
         try
         {
