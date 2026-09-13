@@ -1937,25 +1937,37 @@ public sealed partial class MainViewModel : ObservableObject
             while (!token.IsCancellationRequested && IsAutoMode)
             {
                 var deadline = DateTime.UtcNow.AddMinutes(_autoIdleMinutes);
-                var enqueued = await TryAutoEnqueueUntilAsync(deadline, token);
+                var jobId = await TryAutoEnqueueUntilAsync(deadline, token);
                 if (token.IsCancellationRequested || !IsAutoMode)
                     break;
-                if (!enqueued)
+                if (jobId is null)
                 {
-                    await Application.Current.Dispatcher.InvokeAsync(() =>
-                    {
-                        IsAutoMode = false;
-                        _autoCts?.Dispose();
-                        _autoCts = null;
-                        SetStatusKey("status.autoStoppedTimeout");
-                    });
+                    await EndAutoModeTimeoutAsync();
                     break;
                 }
 
+                var started = await WaitUntilJobStartedAsync(jobId.Value, deadline, token);
+                if (token.IsCancellationRequested || !IsAutoMode)
+                    break;
+                if (!started)
+                {
+                    await EndAutoModeTimeoutAsync();
+                    break;
+                }
+
+                // Fresh idle window for feed advance after download has actually started.
+                deadline = DateTime.UtcNow.AddMinutes(_autoIdleMinutes);
                 var beforeIdentity = CaptureAutoIdentity();
                 _autoSwitchFromIdentity = beforeIdentity;
                 await SwitchToNextVideoAsync();
-                await WaitForContentSwitchAsync(beforeIdentity, deadline, token);
+                var switched = await WaitForContentSwitchAsync(beforeIdentity, deadline, token);
+                if (token.IsCancellationRequested || !IsAutoMode)
+                    break;
+                if (!switched)
+                {
+                    await EndAutoModeTimeoutAsync();
+                    break;
+                }
             }
         }
         catch (OperationCanceledException)
@@ -1987,15 +1999,27 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
-    private async Task<bool> TryAutoEnqueueUntilAsync(DateTime deadlineUtc, CancellationToken token)
+    private Task EndAutoModeTimeoutAsync() =>
+        Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            IsAutoMode = false;
+            _autoCts?.Dispose();
+            _autoCts = null;
+            SetStatusKey("status.autoStoppedTimeout");
+        }).Task;
+
+    /// <summary>
+    /// Returns the enqueued job id once a downloadable result is queued under the concurrency gate.
+    /// </summary>
+    private async Task<Guid?> TryAutoEnqueueUntilAsync(DateTime deadlineUtc, CancellationToken token)
     {
-        var triggeredProbe = false;
+        var lastProbeAt = DateTime.MinValue;
         while (!token.IsCancellationRequested && DateTime.UtcNow < deadlineUtc)
         {
             var remainingMin = Math.Max(1, (int)Math.Ceiling((deadlineUtc - DateTime.UtcNow).TotalMinutes));
             await Application.Current.Dispatcher.InvokeAsync(() =>
             {
-                if (CountRunningDownloads() >= GetMaxConcurrent())
+                if (CountInFlightDownloads() >= GetMaxConcurrent())
                     SetStatusKey("status.autoWaitingSlot", remainingMin);
                 else
                     SetStatusKey("status.autoRunning", remainingMin);
@@ -2005,13 +2029,14 @@ public sealed partial class MainViewModel : ObservableObject
             await Application.Current.Dispatcher.InvokeAsync(() =>
             {
                 candidate = FindAutoDownloadCandidate();
-                if (!triggeredProbe && candidate is null)
+                if (candidate is null &&
+                    DateTime.UtcNow - lastProbeAt >= TimeSpan.FromSeconds(8))
                 {
                     var pageUrl = SelectedTab?.Host.CurrentPageUrl
                                   ?? (Uri.TryCreate(AddressBar, UriKind.Absolute, out var uri) ? uri : null);
                     if (pageUrl is not null && !LocalLibraryHost.IsLocalLibraryHost(pageUrl))
                     {
-                        triggeredProbe = true;
+                        lastProbeAt = DateTime.UtcNow;
                         Refresh();
                     }
                 }
@@ -2020,7 +2045,7 @@ public sealed partial class MainViewModel : ObservableObject
             if (candidate is not null)
             {
                 while (!token.IsCancellationRequested && DateTime.UtcNow < deadlineUtc &&
-                       CountRunningDownloads() >= GetMaxConcurrent())
+                       CountInFlightDownloads() >= GetMaxConcurrent())
                 {
                     remainingMin = Math.Max(1, (int)Math.Ceiling((deadlineUtc - DateTime.UtcNow).TotalMinutes));
                     await Application.Current.Dispatcher.InvokeAsync(() =>
@@ -2031,38 +2056,61 @@ public sealed partial class MainViewModel : ObservableObject
                 if (token.IsCancellationRequested || DateTime.UtcNow >= deadlineUtc)
                     break;
 
-                var ok = await Application.Current.Dispatcher.InvokeAsync(async () =>
+                var jobId = await Application.Current.Dispatcher.InvokeAsync(async () =>
                 {
                     var current = FindAutoDownloadCandidate();
                     if (current?.SelectedVariant?.Variant is null)
-                        return false;
+                        return (Guid?)null;
                     return await TryStartDownloadQuietAsync(current.Video, current.SelectedVariant.Variant);
                 }).Task.Unwrap();
 
-                if (ok)
-                    return true;
+                if (jobId is Guid id)
+                    return id;
             }
 
             await Task.Delay(500, token);
         }
 
+        return null;
+    }
+
+    private async Task<bool> WaitUntilJobStartedAsync(Guid jobId, DateTime deadlineUtc, CancellationToken token)
+    {
+        while (!token.IsCancellationRequested && DateTime.UtcNow < deadlineUtc)
+        {
+            var job = _downloadEngine.GetActiveJobs().FirstOrDefault(j => j.Id == jobId);
+            if (job is null)
+                return false;
+            if (job.Status is DownloadStatus.Preparing or DownloadStatus.Downloading or DownloadStatus.Muxing)
+                return true;
+            if (job.Status is DownloadStatus.Failed or DownloadStatus.Cancelled or DownloadStatus.Completed)
+                return false;
+
+            var remainingMin = Math.Max(1, (int)Math.Ceiling((deadlineUtc - DateTime.UtcNow).TotalMinutes));
+            await Application.Current.Dispatcher.InvokeAsync(() =>
+                SetStatusKey("status.autoWaitingSlot", remainingMin));
+            await Task.Delay(200, token);
+        }
+
         return false;
     }
 
-    private async Task WaitForContentSwitchAsync(string? beforeIdentity, DateTime deadlineUtc, CancellationToken token)
+    private async Task<bool> WaitForContentSwitchAsync(string? beforeIdentity, DateTime deadlineUtc, CancellationToken token)
     {
         while (!token.IsCancellationRequested && DateTime.UtcNow < deadlineUtc)
         {
             var now = CaptureAutoIdentity();
             if (!string.IsNullOrEmpty(now) &&
                 !string.Equals(now, beforeIdentity, StringComparison.Ordinal))
-                return;
+                return true;
 
             var remainingMin = Math.Max(1, (int)Math.Ceiling((deadlineUtc - DateTime.UtcNow).TotalMinutes));
             await Application.Current.Dispatcher.InvokeAsync(() =>
                 SetStatusKey("status.autoRunning", remainingMin));
             await Task.Delay(400, token);
         }
+
+        return false;
     }
 
     private string? CaptureAutoIdentity()
@@ -2091,20 +2139,24 @@ public sealed partial class MainViewModel : ObservableObject
     private int GetMaxConcurrent() =>
         Math.Clamp(_options.Download.MaxConcurrentDownloads, 1, 5);
 
-    private int CountRunningDownloads() =>
+    /// <summary>Queued + running jobs that occupy auto-mode capacity (matches “进行中队列”).</summary>
+    private int CountInFlightDownloads() =>
         _downloadEngine.GetActiveJobs().Count(j =>
-            j.Status is DownloadStatus.Preparing or DownloadStatus.Downloading or DownloadStatus.Muxing);
+            j.Status is DownloadStatus.Pending
+                or DownloadStatus.Preparing
+                or DownloadStatus.Downloading
+                or DownloadStatus.Muxing);
 
     public async Task StartDownloadAsync(DetectedVideo video, MediaVariant variant) =>
         await TryStartDownloadQuietAsync(video, variant, showErrors: true);
 
-    private async Task<bool> TryStartDownloadQuietAsync(
+    private async Task<Guid?> TryStartDownloadQuietAsync(
         DetectedVideo video,
         MediaVariant variant,
         bool showErrors = false)
     {
         if (video.IsDrmProtected)
-            return false;
+            return null;
 
         var name = DownloadFileNameBuilder.Build(video, variant);
         try
@@ -2123,7 +2175,7 @@ public sealed partial class MainViewModel : ObservableObject
             if (created is not null)
                 SelectOnlyQueueJob(created);
             SetStatusKey("status.enqueued", name);
-            return true;
+            return id;
         }
         catch (DownloadException ex)
         {
@@ -2133,7 +2185,7 @@ public sealed partial class MainViewModel : ObservableObject
             SetStatusKey("status.enqueueFailed", reason);
             if (showErrors)
                 MessageBox.Show(reason, _loc.DialogTitle, MessageBoxButton.OK, MessageBoxImage.Warning);
-            return false;
+            return null;
         }
     }
 
