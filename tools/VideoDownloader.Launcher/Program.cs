@@ -18,6 +18,7 @@ namespace VideoDownloader.Launcher;
 internal static class Program
 {
     private const string AppRelativePath = @"app\VideoDownloader.exe";
+    private const string DeferredLauncherFileName = "VideoDownloader.exe.new";
     private const string RequiredMajor = "10";
     private const string RuntimeInstallerUrl =
         "https://aka.ms/dotnet/10.0/windowsdesktop-runtime-win-x64.exe";
@@ -47,6 +48,9 @@ internal static class Program
         try
         {
             var rootDir = AppDomain.CurrentDomain.BaseDirectory;
+            // Leftover from a prior self-replace that never finished (Windows can't overwrite a running exe).
+            CleanupStaleDeferredLauncher(rootDir);
+
             var applyUpdate = args != null && args.Any(a =>
                 string.Equals(a, ApplyUpdateArg, StringComparison.OrdinalIgnoreCase));
 
@@ -258,7 +262,7 @@ internal static class Program
 
                 if (deferredLauncherSource != null)
                 {
-                    var newPath = Path.Combine(installRoot, "VideoDownloader.exe.new");
+                    var newPath = Path.Combine(installRoot, DeferredLauncherFileName);
                     File.Copy(deferredLauncherSource, newPath, true);
                     ScheduleLauncherReplace(installRoot, newPath);
                 }
@@ -302,6 +306,24 @@ internal static class Program
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
             return true; // continue launching old build
+        }
+    }
+
+    /// <summary>
+    /// Removes a leftover launcher sidecar from a previous update. Safe on every cold start:
+    /// this run's deferred replace (if any) writes the file later, after this cleanup.
+    /// </summary>
+    private static void CleanupStaleDeferredLauncher(string installRoot)
+    {
+        try
+        {
+            var path = Path.Combine(installRoot, DeferredLauncherFileName);
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+        catch
+        {
+            // Still locked or no permission — leave for a later start.
         }
     }
 
