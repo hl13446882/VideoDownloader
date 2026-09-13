@@ -63,9 +63,11 @@ public sealed class HttpMediaDownloader
 
         if (LooksLikeYoutubeHangUrl(job.Variant.SourceUrl))
         {
+            // Force the existing HTTP_403 recovery path to re-resolve via yt-dlp so
+            // HttpDashFragmentCount is attached; do not leave the job permanently failed.
             throw new DownloadException(
-                ErrorCodes.ContextExpired,
-                "YouTube hang/DASH segment URL is missing fragment metadata; renew the media address.");
+                ErrorCodes.Http403,
+                "YouTube hang/DASH segment URL is missing fragment metadata; renewing.");
         }
 
         var maxAttempts = Math.Max(1, _options.Download.RetryCount + 1);

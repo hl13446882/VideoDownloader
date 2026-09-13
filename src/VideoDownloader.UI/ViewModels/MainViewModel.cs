@@ -340,7 +340,7 @@ public sealed partial class BrowserTabViewModel : ObservableObject
     private string _title = "New Tab";
 
     [ObservableProperty]
-    private string _address = "https://www.bing.com/";
+    private string _address = $"http://127.0.0.1:{LocalLibraryHost.PreferredPort}/";
 
     [ObservableProperty]
     private bool _isInitialized;
@@ -393,7 +393,7 @@ public sealed partial class MainViewModel : ObservableObject
     public ObservableCollection<AddressPreset> AddressPresets { get; } = new();
 
     [ObservableProperty]
-    private string _addressBar = "https://www.bing.com/";
+    private string _addressBar = $"http://127.0.0.1:{LocalLibraryHost.PreferredPort}/";
 
     [ObservableProperty]
     private string _statusMessage = string.Empty;
@@ -416,6 +416,16 @@ public sealed partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     private bool _canGoForward;
+
+    /// <summary>Hidden on local library pages so the WebView can use full width.</summary>
+    [ObservableProperty]
+    private bool _isSidePanelVisible = true;
+
+    public Thickness BrowserPaneMargin =>
+        IsSidePanelVisible ? new Thickness(0, 0, 8, 0) : new Thickness(0);
+
+    partial void OnIsSidePanelVisibleChanged(bool value) =>
+        OnPropertyChanged(nameof(BrowserPaneMargin));
 
     partial void OnStatusMessageChanged(string value) => OnPropertyChanged(nameof(HasStatusMessage));
 
@@ -567,7 +577,19 @@ public sealed partial class MainViewModel : ObservableObject
     {
         RefreshDownloadJobs();
         ClearStatus();
-        await AddTabAsync("https://www.bing.com/", select: true);
+        await AddTabAsync(DefaultHomeUrl, select: true);
+    }
+
+    private string DefaultHomeUrl =>
+        !string.IsNullOrWhiteSpace(_localLibrary.GalleryUrl)
+            ? _localLibrary.GalleryUrl
+            : $"http://127.0.0.1:{LocalLibraryHost.PreferredPort}/";
+
+    [RelayCommand]
+    private async Task GoLocalLibraryAsync()
+    {
+        AddressBar = DefaultHomeUrl;
+        await NavigateAsync();
     }
 
     public async Task AttachWebViewAsync(BrowserTabViewModel tab, WebView2 webView)
@@ -646,6 +668,7 @@ public sealed partial class MainViewModel : ObservableObject
         {
             CanGoBack = false;
             CanGoForward = false;
+            RefreshSidePanelVisibility(null);
             return;
         }
 
@@ -655,6 +678,7 @@ public sealed partial class MainViewModel : ObservableObject
         UpdateNavigationState(newValue);
         var page = newValue.Host.CurrentPageUrl
                    ?? (Uri.TryCreate(newValue.Address, UriKind.Absolute, out var uri) ? uri : null);
+        RefreshSidePanelVisibility(page);
         if (page is not null)
             RestartDetectionForPageChange(page, newValue.Title, mediaSessionKey: newValue.Host.CurrentMediaSessionKey);
         else
@@ -667,6 +691,14 @@ public sealed partial class MainViewModel : ObservableObject
         CanGoForward = tab?.Host.CanGoForward == true;
         GoBackCommand.NotifyCanExecuteChanged();
         GoForwardCommand.NotifyCanExecuteChanged();
+        var page = tab?.Host.CurrentPageUrl
+                   ?? (Uri.TryCreate(tab?.Address ?? AddressBar, UriKind.Absolute, out var uri) ? uri : null);
+        RefreshSidePanelVisibility(page);
+    }
+
+    private void RefreshSidePanelVisibility(Uri? pageUrl)
+    {
+        IsSidePanelVisible = pageUrl is null || !LocalLibraryHost.IsLocalLibraryHost(pageUrl);
     }
 
     private bool CanExecuteGoBack => CanGoBack;
@@ -737,7 +769,7 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand]
     private async Task AddTabAsync()
     {
-        await AddTabAsync("https://www.bing.com/", select: true);
+        await AddTabAsync(DefaultHomeUrl, select: true);
     }
 
     public async Task AddTabAsync(string url, bool select)
@@ -775,7 +807,7 @@ public sealed partial class MainViewModel : ObservableObject
 
         if (Tabs.Count == 0)
         {
-            await AddTabAsync("https://www.bing.com/", select: true);
+            await AddTabAsync(DefaultHomeUrl, select: true);
             return;
         }
 
@@ -811,6 +843,8 @@ public sealed partial class MainViewModel : ObservableObject
 
             if (LocalLibraryHost.IsLocalLibraryHost(pageUrl))
                 EnterLocalLibraryMode(pageUrl);
+            else
+                RefreshSidePanelVisibility(pageUrl);
 
             if (tab.IsInitialized)
                 await tab.Host.NavigateAsync(url);
@@ -924,6 +958,8 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
+        RefreshSidePanelVisibility(pageUrl);
+
         var enriched = EnrichPageUrlWithContentId(pageUrl, mediaSessionKey);
         StartPageDetectionSession(
             enriched,
@@ -949,6 +985,7 @@ public sealed partial class MainViewModel : ObservableObject
         DetectedVideos.Clear();
         _videoMap.Clear();
         SelectedDetectedVideo = null;
+        RefreshSidePanelVisibility(pageUrl);
     }
 
     /// <summary>
@@ -2342,6 +2379,7 @@ public sealed partial class MainViewModel : ObservableObject
                 return;
 
             AddressBar = e.PageUrl.AbsoluteUri;
+            RefreshSidePanelVisibility(e.PageUrl);
 
             // Soft document URL change (SPA) without NavigationStarting (modal_id etc.).
             var pageOnly = BuildPageIdentity(e.PageUrl);

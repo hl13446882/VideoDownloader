@@ -67,12 +67,14 @@ public sealed partial class LocalizationService : ObservableObject
         OnPropertyChanged(nameof(NavGo));
         OnPropertyChanged(nameof(NavProbe));
         OnPropertyChanged(nameof(NavNewTab));
+        OnPropertyChanged(nameof(NavLocal));
         OnPropertyChanged(nameof(NavSettings));
         OnPropertyChanged(nameof(TipBack));
         OnPropertyChanged(nameof(TipForward));
         OnPropertyChanged(nameof(TipGo));
         OnPropertyChanged(nameof(TipProbe));
         OnPropertyChanged(nameof(TipNewTab));
+        OnPropertyChanged(nameof(TipLocal));
         OnPropertyChanged(nameof(TipSettings));
         OnPropertyChanged(nameof(SideDetected));
         OnPropertyChanged(nameof(SideQueue));
@@ -120,12 +122,14 @@ public sealed partial class LocalizationService : ObservableObject
     public string NavGo => T("nav.go");
     public string NavProbe => T("nav.probe");
     public string NavNewTab => T("nav.newTab");
+    public string NavLocal => T("nav.local");
     public string NavSettings => T("nav.settings");
     public string TipBack => T("tip.back");
     public string TipForward => T("tip.forward");
     public string TipGo => T("tip.go");
     public string TipProbe => T("tip.probe");
     public string TipNewTab => T("tip.newTab");
+    public string TipLocal => T("tip.local");
     public string TipSettings => T("tip.settings");
     public string SideDetected => T("side.detected");
     public string SideQueue => T("side.queue");
@@ -174,12 +178,14 @@ public sealed partial class LocalizationService : ObservableObject
         ["nav.go"] = ("访问", "Go"),
         ["nav.probe"] = ("探测", "Probe"),
         ["nav.newTab"] = ("新标签", "New"),
+        ["nav.local"] = ("本地", "Local"),
         ["nav.settings"] = ("设置", "Settings"),
         ["tip.back"] = ("后退", "Go back"),
         ["tip.forward"] = ("前进", "Go forward"),
         ["tip.go"] = ("打开地址", "Open address"),
         ["tip.probe"] = ("重置全部探测状态并重新探测（不刷新网页）", "Reset all probe state and re-detect without reloading"),
         ["tip.newTab"] = ("新标签", "New tab"),
+        ["tip.local"] = ("打开本地视频库", "Open local video library"),
         ["tip.settings"] = ("设置", "Settings"),
         ["tip.language"] = ("切换到英文", "Switch to Chinese"),
         ["side.detected"] = ("已发现视频", "Detected videos"),
