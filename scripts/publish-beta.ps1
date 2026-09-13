@@ -62,10 +62,10 @@ $appSrc = Join-Path $appBuild 'VideoDownloader.exe'
 if (-not (Test-Path -LiteralPath $appSrc)) { throw 'Missing required publish artifact: VideoDownloader.exe' }
 Copy-Item -LiteralPath $appSrc -Destination (Join-Path $appDir 'VideoDownloader.exe') -Force
 
-$launcherSrc = Join-Path $launcherOut 'VideoDownloader.exe'
-if (-not (Test-Path -LiteralPath $launcherSrc)) { throw 'Missing launcher: VideoDownloader.exe' }
+$launcherSrc = Join-Path $launcherOut 'VideoBrowser.exe'
+if (-not (Test-Path -LiteralPath $launcherSrc)) { throw 'Missing launcher: VideoBrowser.exe' }
 # Root stays minimal: only the net48 launcher exe (no NuGet side-by-side DLLs).
-Copy-Item -LiteralPath $launcherSrc -Destination (Join-Path $package 'VideoDownloader.exe') -Force
+Copy-Item -LiteralPath $launcherSrc -Destination (Join-Path $package 'VideoBrowser.exe') -Force
 $launcherDlls = @(Get-ChildItem -LiteralPath $launcherOut -Filter '*.dll' -File -ErrorAction SilentlyContinue)
 if ($launcherDlls.Count -gt 0) {
   throw ("Launcher build must not emit NuGet DLLs next to the exe (found: " +
@@ -111,7 +111,7 @@ robocopy $package $target /MIR /R:0 /W:0 /NFL /NDL /NJH /NJS /nc /ns /np | Out-N
 $rc = $LASTEXITCODE
 if ($rc -ge 8) { throw "robocopy failed with code $rc" }
 
-Write-Host "Published: $target\VideoDownloader.exe"
+Write-Host "Published: $target\VideoBrowser.exe"
 
 # Upload differential update package to the licensing/web host.
 $updateScript = Join-Path $root 'scripts\publish-update-server.ps1'

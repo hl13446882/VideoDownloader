@@ -2,6 +2,7 @@
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows;
 using System.Windows.Threading;
 using Microsoft.Extensions.DependencyInjection;
@@ -68,6 +69,9 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        // Root launcher cannot overwrite itself; leftover sidecar is cleaned (or applied) here.
+        CleanupOrApplyDeferredLauncher();
+
         if (!TryAcquireInstanceMutex())
         {
             MessageBox.Show(
@@ -117,6 +121,76 @@ public partial class App : Application
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
             EmergencyExit(1);
+        }
+    }
+
+    /// <summary>
+    /// Install layout is &lt;root&gt;\app\VideoDownloader.exe. A failed launcher self-replace
+    /// leaves &lt;root&gt;\VideoBrowser.exe.new. Prefer finishing the replace; otherwise delete.
+    /// </summary>
+    private static void CleanupOrApplyDeferredLauncher()
+    {
+        try
+        {
+            var appDir = Path.GetFullPath(AppContext.BaseDirectory)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var installRoot = Path.GetDirectoryName(appDir);
+            if (string.IsNullOrWhiteSpace(installRoot))
+                return;
+
+            CleanupDeferredSidecar(installRoot, "VideoBrowser.exe", "VideoBrowser.exe.new");
+            // Legacy name from earlier builds.
+            CleanupDeferredSidecar(installRoot, "VideoDownloader.exe", "VideoDownloader.exe.new");
+            TryDeleteWithRetry(Path.Combine(appDir, "VideoBrowser.exe.new"));
+            TryDeleteWithRetry(Path.Combine(appDir, "VideoDownloader.exe.new"));
+        }
+        catch
+        {
+            // Best-effort only.
+        }
+    }
+
+    private static void CleanupDeferredSidecar(string installRoot, string launcherName, string deferredName)
+    {
+        var newPath = Path.Combine(installRoot, deferredName);
+        var target = Path.Combine(installRoot, launcherName);
+        if (!File.Exists(newPath))
+            return;
+
+        if (File.Exists(target))
+        {
+            for (var attempt = 0; attempt < 8; attempt++)
+            {
+                try
+                {
+                    File.Copy(newPath, target, overwrite: true);
+                    break;
+                }
+                catch
+                {
+                    Thread.Sleep(250);
+                }
+            }
+        }
+
+        TryDeleteWithRetry(newPath);
+    }
+
+    private static void TryDeleteWithRetry(string path)
+    {
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            try
+            {
+                if (!File.Exists(path))
+                    return;
+                File.Delete(path);
+                return;
+            }
+            catch
+            {
+                Thread.Sleep(250);
+            }
         }
     }
 

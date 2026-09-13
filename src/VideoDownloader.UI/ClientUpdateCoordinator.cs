@@ -234,7 +234,9 @@ internal static class ClientUpdateCoordinator
     private static void ApplyAndRestart()
     {
         var installRoot = UpdateService.InstallRoot;
-        var launcher = Path.Combine(installRoot, "VideoDownloader.exe");
+        var launcher = Path.Combine(installRoot, "VideoBrowser.exe");
+        if (!File.Exists(launcher))
+            launcher = Path.Combine(installRoot, "VideoDownloader.exe");
         if (!File.Exists(launcher))
         {
             MessageBox.Show(

@@ -18,7 +18,8 @@ namespace VideoDownloader.Launcher;
 internal static class Program
 {
     private const string AppRelativePath = @"app\VideoDownloader.exe";
-    private const string DeferredLauncherFileName = "VideoDownloader.exe.new";
+    private const string LauncherExeName = "VideoBrowser.exe";
+    private const string DeferredLauncherFileName = "VideoBrowser.exe.new";
     private const string RequiredMajor = "10";
     private const string RuntimeInstallerUrl =
         "https://aka.ms/dotnet/10.0/windowsdesktop-runtime-win-x64.exe";
@@ -237,7 +238,7 @@ internal static class Program
                 }
                 catch
                 {
-                    currentLauncherPath = Path.GetFullPath(Path.Combine(installRoot, "VideoDownloader.exe"));
+                    currentLauncherPath = Path.GetFullPath(Path.Combine(installRoot, LauncherExeName));
                 }
 
                 foreach (var file in Directory.EnumerateFiles(staging, "*", SearchOption.AllDirectories))
@@ -315,15 +316,23 @@ internal static class Program
     /// </summary>
     private static void CleanupStaleDeferredLauncher(string installRoot)
     {
-        try
+        foreach (var name in new[] { DeferredLauncherFileName, "VideoDownloader.exe.new" })
         {
-            var path = Path.Combine(installRoot, DeferredLauncherFileName);
-            if (File.Exists(path))
-                File.Delete(path);
-        }
-        catch
-        {
-            // Still locked or no permission — leave for a later start.
+            var path = Path.Combine(installRoot, name);
+            for (var attempt = 0; attempt < 8; attempt++)
+            {
+                try
+                {
+                    if (!File.Exists(path))
+                        break;
+                    File.Delete(path);
+                    break;
+                }
+                catch
+                {
+                    Thread.Sleep(250);
+                }
+            }
         }
     }
 
@@ -350,11 +359,21 @@ internal static class Program
         var bat = Path.Combine(
             Path.GetTempPath(),
             "vd-replace-launcher-" + Guid.NewGuid().ToString("N") + ".cmd");
-        var target = Path.Combine(installRoot, "VideoDownloader.exe");
+        var target = Path.Combine(installRoot, LauncherExeName);
+        // Retry move after this process exits; if still stuck, delete the sidecar so it does not linger.
         var content =
             "@echo off\r\n" +
+            "set \"SRC=" + newLauncherPath + "\"\r\n" +
+            "set \"DST=" + target + "\"\r\n" +
+            "set /a N=0\r\n" +
+            ":retry\r\n" +
             "ping 127.0.0.1 -n 2 >nul\r\n" +
-            "move /Y \"" + newLauncherPath + "\" \"" + target + "\" >nul\r\n" +
+            "move /Y \"%SRC%\" \"%DST%\" >nul 2>nul\r\n" +
+            "if not exist \"%SRC%\" goto done\r\n" +
+            "set /a N+=1\r\n" +
+            "if %N% LSS 15 goto retry\r\n" +
+            "del /F /Q \"%SRC%\" >nul 2>nul\r\n" +
+            ":done\r\n" +
             "del \"%~f0\"\r\n";
         File.WriteAllText(bat, content);
         Process.Start(new ProcessStartInfo

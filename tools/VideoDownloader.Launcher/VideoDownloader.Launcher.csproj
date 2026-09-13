@@ -2,7 +2,7 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net48</TargetFramework>
-    <AssemblyName>VideoDownloader</AssemblyName>
+    <AssemblyName>VideoBrowser</AssemblyName>
     <RootNamespace>VideoDownloader.Launcher</RootNamespace>
     <Nullable>disable</Nullable>
     <LangVersion>latest</LangVersion>
