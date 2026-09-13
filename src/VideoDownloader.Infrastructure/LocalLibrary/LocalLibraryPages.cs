@@ -223,8 +223,15 @@ load();
   header { display:flex; gap:12px; align-items:center; padding:12px 16px; border-bottom:1px solid #334155; }
   a { color:var(--accent); text-decoration:none; }
   .nav-hint { margin-left:auto; color:var(--muted); font-size:12px; }
-  .wrap { max-width:1100px; margin:0 auto; padding:16px; position:relative; }
+  button.tool {
+    background:#334155; color:var(--fg); border:0; border-radius:8px;
+    padding:6px 10px; cursor:pointer; font-size:13px;
+  }
+  button.tool:hover { background:var(--accent); color:#0f172a; }
+  .wrap { max-width:1100px; margin:0 auto; padding:16px; position:relative; box-sizing:border-box; }
   .stage { position:relative; }
+  /* No picture yet: hide player chrome; only meta (time / name / caption) stays. */
+  body:not(.media-ready) .stage { display:none; }
   video { width:100%; max-height:75vh; background:#000; border-radius:10px; display:block; }
   .arrow {
     position:absolute; top:50%; transform:translateY(-50%);
@@ -239,18 +246,34 @@ load();
   .arrow.next { right:10px; }
   .meta { margin-top:12px; display:flex; flex-direction:column; gap:6px; }
   .time { color:var(--muted); font-size:13px; }
-  .name { font-weight:600; }
+  .name { font-weight:600; word-break:break-all; }
   .caption { color:#cbd5e1; white-space:pre-wrap; }
   .pos { color:var(--muted); font-size:12px; margin-top:4px; }
+  #playerRoot:fullscreen {
+    max-width:none; width:100%; height:100%; margin:0; padding:16px;
+    display:flex; flex-direction:column; background:#000;
+  }
+  #playerRoot:fullscreen .stage { flex:1; min-height:0; display:block; }
+  body:not(.media-ready) #playerRoot:fullscreen .stage { display:none; }
+  #playerRoot:fullscreen video {
+    width:100%; height:100%; max-height:none; border-radius:0; object-fit:contain;
+  }
+  #playerRoot:fullscreen .meta {
+    margin-top:0; padding-top:12px; flex-shrink:0;
+  }
+  body:not(.media-ready) #playerRoot:fullscreen .meta {
+    margin:auto 0; padding:24px; max-width:720px;
+  }
 </style>
 </head>
 <body>
 <header>
   <a href="/">← 本地视频</a>
   <strong id="title">播放</strong>
-  <span class="nav-hint">滚轮或 ← → 切换</span>
+  <button type="button" class="tool" id="btnFs" title="全屏 (F)">全屏</button>
+  <span class="nav-hint">滚轮或 ← → 切换 · F 全屏 · Esc 退出</span>
 </header>
-<div class="wrap">
+<div class="wrap" id="playerRoot">
   <div class="stage" id="stage">
     <button type="button" class="arrow prev" id="btnPrev" title="上一条" aria-label="上一条">‹</button>
     <video id="player" controls autoplay playsinline></video>
@@ -267,16 +290,49 @@ load();
 let playlist = [];
 let index = -1;
 let wheelLock = 0;
+let loadToken = 0;
 const norm = id => String(id||'').replace(/-/g,'').toLowerCase();
-const currentId = norm(location.pathname.split('/').filter(Boolean).pop());
+const playerRoot = document.getElementById('playerRoot');
+const video = document.getElementById('player');
 
-function go(delta){
-  if(index < 0 || !playlist.length) return;
-  const next = index + delta;
-  if(next < 0 || next >= playlist.length) return;
-  const item = playlist[next];
-  if(!item?.playUrl) return;
-  location.href = item.playUrl;
+function idFromPath(pathname){
+  return norm((pathname||location.pathname).split('/').filter(Boolean).pop());
+}
+
+function setMediaReady(ready){
+  document.body.classList.toggle('media-ready', !!ready);
+}
+
+function isFullscreen(){
+  return document.fullscreenElement === playerRoot;
+}
+
+async function enterFullscreen(){
+  if(isFullscreen()) return;
+  try {
+    if(playerRoot.requestFullscreen) await playerRoot.requestFullscreen();
+    else if(playerRoot.webkitRequestFullscreen) playerRoot.webkitRequestFullscreen();
+  } catch (_) {}
+  syncFsButton();
+}
+
+async function exitFullscreen(){
+  if(!document.fullscreenElement) return;
+  try {
+    if(document.exitFullscreen) await document.exitFullscreen();
+    else if(document.webkitExitFullscreen) document.webkitExitFullscreen();
+  } catch (_) {}
+  syncFsButton();
+}
+
+function toggleFullscreen(){
+  if(isFullscreen()) exitFullscreen();
+  else enterFullscreen();
+}
+
+function syncFsButton(){
+  const btn = document.getElementById('btnFs');
+  btn.textContent = isFullscreen() ? '退出全屏' : '全屏';
 }
 
 function syncButtons(){
@@ -284,39 +340,99 @@ function syncButtons(){
   document.getElementById('btnNext').disabled = index < 0 || index >= playlist.length - 1;
   if(index >= 0)
     document.getElementById('pos').textContent = (index+1) + ' / ' + playlist.length;
+  else
+    document.getElementById('pos').textContent = '';
 }
 
-async function boot(){
-  const [itemRes, listRes] = await Promise.all([
-    fetch('/api/item?id='+currentId),
-    fetch('/api/videos')
-  ]);
-  if(!itemRes.ok){
-    document.getElementById('name').textContent='文件不存在或未完成';
-    syncButtons();
-    return;
-  }
-  const item = await itemRes.json();
+function applyMeta(item){
   document.getElementById('title').textContent = item.fileName || '播放';
   document.getElementById('time').textContent = item.downloadedAtText || '';
   document.getElementById('name').textContent = item.fileName || '';
   document.getElementById('caption').textContent = item.caption || '';
-  const v = document.getElementById('player');
-  v.src = item.streamUrl;
+  document.title = item.fileName || '播放';
+}
 
+async function loadById(id, { push } = { push: false }){
+  const token = ++loadToken;
+  const keepFs = isFullscreen();
+  setMediaReady(false);
+  syncButtons();
+
+  const itemRes = await fetch('/api/item?id='+encodeURIComponent(id));
+  if(token !== loadToken) return;
+  if(!itemRes.ok){
+    applyMeta({ fileName: '文件不存在或未完成', downloadedAtText: '', caption: '' });
+    video.removeAttribute('src');
+    video.load();
+    syncButtons();
+    return;
+  }
+
+  const item = await itemRes.json();
+  if(token !== loadToken) return;
+  applyMeta(item);
+  index = playlist.findIndex(x => norm(x.id) === norm(item.id) || norm(x.playUrl?.split('/').pop()) === norm(item.id));
+  syncButtons();
+
+  if(push && item.playUrl){
+    try { history.pushState({ id: norm(item.id) }, '', item.playUrl); } catch (_) {}
+  }
+
+  const onReady = () => {
+    if(token !== loadToken) return;
+    setMediaReady(true);
+    if(keepFs && !isFullscreen()) enterFullscreen();
+    video.play().catch(() => {});
+  };
+  video.onloadeddata = onReady;
+  video.oncanplay = onReady;
+  video.onerror = () => {
+    if(token !== loadToken) return;
+    setMediaReady(false);
+  };
+  video.src = item.streamUrl;
+  video.load();
+}
+
+function go(delta){
+  if(index < 0 || !playlist.length) return;
+  const next = index + delta;
+  if(next < 0 || next >= playlist.length) return;
+  const item = playlist[next];
+  if(!item?.id && !item?.playUrl) return;
+  const id = norm(item.id) || idFromPath(item.playUrl);
+  index = next;
+  syncButtons();
+  loadById(id, { push: true });
+}
+
+async function boot(){
+  setMediaReady(false);
+  const listRes = await fetch('/api/videos');
   playlist = listRes.ok ? await listRes.json() : [];
   if(!Array.isArray(playlist)) playlist = [];
-  index = playlist.findIndex(x => norm(x.id) === currentId || norm(x.playUrl?.split('/').pop()) === currentId);
+  const id = idFromPath(location.pathname);
+  index = playlist.findIndex(x => norm(x.id) === id || norm(x.playUrl?.split('/').pop()) === id);
   syncButtons();
+  await loadById(id, { push: false });
 }
 
 document.getElementById('btnPrev').onclick = () => go(-1);
 document.getElementById('btnNext').onclick = () => go(1);
+document.getElementById('btnFs').onclick = () => toggleFullscreen();
+document.addEventListener('fullscreenchange', syncFsButton);
+document.addEventListener('webkitfullscreenchange', syncFsButton);
+
+video.addEventListener('dblclick', e => {
+  e.preventDefault();
+  toggleFullscreen();
+});
 
 document.addEventListener('keydown', e => {
   if(e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT')) return;
   if(e.key === 'ArrowLeft' || e.key === 'ArrowUp'){ e.preventDefault(); go(-1); }
   if(e.key === 'ArrowRight' || e.key === 'ArrowDown'){ e.preventDefault(); go(1); }
+  if(e.key === 'f' || e.key === 'F'){ e.preventDefault(); toggleFullscreen(); }
 });
 
 window.addEventListener('wheel', e => {
@@ -327,6 +443,12 @@ window.addEventListener('wheel', e => {
   e.preventDefault();
   go(e.deltaY > 0 ? 1 : -1);
 }, { passive: false });
+
+window.addEventListener('popstate', () => {
+  const id = idFromPath(location.pathname);
+  index = playlist.findIndex(x => norm(x.id) === id || norm(x.playUrl?.split('/').pop()) === id);
+  loadById(id, { push: false });
+});
 
 boot();
 </script>
