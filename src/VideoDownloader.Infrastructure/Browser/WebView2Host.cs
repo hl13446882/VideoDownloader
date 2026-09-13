@@ -79,6 +79,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
     public event EventHandler<string>? OpenInNewTabRequested;
     public event EventHandler<MediaSessionChangedEventArgs>? MediaSessionChanged;
     public event EventHandler<bool>? LocalPlayerFullscreenRequested;
+    public event EventHandler<bool>? TabAudibleChanged;
 
     public string? CurrentMediaSessionKey
     {
@@ -198,10 +199,12 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
 
 
         await _core.AddScriptToExecuteOnDocumentCreatedAsync(SiteObservationBootstrap.Install);
+        await _core.AddScriptToExecuteOnDocumentCreatedAsync(TabAudibleWatchScript.Install);
         _core.WebMessageReceived += OnWebMessageReceived;
         try
         {
             await _core.ExecuteScriptAsync(SiteObservationBootstrap.Install);
+            await _core.ExecuteScriptAsync(TabAudibleWatchScript.Install);
         }
         catch (Exception ex)
         {
@@ -245,6 +248,15 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             var active = root.TryGetProperty("active", out var activeEl) &&
                          activeEl.ValueKind is JsonValueKind.True;
             LocalPlayerFullscreenRequested?.Invoke(this, active);
+            return;
+        }
+
+        if (root.TryGetProperty("type", out var audibleType) &&
+            audibleType.GetString() == "vd-tab-audible")
+        {
+            var playing = root.TryGetProperty("playing", out var playingEl) &&
+                          playingEl.ValueKind is JsonValueKind.True;
+            TabAudibleChanged?.Invoke(this, playing);
             return;
         }
 

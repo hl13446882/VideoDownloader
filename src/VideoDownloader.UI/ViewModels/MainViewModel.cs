@@ -345,7 +345,21 @@ public sealed partial class BrowserTabViewModel : ObservableObject
     [ObservableProperty]
     private bool _isInitialized;
 
+    /// <summary>True when a media element in this tab is playing with sound.</summary>
+    [ObservableProperty]
+    private bool _isAudiblePlaying;
+
+    /// <summary>
+    /// Fixed pixel width for multi-tab equal split. Null = auto width (single-tab, max 200 via style).
+    /// </summary>
+    [ObservableProperty]
+    private double? _fixedWidth;
+
     public BrowserTabViewModel(WebView2Host host) => Host = host;
+
+    partial void OnTitleChanged(string value) => TitleChanged?.Invoke(this, EventArgs.Empty);
+
+    public event EventHandler? TitleChanged;
 }
 
 public sealed class AddressPreset
@@ -647,6 +661,25 @@ public sealed partial class MainViewModel : ObservableObject
                 else
                     dispatcher.Invoke(() => SetAppFullscreen(active));
             };
+            tab.Host.TabAudibleChanged += (_, playing) =>
+            {
+                var dispatcher = Application.Current?.Dispatcher;
+                void Apply() => tab.IsAudiblePlaying = playing;
+                if (dispatcher is null || dispatcher.CheckAccess())
+                    Apply();
+                else
+                    dispatcher.Invoke(Apply);
+            };
+            tab.Host.NavigationStarted += (_, _) =>
+            {
+                var dispatcher = Application.Current?.Dispatcher;
+                void Clear() => tab.IsAudiblePlaying = false;
+                if (dispatcher is null || dispatcher.CheckAccess())
+                    Clear();
+                else
+                    dispatcher.Invoke(Clear);
+            };
+            tab.TitleChanged += (_, _) => RecalculateTabWidths();
             tab.Host.MediaSessionChanged += (_, e) =>
             {
                 if (!ReferenceEquals(SelectedTab, tab))
@@ -822,9 +855,38 @@ public sealed partial class MainViewModel : ObservableObject
             Title = _loc.T("tab.new")
         };
         Tabs.Add(tab);
+        RecalculateTabWidths();
         if (select)
             SelectedTab = tab;
         await Task.CompletedTask;
+    }
+
+    /// <summary>Browser pane width used to size the tab strip (set from MainWindow).</summary>
+    public double BrowserPaneWidth { get; private set; } = 800;
+
+    public void NotifyBrowserPaneWidth(double width)
+    {
+        if (width <= 0)
+            return;
+        if (Math.Abs(BrowserPaneWidth - width) < 0.5)
+            return;
+        BrowserPaneWidth = width;
+        RecalculateTabWidths();
+    }
+
+    public void RecalculateTabWidths()
+    {
+        var count = Tabs.Count;
+        if (count <= 1)
+        {
+            foreach (var tab in Tabs)
+                tab.FixedWidth = null;
+            return;
+        }
+
+        var share = Math.Max(72, (BrowserPaneWidth * 0.9) / count);
+        foreach (var tab in Tabs)
+            tab.FixedWidth = share;
     }
 
     [RelayCommand]
@@ -836,6 +898,7 @@ public sealed partial class MainViewModel : ObservableObject
 
         var index = Tabs.IndexOf(tab);
         Tabs.Remove(tab);
+        RecalculateTabWidths();
         tab.Host.CaptureEnabled = false;
         try
         {

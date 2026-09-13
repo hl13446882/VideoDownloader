@@ -330,6 +330,13 @@ public partial class MainWindow : Window
         }
 
         UpdateWebViewVisibility();
+        _viewModel.RecalculateTabWidths();
+    }
+
+    private void BrowserPane_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (e.NewSize.Width > 0)
+            _viewModel.NotifyBrowserPaneWidth(e.NewSize.Width);
     }
 
     private WindowState _savedWindowState = WindowState.Normal;
