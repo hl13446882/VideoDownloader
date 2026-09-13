@@ -66,6 +66,8 @@ public sealed partial class LocalizationService : ObservableObject
         OnPropertyChanged(nameof(NavForward));
         OnPropertyChanged(nameof(NavGo));
         OnPropertyChanged(nameof(NavProbe));
+        OnPropertyChanged(nameof(NavAuto));
+        OnPropertyChanged(nameof(NavAutoStop));
         OnPropertyChanged(nameof(NavNewTab));
         OnPropertyChanged(nameof(NavLocal));
         OnPropertyChanged(nameof(NavSettings));
@@ -73,6 +75,7 @@ public sealed partial class LocalizationService : ObservableObject
         OnPropertyChanged(nameof(TipForward));
         OnPropertyChanged(nameof(TipGo));
         OnPropertyChanged(nameof(TipProbe));
+        OnPropertyChanged(nameof(TipAuto));
         OnPropertyChanged(nameof(TipNewTab));
         OnPropertyChanged(nameof(TipLocal));
         OnPropertyChanged(nameof(TipSettings));
@@ -122,6 +125,8 @@ public sealed partial class LocalizationService : ObservableObject
     public string NavForward => T("nav.forward");
     public string NavGo => T("nav.go");
     public string NavProbe => T("nav.probe");
+    public string NavAuto => T("nav.auto");
+    public string NavAutoStop => T("nav.autoStop");
     public string NavNewTab => T("nav.newTab");
     public string NavLocal => T("nav.local");
     public string NavSettings => T("nav.settings");
@@ -129,6 +134,7 @@ public sealed partial class LocalizationService : ObservableObject
     public string TipForward => T("tip.forward");
     public string TipGo => T("tip.go");
     public string TipProbe => T("tip.probe");
+    public string TipAuto => T("tip.auto");
     public string TipNewTab => T("tip.newTab");
     public string TipLocal => T("tip.local");
     public string TipSettings => T("tip.settings");
@@ -179,6 +185,8 @@ public sealed partial class LocalizationService : ObservableObject
         ["nav.forward"] = ("前进", "Forward"),
         ["nav.go"] = ("访问", "Go"),
         ["nav.probe"] = ("探测", "Probe"),
+        ["nav.auto"] = ("自动", "Auto"),
+        ["nav.autoStop"] = ("停止", "Stop"),
         ["nav.newTab"] = ("新标签", "New"),
         ["nav.local"] = ("本地", "Local"),
         ["nav.settings"] = ("设置", "Settings"),
@@ -186,7 +194,20 @@ public sealed partial class LocalizationService : ObservableObject
         ["tip.forward"] = ("前进", "Go forward"),
         ["tip.go"] = ("打开地址", "Open address"),
         ["tip.probe"] = ("重置全部探测状态并重新探测（不刷新网页）", "Reset all probe state and re-detect without reloading"),
+        ["tip.auto"] = ("自动探测并下载；↓ 或 Shift+N 切下一条；超时停止自动，进行中任务保留", "Auto probe/download; ↓ or Shift+N next; idle timeout stops auto, keeps running jobs"),
         ["tip.newTab"] = ("新标签", "New tab"),
+        ["auto.delayTitle"] = ("自动模式", "Auto mode"),
+        ["auto.delayPrompt"] = ("自动模式延时（分钟，正整数）", "Auto idle timeout (minutes, positive integer)"),
+        ["auto.delayHint"] = ("超过延时仍未能开始下载则结束自动模式（不再自动切换/入队）；进行中的下载会继续。", "If no download starts within the idle timeout, auto mode stops (no more switching/enqueue). In-progress downloads continue."),
+        ["auto.delayInvalid"] = ("请输入正整数分钟。", "Enter a positive integer (minutes)."),
+        ["auto.ok"] = ("开始", "Start"),
+        ["auto.cancel"] = ("取消", "Cancel"),
+        ["status.autoRunning"] = ("自动模式中…剩余空闲约 {0} 分", "Auto mode… ~{0} min idle left"),
+        ["status.autoWaitingSlot"] = ("自动模式：等待下载空位…剩余约 {0} 分", "Auto: waiting for download slot… ~{0} min left"),
+        ["status.autoStoppedTimeout"] = ("自动模式已结束：超时", "Auto mode ended: idle timeout"),
+        ["status.autoStopped"] = ("自动模式已停止", "Auto mode stopped"),
+        ["status.autoLocalDenied"] = ("本地视频页不能使用自动模式。", "Auto mode is not available on local library pages."),
+        ["status.autoStarted"] = ("已进入自动模式（空闲 {0} 分钟）", "Auto mode on (idle {0} min)"),
         ["tip.local"] = ("打开本地视频库", "Open local video library"),
         ["tip.settings"] = ("设置", "Settings"),
         ["tip.language"] = ("切换到英文", "Switch to Chinese"),

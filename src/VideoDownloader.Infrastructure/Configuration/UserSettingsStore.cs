@@ -72,6 +72,8 @@ public sealed class UserSettingsStore
     {
         options.Download.MaxConcurrentDownloads =
             Math.Clamp(options.Download.MaxConcurrentDownloads, 1, 5);
+        if (options.Ui.AutoModeIdleMinutes < 1)
+            options.Ui.AutoModeIdleMinutes = 5;
     }
 
     private static AppOptions Clone(AppOptions source)
@@ -148,7 +150,10 @@ public sealed class UserSettingsStore
             Ui = new UiOptions
             {
                 Language = source.Ui?.Language ?? "zh-CN",
-                QueueGrouped = source.Ui?.QueueGrouped ?? false
+                QueueGrouped = source.Ui?.QueueGrouped ?? false,
+                AutoModeIdleMinutes = source.Ui?.AutoModeIdleMinutes > 0
+                    ? source.Ui.AutoModeIdleMinutes
+                    : 5
             }
         };
         Sanitize(clone);

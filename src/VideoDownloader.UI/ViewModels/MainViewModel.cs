@@ -406,6 +406,17 @@ public sealed partial class MainViewModel : ObservableObject
     /// <summary>Douyin feed→detail boost already attempted for this aweme id (avoid loops).</summary>
     private string? _douyinDetailBoostId;
 
+    private CancellationTokenSource? _autoCts;
+    private int _autoIdleMinutes = 5;
+    private string? _autoSwitchFromIdentity;
+
+    [ObservableProperty]
+    private bool _isAutoMode;
+
+    public string AutoModeButtonLabel => IsAutoMode ? _loc.NavAutoStop : _loc.NavAuto;
+
+    partial void OnIsAutoModeChanged(bool value) => OnPropertyChanged(nameof(AutoModeButtonLabel));
+
     public ObservableCollection<AddressPreset> AddressPresets { get; } = new();
 
     [ObservableProperty]
@@ -612,6 +623,7 @@ public sealed partial class MainViewModel : ObservableObject
             video.RefreshLocalizedModes();
         OnPropertyChanged(nameof(L));
         OnPropertyChanged(nameof(QueueGroupToggleLabel));
+        OnPropertyChanged(nameof(AutoModeButtonLabel));
     }
 
     public async Task InitializeAsync()
@@ -629,6 +641,7 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand]
     private async Task GoLocalLibraryAsync()
     {
+        StopAutoMode(announce: false);
         AddressBar = DefaultHomeUrl;
         await NavigateAsync();
     }
@@ -1149,6 +1162,7 @@ public sealed partial class MainViewModel : ObservableObject
 
     private void EnterLocalLibraryMode(Uri pageUrl)
     {
+        StopAutoMode(announce: false);
         lock (_pageSync)
         {
             _probeCts.Cancel();
@@ -1841,6 +1855,288 @@ public sealed partial class MainViewModel : ObservableObject
         dialog.ShowDialog();
     }
 
+    [RelayCommand]
+    private void ToggleAutoMode()
+    {
+        if (IsAutoMode)
+        {
+            StopAutoMode(announce: true);
+            return;
+        }
+
+        var pageUrl = SelectedTab?.Host.CurrentPageUrl
+                      ?? (Uri.TryCreate(AddressBar, UriKind.Absolute, out var uri) ? uri : null);
+        if (pageUrl is null)
+        {
+            SetStatusKey("status.probeNoPage");
+            return;
+        }
+
+        if (LocalLibraryHost.IsLocalLibraryHost(pageUrl))
+        {
+            SetStatusKey("status.autoLocalDenied");
+            return;
+        }
+
+        var initial = _options.Ui.AutoModeIdleMinutes > 0 ? _options.Ui.AutoModeIdleMinutes : 5;
+        var dlg = new AutoModeDelayWindow(_loc, initial)
+        {
+            Owner = Application.Current.MainWindow
+        };
+        if (dlg.ShowDialog() != true)
+            return;
+
+        _autoIdleMinutes = dlg.AcceptedMinutes;
+        _options.Ui.AutoModeIdleMinutes = _autoIdleMinutes;
+        try { _settingsStore.Save(_options); }
+        catch { /* ignore persist errors */ }
+
+        var cts = new CancellationTokenSource();
+        _autoCts?.Cancel();
+        _autoCts?.Dispose();
+        _autoCts = cts;
+        IsAutoMode = true;
+        SetStatusKey("status.autoStarted", _autoIdleMinutes);
+        _ = RunAutoModeLoopAsync(cts.Token);
+    }
+
+    public void StopAutoMode(bool announce)
+    {
+        if (!IsAutoMode && _autoCts is null)
+            return;
+
+        try { _autoCts?.Cancel(); }
+        catch { /* ignore */ }
+        _autoCts?.Dispose();
+        _autoCts = null;
+        IsAutoMode = false;
+        _autoSwitchFromIdentity = null;
+        if (announce)
+            SetStatusKey("status.autoStopped");
+    }
+
+    public async Task SwitchToNextVideoAsync()
+    {
+        var tab = SelectedTab;
+        if (tab?.Host is null || !tab.IsInitialized)
+            return;
+        try
+        {
+            await tab.Host.SendFeedNextAsync();
+        }
+        catch
+        {
+            // Page may reject synthetic keys; ignore for manual ↓.
+        }
+    }
+
+    private async Task RunAutoModeLoopAsync(CancellationToken token)
+    {
+        try
+        {
+            while (!token.IsCancellationRequested && IsAutoMode)
+            {
+                var deadline = DateTime.UtcNow.AddMinutes(_autoIdleMinutes);
+                var enqueued = await TryAutoEnqueueUntilAsync(deadline, token);
+                if (token.IsCancellationRequested || !IsAutoMode)
+                    break;
+                if (!enqueued)
+                {
+                    await Application.Current.Dispatcher.InvokeAsync(() =>
+                    {
+                        IsAutoMode = false;
+                        _autoCts?.Dispose();
+                        _autoCts = null;
+                        SetStatusKey("status.autoStoppedTimeout");
+                    });
+                    break;
+                }
+
+                var beforeIdentity = CaptureAutoIdentity();
+                _autoSwitchFromIdentity = beforeIdentity;
+                await SwitchToNextVideoAsync();
+                await WaitForContentSwitchAsync(beforeIdentity, deadline, token);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // normal stop
+        }
+        catch (Exception ex)
+        {
+            await Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                StopAutoMode(announce: false);
+                SetStatusKey("status.probeFailed", ex.Message);
+            });
+        }
+        finally
+        {
+            if (IsAutoMode && (token.IsCancellationRequested || _autoCts?.Token == token))
+            {
+                await Application.Current.Dispatcher.InvokeAsync(() =>
+                {
+                    if (_autoCts?.Token == token)
+                    {
+                        IsAutoMode = false;
+                        _autoCts.Dispose();
+                        _autoCts = null;
+                    }
+                });
+            }
+        }
+    }
+
+    private async Task<bool> TryAutoEnqueueUntilAsync(DateTime deadlineUtc, CancellationToken token)
+    {
+        var triggeredProbe = false;
+        while (!token.IsCancellationRequested && DateTime.UtcNow < deadlineUtc)
+        {
+            var remainingMin = Math.Max(1, (int)Math.Ceiling((deadlineUtc - DateTime.UtcNow).TotalMinutes));
+            await Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                if (CountRunningDownloads() >= GetMaxConcurrent())
+                    SetStatusKey("status.autoWaitingSlot", remainingMin);
+                else
+                    SetStatusKey("status.autoRunning", remainingMin);
+            });
+
+            DetectedVideoViewModel? candidate = null;
+            await Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                candidate = FindAutoDownloadCandidate();
+                if (!triggeredProbe && candidate is null)
+                {
+                    var pageUrl = SelectedTab?.Host.CurrentPageUrl
+                                  ?? (Uri.TryCreate(AddressBar, UriKind.Absolute, out var uri) ? uri : null);
+                    if (pageUrl is not null && !LocalLibraryHost.IsLocalLibraryHost(pageUrl))
+                    {
+                        triggeredProbe = true;
+                        Refresh();
+                    }
+                }
+            });
+
+            if (candidate is not null)
+            {
+                while (!token.IsCancellationRequested && DateTime.UtcNow < deadlineUtc &&
+                       CountRunningDownloads() >= GetMaxConcurrent())
+                {
+                    remainingMin = Math.Max(1, (int)Math.Ceiling((deadlineUtc - DateTime.UtcNow).TotalMinutes));
+                    await Application.Current.Dispatcher.InvokeAsync(() =>
+                        SetStatusKey("status.autoWaitingSlot", remainingMin));
+                    await Task.Delay(400, token);
+                }
+
+                if (token.IsCancellationRequested || DateTime.UtcNow >= deadlineUtc)
+                    break;
+
+                var ok = await Application.Current.Dispatcher.InvokeAsync(async () =>
+                {
+                    var current = FindAutoDownloadCandidate();
+                    if (current?.SelectedVariant?.Variant is null)
+                        return false;
+                    return await TryStartDownloadQuietAsync(current.Video, current.SelectedVariant.Variant);
+                }).Task.Unwrap();
+
+                if (ok)
+                    return true;
+            }
+
+            await Task.Delay(500, token);
+        }
+
+        return false;
+    }
+
+    private async Task WaitForContentSwitchAsync(string? beforeIdentity, DateTime deadlineUtc, CancellationToken token)
+    {
+        while (!token.IsCancellationRequested && DateTime.UtcNow < deadlineUtc)
+        {
+            var now = CaptureAutoIdentity();
+            if (!string.IsNullOrEmpty(now) &&
+                !string.Equals(now, beforeIdentity, StringComparison.Ordinal))
+                return;
+
+            var remainingMin = Math.Max(1, (int)Math.Ceiling((deadlineUtc - DateTime.UtcNow).TotalMinutes));
+            await Application.Current.Dispatcher.InvokeAsync(() =>
+                SetStatusKey("status.autoRunning", remainingMin));
+            await Task.Delay(400, token);
+        }
+    }
+
+    private string? CaptureAutoIdentity()
+    {
+        var tab = SelectedTab;
+        if (tab is null)
+            return _currentPageIdentity;
+        return tab.Host.CurrentMediaSessionKey
+               ?? tab.Host.CurrentPageUrl?.AbsoluteUri
+               ?? _currentPageIdentity;
+    }
+
+    private DetectedVideoViewModel? FindAutoDownloadCandidate()
+    {
+        if (SelectedDetectedVideo is { IsDrm: false, SelectedVariant: not null } selected)
+            return selected;
+        foreach (var item in DetectedVideos)
+        {
+            if (!item.IsDrm && item.SelectedVariant is not null)
+                return item;
+        }
+
+        return null;
+    }
+
+    private int GetMaxConcurrent() =>
+        Math.Clamp(_options.Download.MaxConcurrentDownloads, 1, 5);
+
+    private int CountRunningDownloads() =>
+        _downloadEngine.GetActiveJobs().Count(j =>
+            j.Status is DownloadStatus.Preparing or DownloadStatus.Downloading or DownloadStatus.Muxing);
+
+    public async Task StartDownloadAsync(DetectedVideo video, MediaVariant variant) =>
+        await TryStartDownloadQuietAsync(video, variant, showErrors: true);
+
+    private async Task<bool> TryStartDownloadQuietAsync(
+        DetectedVideo video,
+        MediaVariant variant,
+        bool showErrors = false)
+    {
+        if (video.IsDrmProtected)
+            return false;
+
+        var name = DownloadFileNameBuilder.Build(video, variant);
+        try
+        {
+            var id = await _downloadEngine.EnqueueAsync(
+                variant,
+                name,
+                video.PageUrl,
+                video.DisplayTitle,
+                video.DurationSec,
+                video.Variants,
+                AuthorNameResolver.FromDetectedVideo(video));
+            _collapsedQueueGroups.Remove(DownloadSiteFolder.Resolve(video.PageUrl));
+            RefreshDownloadJobs();
+            var created = DownloadJobs.FirstOrDefault(j => j.Job.Id == id);
+            if (created is not null)
+                SelectOnlyQueueJob(created);
+            SetStatusKey("status.enqueued", name);
+            return true;
+        }
+        catch (DownloadException ex)
+        {
+            var reason = _loc.T("error." + ex.ErrorCode);
+            if (string.Equals(reason, "error." + ex.ErrorCode, StringComparison.Ordinal))
+                reason = ex.Message;
+            SetStatusKey("status.enqueueFailed", reason);
+            if (showErrors)
+                MessageBox.Show(reason, _loc.DialogTitle, MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+    }
+
     [RelayCommand(CanExecute = nameof(CanDownloadSelectedVideo))]
     private async Task DownloadSelectedVideoAsync()
     {
@@ -1868,39 +2164,6 @@ public sealed partial class MainViewModel : ObservableObject
     {
         if (e.PropertyName is nameof(DetectedVideoViewModel.SelectedVariant) or nameof(DetectedVideoViewModel.CanDownload))
             DownloadSelectedVideoCommand.NotifyCanExecuteChanged();
-    }
-
-    public async Task StartDownloadAsync(DetectedVideo video, MediaVariant variant)
-    {
-        if (video.IsDrmProtected)
-            return;
-
-        var name = DownloadFileNameBuilder.Build(video, variant);
-        try
-        {
-            var id = await _downloadEngine.EnqueueAsync(
-                variant,
-                name,
-                video.PageUrl,
-                video.DisplayTitle,
-                video.DurationSec,
-                video.Variants,
-                AuthorNameResolver.FromDetectedVideo(video));
-            _collapsedQueueGroups.Remove(DownloadSiteFolder.Resolve(video.PageUrl));
-            RefreshDownloadJobs();
-            var created = DownloadJobs.FirstOrDefault(j => j.Job.Id == id);
-            if (created is not null)
-                SelectOnlyQueueJob(created);
-            SetStatusKey("status.enqueued", name);
-        }
-        catch (DownloadException ex)
-        {
-            var reason = _loc.T("error." + ex.ErrorCode);
-            if (string.Equals(reason, "error." + ex.ErrorCode, StringComparison.Ordinal))
-                reason = ex.Message;
-            SetStatusKey("status.enqueueFailed", reason);
-            MessageBox.Show(reason, _loc.DialogTitle, MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
     }
 
     public void RefreshDownloadJobs()

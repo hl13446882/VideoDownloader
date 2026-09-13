@@ -24,6 +24,9 @@ public sealed class UiOptions
 
     /// <summary>When true, the download queue is grouped by site-folder domain.</summary>
     public bool QueueGrouped { get; set; }
+
+    /// <summary>Last used auto-mode idle timeout in minutes (positive integer).</summary>
+    public int AutoModeIdleMinutes { get; set; } = 5;
 }
 
 public sealed class UpdateOptions

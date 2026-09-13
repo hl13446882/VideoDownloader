@@ -100,6 +100,39 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         return _core.ExecuteScriptAsync(script);
     }
 
+    /// <summary>
+    /// Try feed-next shortcuts without site-specific logic: ArrowDown then Shift+N.
+    /// Pages that accept either will advance; others no-op until idle timeout.
+    /// </summary>
+    public Task SendFeedNextAsync(CancellationToken ct = default)
+    {
+        if (_core is null)
+            return Task.CompletedTask;
+        const string script =
+            """
+            (() => {
+              const fire = (target, init) => {
+                try { target.dispatchEvent(new KeyboardEvent('keydown', init)); } catch (e) {}
+                try { target.dispatchEvent(new KeyboardEvent('keyup', init)); } catch (e) {}
+              };
+              const t = document.activeElement && document.activeElement !== document.body
+                ? document.activeElement : (document.body || document.documentElement);
+              const down = { key:'ArrowDown', code:'ArrowDown', keyCode:40, which:40, bubbles:true, cancelable:true };
+              const shiftN = { key:'N', code:'KeyN', keyCode:78, which:78, shiftKey:true, bubbles:true, cancelable:true };
+              fire(t, down);
+              fire(window, down);
+              fire(t, shiftN);
+              fire(window, shiftN);
+              try {
+                const scroller = document.scrollingElement || document.documentElement;
+                if (scroller) scroller.scrollBy(0, Math.max(240, Math.floor(window.innerHeight * 0.85)));
+              } catch (e) {}
+              return true;
+            })()
+            """;
+        return _core.ExecuteScriptAsync(script).WaitAsync(ct);
+    }
+
     public async Task InitializeAsync(WebView2 webView, CancellationToken ct = default)
     {
         _webView = webView;

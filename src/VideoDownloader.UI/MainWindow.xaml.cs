@@ -360,7 +360,29 @@ public partial class MainWindow : Window
         {
             _viewModel.SetAppFullscreen(false);
             e.Handled = true;
+            return;
         }
+
+        if (IsTextInputFocused())
+            return;
+
+        var shiftN = (e.Key == Key.N || e.SystemKey == Key.N) &&
+                     (Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift &&
+                     (Keyboard.Modifiers & ModifierKeys.Control) == 0 &&
+                     (Keyboard.Modifiers & ModifierKeys.Alt) == 0;
+        if (e.Key != Key.Down && !shiftN)
+            return;
+
+        e.Handled = true;
+        _ = _viewModel.SwitchToNextVideoAsync();
+    }
+
+    private static bool IsTextInputFocused()
+    {
+        var focused = Keyboard.FocusedElement;
+        return focused is TextBox or PasswordBox or ComboBox
+            || (focused is DependencyObject d &&
+                (d is TextBoxBase || FindAncestor<ComboBox>(d) is not null));
     }
 
     private void ApplyAppFullscreen(bool active)
