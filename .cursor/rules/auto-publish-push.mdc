@@ -8,8 +8,9 @@ alwaysApply: true
 When a coding task is **finished** (fix implemented, tests/build green as appropriate):
 
 1. **Commit** relevant source changes on `clean-main` (never commit secrets, `.tmp-*`, or build junk).
-2. **Publish** with `scripts/publish-beta.ps1 -SkipVerify`, then robocopy `publish/VideoDownload` → `D:\VideoBrowser` (stop `VideoBrowser` / `VideoDownloader` / `N_m3u8DL-RE` if locks block copy).  
-   Follow `.cursor/rules/client-update-publish.mdc`: bump SemVer patch each publish, differential update-server upload, record `published_at` (not used in version compare).
+2. **Publish** with `scripts/publish-beta.ps1 -SkipVerify` (update server only).  
+   **Do not** robocopy/sync to `D:\VideoBrowser` or other local install folders — the user updates the client themselves.  
+   Follow `.cursor/rules/client-update-publish.mdc`: bump SemVer patch each publish, differential update-server upload, record `published_at` (not used in version compare).  
    Entry exe is `VideoBrowser.exe` (root launcher); main app remains `app\VideoDownloader.exe`.
 3. **Push** `origin/clean-main`.
 
