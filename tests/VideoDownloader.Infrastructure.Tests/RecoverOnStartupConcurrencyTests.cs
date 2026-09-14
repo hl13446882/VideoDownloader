@@ -12,6 +12,7 @@ using VideoDownloader.Infrastructure.Ffmpeg;
 using VideoDownloader.Infrastructure.Http;
 using VideoDownloader.Infrastructure.Licensing;
 using VideoDownloader.Infrastructure.LocalLibrary;
+using VideoDownloader.Infrastructure.Persistence;
 
 namespace VideoDownloader.Infrastructure.Tests;
 
@@ -122,7 +123,8 @@ public class RecoverOnStartupConcurrencyTests
             options,
             NullLogger<DownloadEngine>.Instance,
             new LicenseService(new HttpClient(), options, NullLogger<LicenseService>.Instance),
-            new LocalVideoThumbnailStore(ffmpeg, NullLogger<LocalVideoThumbnailStore>.Instance));
+            new LocalVideoThumbnailStore(ffmpeg, NullLogger<LocalVideoThumbnailStore>.Instance),
+            new MemoryLibraryKindCatalog());
     }
 
     private sealed class MemoryDownloadRepository : IDownloadRepository

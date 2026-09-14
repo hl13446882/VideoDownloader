@@ -32,6 +32,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
     private readonly ILogger<DownloadEngine> _logger;
     private readonly LicenseService _license;
     private readonly LocalVideoThumbnailStore _thumbs;
+    private readonly ILibraryKindCatalog _kinds;
     private readonly IReadOnlyList<IExternalSiteResolver> _resolvers;
     private readonly MediaAvailabilityValidator? _availability;
     private readonly IMediaAddressRediscoverer? _rediscoverer;
@@ -56,6 +57,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         ILogger<DownloadEngine> logger,
         LicenseService license,
         LocalVideoThumbnailStore thumbs,
+        ILibraryKindCatalog kinds,
         IEnumerable<IExternalSiteResolver>? resolvers = null,
         MediaAvailabilityValidator? availability = null,
         IMediaAddressRediscoverer? rediscoverer = null)
@@ -71,6 +73,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         _logger = logger;
         _license = license;
         _thumbs = thumbs;
+        _kinds = kinds;
         _resolvers = (resolvers ?? []).ToArray();
         _availability = availability;
         _rediscoverer = rediscoverer;
@@ -526,9 +529,9 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
 
         if (videoKind is not null)
         {
-            if (!LibraryVideoKinds.IsKnown(videoKind))
+            if (!_kinds.IsKnown(videoKind))
                 throw new InvalidOperationException("无效的视频类型。");
-            job.VideoKind = LibraryVideoKinds.Normalize(videoKind);
+            job.VideoKind = _kinds.Normalize(videoKind);
             dirty = true;
         }
 

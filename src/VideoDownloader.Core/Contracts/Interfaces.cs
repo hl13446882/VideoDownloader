@@ -129,6 +129,19 @@ public interface IDownloadRepository
     Task InitializeAsync(CancellationToken ct = default);
 }
 
+/// <summary>
+/// Local-DB library categories. Seeds are inserted only when missing; never overwrite local rows.
+/// </summary>
+public interface ILibraryKindCatalog
+{
+    Task InitializeAsync(CancellationToken ct = default);
+    IReadOnlyList<LibraryKindEntry> GetAll();
+    string Normalize(string? value);
+    string LabelOf(string? value);
+    bool IsKnown(string? value);
+    Task<LibraryKindEntry> AddAsync(string label, CancellationToken ct = default);
+}
+
 public interface IRequestContextProvider
 {
     RequestContext CaptureCurrentContext(Uri? pageUrl, Uri resourceUrl);

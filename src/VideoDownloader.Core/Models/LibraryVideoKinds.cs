@@ -1,11 +1,20 @@
 namespace VideoDownloader.Core.Models;
 
-/// <summary>User-facing library categories for completed downloads.</summary>
+/// <summary>
+/// Built-in library category seeds shipped with the app.
+/// Runtime source of truth is the local DB (<c>library_kinds</c>); seeds are INSERT OR IGNORE only.
+/// </summary>
 public static class LibraryVideoKinds
 {
     public const string Unspecified = "";
 
-    public static readonly IReadOnlyList<(string Value, string Label)> All =
+    /// <summary>UI sentinel for “add category”; never persisted.</summary>
+    public const string NewKindSentinel = "__new__";
+
+    public const string UnspecifiedLabel = "未分类";
+
+    /// <summary>Shipped seed rows. Do not treat as the live catalog.</summary>
+    public static readonly IReadOnlyList<(string Value, string Label)> Seed =
     [
         ("movie", "电影"),
         ("series", "电视剧"),
@@ -13,24 +22,6 @@ public static class LibraryVideoKinds
         ("short", "小视频"),
         ("variety", "综艺")
     ];
-
-    public static string Normalize(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-            return Unspecified;
-
-        var v = value.Trim().ToLowerInvariant();
-        return All.Any(x => x.Value == v) ? v : Unspecified;
-    }
-
-    public static string LabelOf(string? value)
-    {
-        var v = Normalize(value);
-        if (v == Unspecified)
-            return "未分类";
-        return All.FirstOrDefault(x => x.Value == v).Label ?? "未分类";
-    }
-
-    public static bool IsKnown(string? value) =>
-        string.IsNullOrWhiteSpace(value) || All.Any(x => x.Value == Normalize(value));
 }
+
+public sealed record LibraryKindEntry(string Value, string Label, int SortOrder, bool IsSeed);

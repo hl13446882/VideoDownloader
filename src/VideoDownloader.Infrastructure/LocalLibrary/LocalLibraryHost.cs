@@ -17,6 +17,7 @@ public sealed class LocalLibraryHost : IAsyncDisposable
     public const int PreferredPort = 17890;
     private readonly IDownloadRepository _repository;
     private readonly IDownloadEngine _engine;
+    private readonly ILibraryKindCatalog _kinds;
     private readonly LocalVideoThumbnailStore _thumbs;
     private readonly ILogger<LocalLibraryHost> _logger;
     private HttpListener? _listener;
@@ -26,11 +27,13 @@ public sealed class LocalLibraryHost : IAsyncDisposable
     public LocalLibraryHost(
         IDownloadRepository repository,
         IDownloadEngine engine,
+        ILibraryKindCatalog kinds,
         LocalVideoThumbnailStore thumbs,
         ILogger<LocalLibraryHost> logger)
     {
         _repository = repository;
         _engine = engine;
+        _kinds = kinds;
         _thumbs = thumbs;
         _logger = logger;
     }
@@ -181,7 +184,13 @@ public sealed class LocalLibraryHost : IAsyncDisposable
 
             if (path.Equals("/api/kinds", StringComparison.OrdinalIgnoreCase))
             {
-                await WriteJsonAsync(ctx, LibraryVideoKinds.All.Select(x => new { value = x.Value, label = x.Label }));
+                if (string.Equals(ctx.Request.HttpMethod, "POST", StringComparison.OrdinalIgnoreCase))
+                {
+                    await HandleAddKindAsync(ctx);
+                    return;
+                }
+
+                await WriteJsonAsync(ctx, _kinds.GetAll().Select(x => new { value = x.Value, label = x.Label }));
                 return;
             }
 
@@ -232,6 +241,37 @@ public sealed class LocalLibraryHost : IAsyncDisposable
         finally
         {
             try { ctx.Response.OutputStream.Close(); } catch { /* ignore */ }
+        }
+    }
+
+    private async Task HandleAddKindAsync(HttpListenerContext ctx)
+    {
+        using var reader = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding);
+        var raw = await reader.ReadToEndAsync();
+        AddKindRequest? req;
+        try
+        {
+            req = JsonSerializer.Deserialize<AddKindRequest>(raw, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+        }
+        catch
+        {
+            ctx.Response.StatusCode = 400;
+            await WriteTextAsync(ctx, "bad json");
+            return;
+        }
+
+        try
+        {
+            var entry = await _kinds.AddAsync(req?.Label ?? string.Empty, CancellationToken.None);
+            await WriteJsonAsync(ctx, new { value = entry.Value, label = entry.Label });
+        }
+        catch (Exception ex)
+        {
+            ctx.Response.StatusCode = 400;
+            await WriteTextAsync(ctx, ex.Message);
         }
     }
 
@@ -448,7 +488,7 @@ public sealed class LocalLibraryHost : IAsyncDisposable
             if (string.IsNullOrWhiteSpace(titleHead))
                 titleHead = stem;
             var caption = string.IsNullOrWhiteSpace(job.Caption) ? job.DisplayName : job.Caption!;
-            var kind = LibraryVideoKinds.Normalize(job.VideoKind);
+            var kind = _kinds.Normalize(job.VideoKind);
             var downloadedAt = job.CompletedAt ?? job.UpdatedAt;
             list.Add(new LibraryItem(
                 job.Id,
@@ -458,7 +498,7 @@ public sealed class LocalLibraryHost : IAsyncDisposable
                 Path.GetExtension(job.TargetPath),
                 caption,
                 kind,
-                LibraryVideoKinds.LabelOf(kind),
+                _kinds.LabelOf(kind),
                 downloadedAt,
                 job.Author,
                 DownloadSiteFolder.Resolve(job.PageUrl),
@@ -514,6 +554,11 @@ public sealed class LocalLibraryHost : IAsyncDisposable
         public string? TitleHead { get; set; }
         public string? Caption { get; set; }
         public string? VideoKind { get; set; }
+    }
+
+    private sealed class AddKindRequest
+    {
+        public string? Label { get; set; }
     }
 
     private sealed record LibraryItem(

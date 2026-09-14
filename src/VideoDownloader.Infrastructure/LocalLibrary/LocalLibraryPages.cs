@@ -84,8 +84,22 @@ internal static class LocalLibraryPages
     </div>
   </form>
 </dialog>
+<dialog id="kindDlg">
+  <form class="dlg" method="dialog" id="kindForm">
+    <h2>添加新分类</h2>
+    <label>分类名称
+      <input id="kindLabel" name="label" autocomplete="off" maxlength="32" required placeholder="例如：纪录片"/>
+    </label>
+    <div class="err" id="kindErr"></div>
+    <div class="dlg-actions">
+      <button type="button" id="kindCancel">取消</button>
+      <button type="submit" class="primary">添加</button>
+    </div>
+  </form>
+</dialog>
 <script>
 const MODE_KEY = 'vd-local-gallery-mode';
+const NEW_KIND = '__new__';
 function readSavedMode(){
   try {
     const q = new URLSearchParams(location.search).get('group');
@@ -103,20 +117,20 @@ function saveMode(m){
 let mode = readSavedMode();
 saveMode(mode);
 let editingId = null;
-const kinds = [
-  { value:'', label:'未分类' },
-  { value:'movie', label:'电影' },
-  { value:'series', label:'电视剧' },
-  { value:'song', label:'歌曲' },
-  { value:'short', label:'小视频' },
-  { value:'variety', label:'综艺' }
-];
+let kinds = [{ value:'', label:'未分类' }];
+let kindSelectEl = null;
+let kindSelectPrev = '';
 const root = document.getElementById('root');
 const dlg = document.getElementById('editDlg');
+const kindDlg = document.getElementById('kindDlg');
 document.getElementById('btnTime').onclick = () => setMode('time');
 document.getElementById('btnSite').onclick = () => setMode('site');
 document.getElementById('btnKind').onclick = () => setMode('kind');
 document.getElementById('editCancel').onclick = () => dlg.close();
+document.getElementById('kindCancel').onclick = () => {
+  kindDlg.close();
+  restoreKindSelect();
+};
 function setMode(m){
   mode = m;
   saveMode(mode);
@@ -137,7 +151,8 @@ function playHref(item){
 }
 function esc(s){ return String(s??'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function kindOptions(selected){
-  return kinds.map(k => `<option value="${esc(k.value)}"${(selected||'')===k.value?' selected':''}>${esc(k.label)}</option>`).join('');
+  const opts = kinds.map(k => `<option value="${esc(k.value)}"${(selected||'')===k.value?' selected':''}>${esc(k.label)}</option>`).join('');
+  return opts + `<option value="${NEW_KIND}">+ 新增分类</option>`;
 }
 function card(item){
   const meta = item.metaSuffix || '';
@@ -158,18 +173,41 @@ function card(item){
     </div>
   </article>`;
 }
+function restoreKindSelect(){
+  if(kindSelectEl){
+    kindSelectEl.value = kindSelectPrev;
+    kindSelectEl = null;
+  }
+}
+function openKindDlg(sel){
+  kindSelectEl = sel;
+  kindSelectPrev = sel.dataset.prev || '';
+  sel.value = kindSelectPrev;
+  document.getElementById('kindLabel').value = '';
+  document.getElementById('kindErr').textContent = '';
+  kindDlg.showModal();
+  document.getElementById('kindLabel').focus();
+}
 function bindCardEvents(scope){
   scope.querySelectorAll('button.edit').forEach(btn => {
     btn.onclick = () => openEdit(btn.getAttribute('data-edit'));
   });
   scope.querySelectorAll('select.kind').forEach(sel => {
+    sel.dataset.prev = sel.value;
     sel.onchange = async () => {
       const id = sel.getAttribute('data-kind');
+      if(sel.value === NEW_KIND){
+        openKindDlg(sel);
+        return;
+      }
+      const prev = sel.dataset.prev || '';
       try {
         await postEdit({ id, videoKind: sel.value });
+        sel.dataset.prev = sel.value;
         if (mode === 'kind') load();
       } catch (e) {
         alert(e.message || String(e));
+        sel.value = prev;
         load();
       }
     };
@@ -201,6 +239,38 @@ document.getElementById('editForm').onsubmit = async (e) => {
     err.textContent = ex.message || String(ex);
   }
 };
+document.getElementById('kindForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const label = document.getElementById('kindLabel').value.trim();
+  const err = document.getElementById('kindErr');
+  err.textContent = '';
+  if(!label){ err.textContent = '请输入分类名称'; return; }
+  try {
+    const created = await postKind(label);
+    const apiKinds = await fetchKinds();
+    kinds = [{ value:'', label:'未分类' }, ...apiKinds.filter(k => k && k.value)];
+    if(!kinds.some(k => k.value === created.value))
+      kinds.push({ value: created.value, label: created.label });
+    const sel = kindSelectEl;
+    const id = sel && sel.getAttribute('data-kind');
+    kindDlg.close();
+    kindSelectEl = null;
+    if(sel && id){
+      await load();
+      const fresh = root.querySelector('select.kind[data-kind="'+id+'"]');
+      if(fresh){
+        fresh.value = created.value;
+        fresh.dataset.prev = created.value;
+        await postEdit({ id, videoKind: created.value });
+        if (mode === 'kind') await load();
+      }
+    } else {
+      await load();
+    }
+  } catch (ex) {
+    err.textContent = ex.message || String(ex);
+  }
+};
 async function postEdit(body){
   const res = await fetch('/api/edit', {
     method:'POST',
@@ -213,8 +283,30 @@ async function postEdit(body){
   }
   return res.json();
 }
+async function postKind(label){
+  const res = await fetch('/api/kinds', {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json' },
+    body: JSON.stringify({ label })
+  });
+  if(!res.ok){
+    const t = await res.text();
+    throw new Error(t || ('HTTP '+res.status));
+  }
+  return res.json();
+}
+async function fetchKinds(){
+  const res = await fetch('/api/kinds');
+  if(!res.ok) throw new Error('无法加载分类');
+  const data = await res.json();
+  return Array.isArray(data) ? data : [];
+}
 async function load(){
   root.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const apiKinds = await fetchKinds();
+    kinds = [{ value:'', label:'未分类' }, ...apiKinds.filter(k => k && k.value)];
+  } catch (_) {}
   const q = mode==='site' ? '?group=site' : (mode==='kind' ? '?group=kind' : '');
   const res = await fetch('/api/videos'+q);
   const data = await res.json();
