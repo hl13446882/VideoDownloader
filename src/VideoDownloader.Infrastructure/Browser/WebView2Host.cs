@@ -136,6 +136,90 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         return _core.ExecuteScriptAsync(script).WaitAsync(ct);
     }
 
+    /// <summary>
+    /// True when the visible/playing media looks like a live stream (infinite duration, FLV pull, /live URL).
+    /// Used by auto-mode to skip without waiting for idle timeout.
+    /// </summary>
+    public async Task<bool> IsLivePlaybackAsync(CancellationToken ct = default)
+    {
+        if (_core is null)
+            return false;
+
+        try
+        {
+            var page = CurrentPageUrl;
+            if (page is not null && LooksLikeLivePageUrl(page))
+                return true;
+
+            const string script =
+                """
+                (() => {
+                  const visible = el => {
+                    try {
+                      const r = el.getBoundingClientRect();
+                      if (r.width < 2 || r.height < 2) return 0;
+                      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+                      if (cx < 0 || cy < 0 || cx > innerWidth || cy > innerHeight) return 0;
+                      return r.width * r.height;
+                    } catch { return 0; }
+                  };
+                  const isLiveMedia = el => {
+                    if (!(el instanceof HTMLMediaElement)) return false;
+                    const src = String(el.currentSrc || el.src || '');
+                    if (/^https?:/i.test(src) &&
+                        (/\.flv([?#]|$)/i.test(src) || /\/flv\//i.test(src) ||
+                         /[?&](?:mime_type|media_type)=video_flv\b/i.test(src) ||
+                         /pull-(?:flv|hls)/i.test(src)))
+                      return true;
+                    const duration = el.duration;
+                    if (Number.isFinite(duration) && duration > 0) return false;
+                    if (duration === Infinity) return true;
+                    let seekEnd = 0;
+                    try {
+                      if (el.seekable && el.seekable.length > 0)
+                        seekEnd = el.seekable.end(el.seekable.length - 1);
+                    } catch {}
+                    if (Number.isFinite(seekEnd) && seekEnd > 0) return false;
+                    return false;
+                  };
+                  const href = String(location.href || '');
+                  const path = String(location.pathname || '');
+                  if (/\/live\b/i.test(path) || /\/\/live\./i.test(href) || /webcast|livehwc/i.test(href))
+                    return true;
+                  const players = [...document.querySelectorAll('video,audio')].filter(e => visible(e) > 0);
+                  const playing = players.filter(e => !e.paused);
+                  const pool = playing.length ? playing : players;
+                  return pool.some(isLiveMedia);
+                })()
+                """;
+            var raw = await _core.ExecuteScriptAsync(script).WaitAsync(ct);
+            if (string.IsNullOrWhiteSpace(raw))
+                return false;
+            using var doc = JsonDocument.Parse(raw);
+            return doc.RootElement.ValueKind == JsonValueKind.True;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static bool LooksLikeLivePageUrl(Uri page)
+    {
+        var path = page.AbsolutePath;
+        if (path.Contains("/live", StringComparison.OrdinalIgnoreCase))
+            return true;
+        var host = page.Host;
+        if (host.StartsWith("live.", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("webcast", StringComparison.OrdinalIgnoreCase) ||
+            host.Contains("livehwc", StringComparison.OrdinalIgnoreCase))
+            return true;
+        var full = page.AbsoluteUri;
+        return full.Contains("pull-flv", StringComparison.OrdinalIgnoreCase) ||
+               full.Contains("pull-hls", StringComparison.OrdinalIgnoreCase) ||
+               full.Contains("source=yt_live_broadcast", StringComparison.OrdinalIgnoreCase);
+    }
+
     public async Task InitializeAsync(WebView2 webView, CancellationToken ct = default)
     {
         _webView = webView;

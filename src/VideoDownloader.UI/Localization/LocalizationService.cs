@@ -208,6 +208,7 @@ public sealed partial class LocalizationService : ObservableObject
         ["status.autoStopped"] = ("自动模式已停止", "Auto mode stopped"),
         ["status.autoLocalDenied"] = ("本地视频页不能使用自动模式。", "Auto mode is not available on local library pages."),
         ["status.autoStarted"] = ("已进入自动模式（空闲 {0} 分钟）", "Auto mode on (idle {0} min)"),
+        ["status.autoSkipLive"] = ("自动模式：检测到直播，已跳过", "Auto: live stream detected, skipped"),
         ["tip.local"] = ("打开本地视频库", "Open local video library"),
         ["tip.settings"] = ("设置", "Settings"),
         ["tip.language"] = ("切换到英文", "Switch to Chinese"),

@@ -1936,17 +1936,46 @@ public sealed partial class MainViewModel : ObservableObject
         {
             while (!token.IsCancellationRequested && IsAutoMode)
             {
+                // Live playback: skip immediately via the same feed shortcuts (↓ / Shift+N / ]).
+                if (await IsCurrentPlaybackLiveAsync(token))
+                {
+                    await Application.Current.Dispatcher.InvokeAsync(() =>
+                        SetStatusKey("status.autoSkipLive"));
+                    var liveDeadline = DateTime.UtcNow.AddMinutes(_autoIdleMinutes);
+                    if (!await AdvanceFeedAsync(liveDeadline, token))
+                    {
+                        await EndAutoModeTimeoutAsync();
+                        break;
+                    }
+
+                    continue;
+                }
+
                 var deadline = DateTime.UtcNow.AddMinutes(_autoIdleMinutes);
-                var jobId = await TryAutoEnqueueUntilAsync(deadline, token);
+                var probe = await TryAutoEnqueueUntilAsync(deadline, token);
                 if (token.IsCancellationRequested || !IsAutoMode)
                     break;
-                if (jobId is null)
+                if (probe.SkipLive)
+                {
+                    await Application.Current.Dispatcher.InvokeAsync(() =>
+                        SetStatusKey("status.autoSkipLive"));
+                    var liveDeadline = DateTime.UtcNow.AddMinutes(_autoIdleMinutes);
+                    if (!await AdvanceFeedAsync(liveDeadline, token))
+                    {
+                        await EndAutoModeTimeoutAsync();
+                        break;
+                    }
+
+                    continue;
+                }
+
+                if (probe.JobId is null)
                 {
                     await EndAutoModeTimeoutAsync();
                     break;
                 }
 
-                var started = await WaitUntilJobStartedAsync(jobId.Value, deadline, token);
+                var started = await WaitUntilJobStartedAsync(probe.JobId.Value, deadline, token);
                 if (token.IsCancellationRequested || !IsAutoMode)
                     break;
                 if (!started)
@@ -1957,13 +1986,7 @@ public sealed partial class MainViewModel : ObservableObject
 
                 // Fresh idle window for feed advance after download has actually started.
                 deadline = DateTime.UtcNow.AddMinutes(_autoIdleMinutes);
-                var beforeIdentity = CaptureAutoIdentity();
-                _autoSwitchFromIdentity = beforeIdentity;
-                await SwitchToNextVideoAsync();
-                var switched = await WaitForContentSwitchAsync(beforeIdentity, deadline, token);
-                if (token.IsCancellationRequested || !IsAutoMode)
-                    break;
-                if (!switched)
+                if (!await AdvanceFeedAsync(deadline, token))
                 {
                     await EndAutoModeTimeoutAsync();
                     break;
@@ -1999,6 +2022,45 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
+    private async Task<bool> AdvanceFeedAsync(DateTime deadlineUtc, CancellationToken token)
+    {
+        var beforeIdentity = CaptureAutoIdentity();
+        _autoSwitchFromIdentity = beforeIdentity;
+        await SwitchToNextVideoAsync();
+        return await WaitForContentSwitchAsync(beforeIdentity, deadlineUtc, token);
+    }
+
+    private async Task<bool> IsCurrentPlaybackLiveAsync(CancellationToken token)
+    {
+        var tab = SelectedTab;
+        if (tab?.Host is null || !tab.IsInitialized)
+            return false;
+
+        try
+        {
+            if (await tab.Host.IsLivePlaybackAsync(token))
+                return true;
+        }
+        catch
+        {
+            // fall through to URL / detected-variant heuristics
+        }
+
+        var page = tab.Host.CurrentPageUrl
+                   ?? (Uri.TryCreate(AddressBar, UriKind.Absolute, out var uri) ? uri : null);
+        if (page is not null && WebView2Host.LooksLikeLivePageUrl(page))
+            return true;
+
+        // Detected ladder is only live FLV/HLS pull — treat as live card.
+        DetectedVideoViewModel? selected = null;
+        await Application.Current.Dispatcher.InvokeAsync(() => selected = SelectedDetectedVideo);
+        if (selected?.Video.Variants is { Count: > 0 } variants &&
+            variants.All(v => UnifiedMediaPipeline.IsDouyinLiveStream(v.SourceUrl)))
+            return true;
+
+        return false;
+    }
+
     private Task EndAutoModeTimeoutAsync() =>
         Application.Current.Dispatcher.InvokeAsync(() =>
         {
@@ -2009,13 +2071,21 @@ public sealed partial class MainViewModel : ObservableObject
         }).Task;
 
     /// <summary>
-    /// Returns the enqueued job id once a downloadable result is queued under the concurrency gate.
+    /// Queues a downloadable result under the concurrency gate, or signals live skip immediately.
     /// </summary>
-    private async Task<Guid?> TryAutoEnqueueUntilAsync(DateTime deadlineUtc, CancellationToken token)
+    private async Task<AutoProbeResult> TryAutoEnqueueUntilAsync(DateTime deadlineUtc, CancellationToken token)
     {
         var lastProbeAt = DateTime.MinValue;
+        var lastLiveCheckAt = DateTime.MinValue;
         while (!token.IsCancellationRequested && DateTime.UtcNow < deadlineUtc)
         {
+            if (DateTime.UtcNow - lastLiveCheckAt >= TimeSpan.FromSeconds(1))
+            {
+                lastLiveCheckAt = DateTime.UtcNow;
+                if (await IsCurrentPlaybackLiveAsync(token))
+                    return new AutoProbeResult(null, SkipLive: true);
+            }
+
             var remainingMin = Math.Max(1, (int)Math.Ceiling((deadlineUtc - DateTime.UtcNow).TotalMinutes));
             await Application.Current.Dispatcher.InvokeAsync(() =>
             {
@@ -2044,9 +2114,17 @@ public sealed partial class MainViewModel : ObservableObject
 
             if (candidate is not null)
             {
+                // Live-only ladder: skip instead of enqueueing FLV pull.
+                if (candidate.Video.Variants.Count > 0 &&
+                    candidate.Video.Variants.All(v => UnifiedMediaPipeline.IsDouyinLiveStream(v.SourceUrl)))
+                    return new AutoProbeResult(null, SkipLive: true);
+
                 while (!token.IsCancellationRequested && DateTime.UtcNow < deadlineUtc &&
                        CountInFlightDownloads() >= GetMaxConcurrent())
                 {
+                    if (await IsCurrentPlaybackLiveAsync(token))
+                        return new AutoProbeResult(null, SkipLive: true);
+
                     remainingMin = Math.Max(1, (int)Math.Ceiling((deadlineUtc - DateTime.UtcNow).TotalMinutes));
                     await Application.Current.Dispatcher.InvokeAsync(() =>
                         SetStatusKey("status.autoWaitingSlot", remainingMin));
@@ -2061,18 +2139,23 @@ public sealed partial class MainViewModel : ObservableObject
                     var current = FindAutoDownloadCandidate();
                     if (current?.SelectedVariant?.Variant is null)
                         return (Guid?)null;
+                    if (current.Video.Variants.Count > 0 &&
+                        current.Video.Variants.All(v => UnifiedMediaPipeline.IsDouyinLiveStream(v.SourceUrl)))
+                        return null;
                     return await TryStartDownloadQuietAsync(current.Video, current.SelectedVariant.Variant);
                 }).Task.Unwrap();
 
                 if (jobId is Guid id)
-                    return id;
+                    return new AutoProbeResult(id, SkipLive: false);
             }
 
             await Task.Delay(500, token);
         }
 
-        return null;
+        return new AutoProbeResult(null, SkipLive: false);
     }
+
+    private readonly record struct AutoProbeResult(Guid? JobId, bool SkipLive);
 
     private async Task<bool> WaitUntilJobStartedAsync(Guid jobId, DateTime deadlineUtc, CancellationToken token)
     {
