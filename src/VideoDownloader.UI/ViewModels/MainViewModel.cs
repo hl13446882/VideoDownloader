@@ -2247,7 +2247,10 @@ public sealed partial class MainViewModel : ObservableObject
                 return false;
             if (job.Status is DownloadStatus.Preparing or DownloadStatus.Downloading or DownloadStatus.Muxing)
                 return true;
-            if (job.Status is DownloadStatus.Failed or DownloadStatus.Cancelled or DownloadStatus.Completed)
+            // Deduped / already finished: treat as ready so auto-mode can apply the switch beat.
+            if (job.Status is DownloadStatus.Completed)
+                return true;
+            if (job.Status is DownloadStatus.Failed or DownloadStatus.Cancelled)
                 return false;
 
             var remainingMin = RemainingSessionMinutes(sessionEndUtc);
@@ -2332,7 +2335,10 @@ public sealed partial class MainViewModel : ObservableObject
             var created = DownloadJobs.FirstOrDefault(j => j.Job.Id == id);
             if (created is not null)
                 SelectOnlyQueueJob(created);
-            SetStatusKey("status.enqueued", name);
+            if (created?.Job.Status == DownloadStatus.Completed)
+                SetStatusKey("status.alreadyDownloaded", created.Job.DisplayName);
+            else
+                SetStatusKey("status.enqueued", name);
             return id;
         }
         catch (DownloadException ex)

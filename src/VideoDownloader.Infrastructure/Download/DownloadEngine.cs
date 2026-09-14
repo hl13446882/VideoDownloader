@@ -93,6 +93,9 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         // Persist the full quality ladder so 403 recovery can resume the same object.
         variant = MediaVariantAlternatives.WithLadder(variant, siblingVariants);
 
+        if (await TryRefreshCompletedDuplicateAsync(variant, ct) is Guid existingId)
+            return existingId;
+
         if (_license.DownloadLimitBytes is int demoLimit && variant.TotalContentLength is long total && total > demoLimit)
             throw new DownloadException(ErrorCodes.LicenseLimit, "DEMO download limit is 10 MiB.");
         if (_license.DownloadLimitBytes is not null && variant.TotalContentLength is null &&
@@ -142,6 +145,57 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         await _repository.SaveAsync(job, ct);
         _ = RunJobAsync(job);
         return job.Id;
+    }
+
+    /// <summary>
+    /// If a completed job already holds the same durable object (identity / stable URL + size)
+    /// and the file is still on disk, bump its download time and skip a second transfer.
+    /// </summary>
+    private async Task<Guid?> TryRefreshCompletedDuplicateAsync(MediaVariant variant, CancellationToken ct)
+    {
+        DownloadJob? best = null;
+        foreach (var job in _jobs.Values)
+        {
+            if (job.Status != DownloadStatus.Completed)
+                continue;
+            if (string.IsNullOrWhiteSpace(job.TargetPath) || !File.Exists(job.TargetPath))
+                continue;
+
+            long? onDisk = null;
+            try
+            {
+                var len = new FileInfo(job.TargetPath).Length;
+                if (len > 0)
+                    onDisk = len;
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (!CompletedDownloadMatcher.MatchesCompletedObject(
+                    job.Variant,
+                    variant,
+                    job.ExpectedTotalBytes,
+                    onDisk))
+                continue;
+
+            if (best is null ||
+                (job.CompletedAt ?? job.UpdatedAt) > (best.CompletedAt ?? best.UpdatedAt))
+                best = job;
+        }
+
+        if (best is null)
+            return null;
+
+        var now = DateTimeOffset.UtcNow;
+        best.UpdatedAt = now;
+        best.CompletedAt = now;
+        await _repository.SaveAsync(best, ct);
+        _logger.LogInformation(
+            "Skipped duplicate download for job {JobId}; refreshed CompletedAt (identity/stable URL + size match).",
+            best.Id);
+        return best.Id;
     }
 
     public async Task PauseAsync(Guid jobId, CancellationToken ct = default)

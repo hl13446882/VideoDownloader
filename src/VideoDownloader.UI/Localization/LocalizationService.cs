@@ -324,6 +324,7 @@ public sealed partial class LocalizationService : ObservableObject
         ["status.contextWarn"] = ("页面上下文刷新警告：{0}", "Page context refresh warning: {0}"),
         ["status.cancelled"] = ("已取消下载并清理临时文件。", "Download cancelled; temp files cleaned."),
         ["status.enqueued"] = ("已加入队列：{0}", "Queued: {0}"),
+        ["status.alreadyDownloaded"] = ("已存在相同文件，已更新下载时间：{0}", "Same file already exists; download time refreshed: {0}"),
         ["status.enqueueFailed"] = ("无法开始下载：{0}", "Cannot start download: {0}"),
         ["status.removedBoth"] = ("已移除记录并删除文件。", "Record and file removed."),
         ["status.removedRecord"] = ("已移除下载记录。", "Download record removed."),

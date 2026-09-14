@@ -38,7 +38,10 @@ public sealed class DownloadJob
     public string? LastErrorCode { get; internal set; }
     public DateTimeOffset UpdatedAt { get; internal set; }
 
-    /// <summary>When the job first reached <see cref="DownloadStatus.Completed"/>; used for library time sort.</summary>
+    /// <summary>
+    /// Library download time. Set on first complete; refreshed when enqueue dedupes to this job
+    /// (same durable object already on disk) so time-sort moves it to now.
+    /// </summary>
     public DateTimeOffset? CompletedAt { get; set; }
 
     /// <summary>Last library/queue rename or metadata edit; does not affect download-time sort.</summary>
