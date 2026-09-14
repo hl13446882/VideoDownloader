@@ -1985,6 +1985,20 @@ public sealed partial class MainViewModel : ObservableObject
                     break;
                 }
 
+                // Settle briefly so the page/download UI stop jittering before feed advance.
+                if (!await DelayForAutoSettleAsync(
+                        AutoDownloadToSwitchDelay,
+                        deadline,
+                        token,
+                        "status.autoDelaySwitch",
+                        checkLive: false))
+                {
+                    if (token.IsCancellationRequested || !IsAutoMode)
+                        break;
+                    await EndAutoModeTimeoutAsync();
+                    break;
+                }
+
                 // Fresh idle window for feed advance after download has actually started.
                 deadline = DateTime.UtcNow.AddMinutes(_autoIdleMinutes);
                 if (!await AdvanceFeedAsync(deadline, token))
@@ -2135,6 +2149,24 @@ public sealed partial class MainViewModel : ObservableObject
                 if (token.IsCancellationRequested || DateTime.UtcNow >= deadlineUtc)
                     break;
 
+                // Wait for probe UI / stream metadata to settle before enqueueing.
+                var settle = await DelayForAutoSettleAsync(
+                    AutoProbeToDownloadDelay,
+                    deadlineUtc,
+                    token,
+                    "status.autoDelayDownload");
+                if (!settle)
+                {
+                    if (token.IsCancellationRequested)
+                        break;
+                    if (await IsCurrentPlaybackLiveAsync(token))
+                        return new AutoProbeResult(null, SkipLive: true);
+                    break;
+                }
+
+                if (await IsCurrentPlaybackLiveAsync(token))
+                    return new AutoProbeResult(null, SkipLive: true);
+
                 var jobId = await Application.Current.Dispatcher.InvokeAsync(async () =>
                 {
                     var current = FindAutoDownloadCandidate();
@@ -2157,6 +2189,37 @@ public sealed partial class MainViewModel : ObservableObject
     }
 
     private readonly record struct AutoProbeResult(Guid? JobId, bool SkipLive);
+
+    private static readonly TimeSpan AutoProbeToDownloadDelay = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan AutoDownloadToSwitchDelay = TimeSpan.FromSeconds(3);
+
+    /// <summary>
+    /// Waits for UI/probe settle with optional live checks and a countdown status.
+    /// Returns false if cancelled, deadline hit, or (when enabled) live playback appears.
+    /// </summary>
+    private async Task<bool> DelayForAutoSettleAsync(
+        TimeSpan delay,
+        DateTime deadlineUtc,
+        CancellationToken token,
+        string statusKey,
+        bool checkLive = true)
+    {
+        var until = DateTime.UtcNow + delay;
+        while (!token.IsCancellationRequested &&
+               DateTime.UtcNow < until &&
+               DateTime.UtcNow < deadlineUtc)
+        {
+            if (checkLive && await IsCurrentPlaybackLiveAsync(token))
+                return false;
+
+            var remainingSec = Math.Max(1, (int)Math.Ceiling((until - DateTime.UtcNow).TotalSeconds));
+            await Application.Current.Dispatcher.InvokeAsync(() =>
+                SetStatusKey(statusKey, remainingSec));
+            await Task.Delay(200, token);
+        }
+
+        return !token.IsCancellationRequested && DateTime.UtcNow < deadlineUtc;
+    }
 
     private async Task<bool> WaitUntilJobStartedAsync(Guid jobId, DateTime deadlineUtc, CancellationToken token)
     {
