@@ -408,6 +408,8 @@ public sealed partial class MainViewModel : ObservableObject
 
     private CancellationTokenSource? _autoCts;
     private int _autoIdleMinutes = 5;
+    /// <summary>Fixed end of the current auto-mode session (start + duration). Not refreshed per item.</summary>
+    private DateTime _autoSessionEndUtc;
     private string? _autoSwitchFromIdentity;
 
     [ObservableProperty]
@@ -1896,6 +1898,7 @@ public sealed partial class MainViewModel : ObservableObject
         _autoCts?.Cancel();
         _autoCts?.Dispose();
         _autoCts = cts;
+        _autoSessionEndUtc = DateTime.UtcNow.AddMinutes(_autoIdleMinutes);
         IsAutoMode = true;
         SetStatusKey("status.autoStarted", _autoIdleMinutes);
         _ = RunAutoModeLoopAsync(cts.Token);
@@ -1933,17 +1936,17 @@ public sealed partial class MainViewModel : ObservableObject
 
     private async Task RunAutoModeLoopAsync(CancellationToken token)
     {
+        var sessionEnd = _autoSessionEndUtc;
         try
         {
-            while (!token.IsCancellationRequested && IsAutoMode)
+            while (!token.IsCancellationRequested && IsAutoMode && DateTime.UtcNow < sessionEnd)
             {
                 // Live playback: skip immediately via the same feed shortcuts (↓ / Shift+N / ]).
                 if (await IsCurrentPlaybackLiveAsync(token))
                 {
                     await Application.Current.Dispatcher.InvokeAsync(() =>
                         SetStatusKey("status.autoSkipLive"));
-                    var liveDeadline = DateTime.UtcNow.AddMinutes(_autoIdleMinutes);
-                    if (!await AdvanceFeedAsync(liveDeadline, token))
+                    if (!await AdvanceFeedAsync(sessionEnd, token))
                     {
                         await EndAutoModeTimeoutAsync();
                         break;
@@ -1952,16 +1955,24 @@ public sealed partial class MainViewModel : ObservableObject
                     continue;
                 }
 
-                var deadline = DateTime.UtcNow.AddMinutes(_autoIdleMinutes);
-                var probe = await TryAutoEnqueueUntilAsync(deadline, token);
+                var probe = await TryAutoEnqueueUntilAsync(sessionEnd, token);
                 if (token.IsCancellationRequested || !IsAutoMode)
                     break;
-                if (probe.SkipLive)
+                if (DateTime.UtcNow >= sessionEnd)
                 {
-                    await Application.Current.Dispatcher.InvokeAsync(() =>
-                        SetStatusKey("status.autoSkipLive"));
-                    var liveDeadline = DateTime.UtcNow.AddMinutes(_autoIdleMinutes);
-                    if (!await AdvanceFeedAsync(liveDeadline, token))
+                    await EndAutoModeTimeoutAsync();
+                    break;
+                }
+
+                if (probe.SkipLive || probe.AdvanceNoAddress)
+                {
+                    if (probe.SkipLive)
+                    {
+                        await Application.Current.Dispatcher.InvokeAsync(() =>
+                            SetStatusKey("status.autoSkipLive"));
+                    }
+
+                    if (!await AdvanceFeedAsync(sessionEnd, token))
                     {
                         await EndAutoModeTimeoutAsync();
                         break;
@@ -1976,7 +1987,7 @@ public sealed partial class MainViewModel : ObservableObject
                     break;
                 }
 
-                var started = await WaitUntilJobStartedAsync(probe.JobId.Value, deadline, token);
+                var started = await WaitUntilJobStartedAsync(probe.JobId.Value, sessionEnd, token);
                 if (token.IsCancellationRequested || !IsAutoMode)
                     break;
                 if (!started)
@@ -1985,10 +1996,10 @@ public sealed partial class MainViewModel : ObservableObject
                     break;
                 }
 
-                // Settle briefly so the page/download UI stop jittering before feed advance.
+                // Apply-switch beat: wait after the job actually starts, then advance feed.
                 if (!await DelayForAutoSettleAsync(
-                        AutoDownloadToSwitchDelay,
-                        deadline,
+                        AutoApplySwitchDelay,
+                        sessionEnd,
                         token,
                         "status.autoDelaySwitch",
                         checkLive: false))
@@ -1999,14 +2010,15 @@ public sealed partial class MainViewModel : ObservableObject
                     break;
                 }
 
-                // Fresh idle window for feed advance after download has actually started.
-                deadline = DateTime.UtcNow.AddMinutes(_autoIdleMinutes);
-                if (!await AdvanceFeedAsync(deadline, token))
+                if (!await AdvanceFeedAsync(sessionEnd, token))
                 {
                     await EndAutoModeTimeoutAsync();
                     break;
                 }
             }
+
+            if (IsAutoMode && !token.IsCancellationRequested && DateTime.UtcNow >= sessionEnd)
+                await EndAutoModeTimeoutAsync();
         }
         catch (OperationCanceledException)
         {
@@ -2037,12 +2049,12 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
-    private async Task<bool> AdvanceFeedAsync(DateTime deadlineUtc, CancellationToken token)
+    private async Task<bool> AdvanceFeedAsync(DateTime sessionEndUtc, CancellationToken token)
     {
         var beforeIdentity = CaptureAutoIdentity();
         _autoSwitchFromIdentity = beforeIdentity;
         await SwitchToNextVideoAsync();
-        return await WaitForContentSwitchAsync(beforeIdentity, deadlineUtc, token);
+        return await WaitForContentSwitchAsync(beforeIdentity, sessionEndUtc, token);
     }
 
     private async Task<bool> IsCurrentPlaybackLiveAsync(CancellationToken token)
@@ -2067,9 +2079,9 @@ public sealed partial class MainViewModel : ObservableObject
             return true;
 
         // Detected ladder is only live FLV/HLS pull — treat as live card.
-        DetectedVideoViewModel? selected = null;
-        await Application.Current.Dispatcher.InvokeAsync(() => selected = SelectedDetectedVideo);
-        if (selected?.Video.Variants is { Count: > 0 } variants &&
+        DetectedVideoViewModel? first = null;
+        await Application.Current.Dispatcher.InvokeAsync(() => first = FindAutoDownloadCandidate());
+        if (first?.Video.Variants is { Count: > 0 } variants &&
             variants.All(v => UnifiedMediaPipeline.IsDouyinLiveStream(v.SourceUrl)))
             return true;
 
@@ -2085,15 +2097,29 @@ public sealed partial class MainViewModel : ObservableObject
             SetStatusKey("status.autoStoppedTimeout");
         }).Task;
 
+    private static int RemainingSessionMinutes(DateTime sessionEndUtc) =>
+        Math.Max(0, (int)Math.Ceiling((sessionEndUtc - DateTime.UtcNow).TotalMinutes));
+
     /// <summary>
-    /// Queues a downloadable result under the concurrency gate, or signals live skip immediately.
+    /// Queues the first detected card under the concurrency gate, advances after 1 min with no address,
+    /// or signals live skip. Uses the fixed session end (not a per-item idle window).
     /// </summary>
-    private async Task<AutoProbeResult> TryAutoEnqueueUntilAsync(DateTime deadlineUtc, CancellationToken token)
+    private async Task<AutoProbeResult> TryAutoEnqueueUntilAsync(DateTime sessionEndUtc, CancellationToken token)
     {
         var lastProbeAt = DateTime.MinValue;
         var lastLiveCheckAt = DateTime.MinValue;
-        while (!token.IsCancellationRequested && DateTime.UtcNow < deadlineUtc)
+        var noAddressSinceUtc = DateTime.UtcNow;
+        var trackedIdentity = CaptureAutoIdentity();
+
+        while (!token.IsCancellationRequested && DateTime.UtcNow < sessionEndUtc)
         {
+            var identity = CaptureAutoIdentity();
+            if (!string.Equals(identity, trackedIdentity, StringComparison.Ordinal))
+            {
+                trackedIdentity = identity;
+                noAddressSinceUtc = DateTime.UtcNow;
+            }
+
             if (DateTime.UtcNow - lastLiveCheckAt >= TimeSpan.FromSeconds(1))
             {
                 lastLiveCheckAt = DateTime.UtcNow;
@@ -2101,20 +2127,12 @@ public sealed partial class MainViewModel : ObservableObject
                     return new AutoProbeResult(null, SkipLive: true);
             }
 
-            var remainingMin = Math.Max(1, (int)Math.Ceiling((deadlineUtc - DateTime.UtcNow).TotalMinutes));
-            await Application.Current.Dispatcher.InvokeAsync(() =>
-            {
-                if (CountInFlightDownloads() >= GetMaxConcurrent())
-                    SetStatusKey("status.autoWaitingSlot", remainingMin);
-                else
-                    SetStatusKey("status.autoRunning", remainingMin);
-            });
-
+            var remainingMin = RemainingSessionMinutes(sessionEndUtc);
             DetectedVideoViewModel? candidate = null;
             await Application.Current.Dispatcher.InvokeAsync(() =>
             {
                 candidate = FindAutoDownloadCandidate();
-                if (candidate is null &&
+                if (!IsAutoCandidateDownloadable(candidate) &&
                     DateTime.UtcNow - lastProbeAt >= TimeSpan.FromSeconds(8))
                 {
                     var pageUrl = SelectedTab?.Host.CurrentPageUrl
@@ -2127,32 +2145,35 @@ public sealed partial class MainViewModel : ObservableObject
                 }
             });
 
-            if (candidate is not null)
-            {
-                // Live-only ladder: skip instead of enqueueing FLV pull.
-                if (candidate.Video.Variants.Count > 0 &&
-                    candidate.Video.Variants.All(v => UnifiedMediaPipeline.IsDouyinLiveStream(v.SourceUrl)))
-                    return new AutoProbeResult(null, SkipLive: true);
+            if (candidate is not null &&
+                candidate.Video.Variants.Count > 0 &&
+                candidate.Video.Variants.All(v => UnifiedMediaPipeline.IsDouyinLiveStream(v.SourceUrl)))
+                return new AutoProbeResult(null, SkipLive: true);
 
-                while (!token.IsCancellationRequested && DateTime.UtcNow < deadlineUtc &&
+            if (IsAutoCandidateDownloadable(candidate))
+            {
+                // Hold the no-address clock while we have a usable first card.
+                noAddressSinceUtc = DateTime.UtcNow;
+
+                while (!token.IsCancellationRequested && DateTime.UtcNow < sessionEndUtc &&
                        CountInFlightDownloads() >= GetMaxConcurrent())
                 {
                     if (await IsCurrentPlaybackLiveAsync(token))
                         return new AutoProbeResult(null, SkipLive: true);
 
-                    remainingMin = Math.Max(1, (int)Math.Ceiling((deadlineUtc - DateTime.UtcNow).TotalMinutes));
+                    remainingMin = RemainingSessionMinutes(sessionEndUtc);
                     await Application.Current.Dispatcher.InvokeAsync(() =>
                         SetStatusKey("status.autoWaitingSlot", remainingMin));
                     await Task.Delay(400, token);
                 }
 
-                if (token.IsCancellationRequested || DateTime.UtcNow >= deadlineUtc)
+                if (token.IsCancellationRequested || DateTime.UtcNow >= sessionEndUtc)
                     break;
 
-                // Wait for probe UI / stream metadata to settle before enqueueing.
+                // Apply-download beat: enqueue only after this delay (not a probe delay).
                 var settle = await DelayForAutoSettleAsync(
-                    AutoProbeToDownloadDelay,
-                    deadlineUtc,
+                    AutoApplyDownloadDelay,
+                    sessionEndUtc,
                     token,
                     "status.autoDelayDownload");
                 if (!settle)
@@ -2170,16 +2191,26 @@ public sealed partial class MainViewModel : ObservableObject
                 var jobId = await Application.Current.Dispatcher.InvokeAsync(async () =>
                 {
                     var current = FindAutoDownloadCandidate();
-                    if (current?.SelectedVariant?.Variant is null)
+                    if (!IsAutoCandidateDownloadable(current))
                         return (Guid?)null;
-                    if (current.Video.Variants.Count > 0 &&
+                    if (current!.Video.Variants.Count > 0 &&
                         current.Video.Variants.All(v => UnifiedMediaPipeline.IsDouyinLiveStream(v.SourceUrl)))
                         return null;
-                    return await TryStartDownloadQuietAsync(current.Video, current.SelectedVariant.Variant);
+                    return await TryStartDownloadQuietAsync(current.Video, current.SelectedVariant!.Variant);
                 }).Task.Unwrap();
 
                 if (jobId is Guid id)
                     return new AutoProbeResult(id, SkipLive: false);
+            }
+            else
+            {
+                var noAddrLeft = AutoNoAddressSwitch - (DateTime.UtcNow - noAddressSinceUtc);
+                if (noAddrLeft <= TimeSpan.Zero)
+                    return new AutoProbeResult(null, SkipLive: false, AdvanceNoAddress: true);
+
+                var remainSec = Math.Max(1, (int)Math.Ceiling(noAddrLeft.TotalSeconds));
+                await Application.Current.Dispatcher.InvokeAsync(() =>
+                    SetStatusKey("status.autoNoAddress", remainSec));
             }
 
             await Task.Delay(500, token);
@@ -2188,18 +2219,19 @@ public sealed partial class MainViewModel : ObservableObject
         return new AutoProbeResult(null, SkipLive: false);
     }
 
-    private readonly record struct AutoProbeResult(Guid? JobId, bool SkipLive);
+    private readonly record struct AutoProbeResult(Guid? JobId, bool SkipLive, bool AdvanceNoAddress = false);
 
-    private static readonly TimeSpan AutoProbeToDownloadDelay = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan AutoDownloadToSwitchDelay = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan AutoApplyDownloadDelay = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan AutoApplySwitchDelay = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan AutoNoAddressSwitch = TimeSpan.FromMinutes(1);
 
     /// <summary>
-    /// Waits for UI/probe settle with optional live checks and a countdown status.
-    /// Returns false if cancelled, deadline hit, or (when enabled) live playback appears.
+    /// Countdown helper for apply-download / apply-switch beats.
+    /// Returns false if cancelled, session ended, or (when enabled) live playback appears.
     /// </summary>
     private async Task<bool> DelayForAutoSettleAsync(
         TimeSpan delay,
-        DateTime deadlineUtc,
+        DateTime sessionEndUtc,
         CancellationToken token,
         string statusKey,
         bool checkLive = true)
@@ -2207,7 +2239,7 @@ public sealed partial class MainViewModel : ObservableObject
         var until = DateTime.UtcNow + delay;
         while (!token.IsCancellationRequested &&
                DateTime.UtcNow < until &&
-               DateTime.UtcNow < deadlineUtc)
+               DateTime.UtcNow < sessionEndUtc)
         {
             if (checkLive && await IsCurrentPlaybackLiveAsync(token))
                 return false;
@@ -2218,12 +2250,12 @@ public sealed partial class MainViewModel : ObservableObject
             await Task.Delay(200, token);
         }
 
-        return !token.IsCancellationRequested && DateTime.UtcNow < deadlineUtc;
+        return !token.IsCancellationRequested && DateTime.UtcNow < sessionEndUtc;
     }
 
-    private async Task<bool> WaitUntilJobStartedAsync(Guid jobId, DateTime deadlineUtc, CancellationToken token)
+    private async Task<bool> WaitUntilJobStartedAsync(Guid jobId, DateTime sessionEndUtc, CancellationToken token)
     {
-        while (!token.IsCancellationRequested && DateTime.UtcNow < deadlineUtc)
+        while (!token.IsCancellationRequested && DateTime.UtcNow < sessionEndUtc)
         {
             var job = _downloadEngine.GetActiveJobs().FirstOrDefault(j => j.Id == jobId);
             if (job is null)
@@ -2233,7 +2265,7 @@ public sealed partial class MainViewModel : ObservableObject
             if (job.Status is DownloadStatus.Failed or DownloadStatus.Cancelled or DownloadStatus.Completed)
                 return false;
 
-            var remainingMin = Math.Max(1, (int)Math.Ceiling((deadlineUtc - DateTime.UtcNow).TotalMinutes));
+            var remainingMin = RemainingSessionMinutes(sessionEndUtc);
             await Application.Current.Dispatcher.InvokeAsync(() =>
                 SetStatusKey("status.autoWaitingSlot", remainingMin));
             await Task.Delay(200, token);
@@ -2242,16 +2274,16 @@ public sealed partial class MainViewModel : ObservableObject
         return false;
     }
 
-    private async Task<bool> WaitForContentSwitchAsync(string? beforeIdentity, DateTime deadlineUtc, CancellationToken token)
+    private async Task<bool> WaitForContentSwitchAsync(string? beforeIdentity, DateTime sessionEndUtc, CancellationToken token)
     {
-        while (!token.IsCancellationRequested && DateTime.UtcNow < deadlineUtc)
+        while (!token.IsCancellationRequested && DateTime.UtcNow < sessionEndUtc)
         {
             var now = CaptureAutoIdentity();
             if (!string.IsNullOrEmpty(now) &&
                 !string.Equals(now, beforeIdentity, StringComparison.Ordinal))
                 return true;
 
-            var remainingMin = Math.Max(1, (int)Math.Ceiling((deadlineUtc - DateTime.UtcNow).TotalMinutes));
+            var remainingMin = RemainingSessionMinutes(sessionEndUtc);
             await Application.Current.Dispatcher.InvokeAsync(() =>
                 SetStatusKey("status.autoRunning", remainingMin));
             await Task.Delay(400, token);
@@ -2270,18 +2302,12 @@ public sealed partial class MainViewModel : ObservableObject
                ?? _currentPageIdentity;
     }
 
-    private DetectedVideoViewModel? FindAutoDownloadCandidate()
-    {
-        if (SelectedDetectedVideo is { IsDrm: false, SelectedVariant: not null } selected)
-            return selected;
-        foreach (var item in DetectedVideos)
-        {
-            if (!item.IsDrm && item.SelectedVariant is not null)
-                return item;
-        }
+    /// <summary>Always the first detected card (list order), not the UI selection.</summary>
+    private DetectedVideoViewModel? FindAutoDownloadCandidate() =>
+        DetectedVideos.Count > 0 ? DetectedVideos[0] : null;
 
-        return null;
-    }
+    private static bool IsAutoCandidateDownloadable(DetectedVideoViewModel? item) =>
+        item is { IsDrm: false, SelectedVariant.Variant: not null };
 
     private int GetMaxConcurrent() =>
         Math.Clamp(_options.Download.MaxConcurrentDownloads, 1, 5);
