@@ -100,6 +100,8 @@ public sealed partial class LocalizationService : ObservableObject
         OnPropertyChanged(nameof(MenuRemove));
         OnPropertyChanged(nameof(SettingsTitle));
         OnPropertyChanged(nameof(SettingsSavePath));
+        OnPropertyChanged(nameof(SettingsMigrate));
+        OnPropertyChanged(nameof(SettingsMigrateTip));
         OnPropertyChanged(nameof(SettingsMaxConcurrent));
         OnPropertyChanged(nameof(SettingsRetry));
         OnPropertyChanged(nameof(SettingsFailedRetryInterval));
@@ -159,6 +161,8 @@ public sealed partial class LocalizationService : ObservableObject
     public string MenuRemove => T("menu.remove");
     public string SettingsTitle => T("settings.title");
     public string SettingsSavePath => T("settings.savePath");
+    public string SettingsMigrate => T("settings.migrate");
+    public string SettingsMigrateTip => T("settings.migrateTip");
     public string SettingsMaxConcurrent => T("settings.maxConcurrent");
     public string SettingsRetry => T("settings.retry");
     public string SettingsFailedRetryInterval => T("settings.failedRetryInterval");
@@ -233,6 +237,14 @@ public sealed partial class LocalizationService : ObservableObject
         ["menu.remove"] = ("移除", "Remove"),
         ["settings.title"] = ("设置", "Settings"),
         ["settings.savePath"] = ("保存目录", "Save folder"),
+        ["settings.migrate"] = ("迁移", "Migrate"),
+        ["settings.migrateTip"] = ("将已完成下载迁移到当前保存目录并删除原文件", "Move completed downloads to the current save folder and delete originals"),
+        ["settings.migrateConfirm"] = ("将把 {0} 个已完成文件迁移到当前保存目录，并删除原文件。进行中的下载须先停止。是否继续？", "Migrate {0} completed file(s) to the current save folder and delete originals. Stop in-progress downloads first. Continue?"),
+        ["settings.migrateNone"] = ("没有需要迁移的已完成文件。", "No completed files need migration."),
+        ["settings.migrateBlocked"] = ("存在进行中的下载任务，请先暂停或取消后再迁移。", "Downloads are in progress. Pause or cancel them before migrating."),
+        ["settings.migrateInvalidPath"] = ("保存目录无效，无法迁移。", "Save folder is invalid; cannot migrate."),
+        ["settings.migrateDone"] = ("迁移完成：成功 {0}，跳过 {1}，失败 {2}。", "Migration done: moved {0}, skipped {1}, failed {2}."),
+        ["settings.migrateFailed"] = ("迁移失败：{0}", "Migration failed: {0}"),
         ["settings.maxConcurrent"] = ("最大并发", "Max concurrent"),
         ["settings.retry"] = ("重试次数", "Retry count"),
         ["settings.failedRetryInterval"] = ("失败捞起间隔(秒)", "Failed retry interval (sec)"),

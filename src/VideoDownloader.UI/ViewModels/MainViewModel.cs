@@ -588,6 +588,7 @@ public sealed partial class MainViewModel : ObservableObject
         _pipeline.VideoDetected += OnVideoDetected;
         _pipeline.PageProbed += OnPageProbed;
         _loc.LanguageChanged += OnLanguageChanged;
+        _settingsViewModel.DownloadsMigrated += (_, _) => RefreshDownloadJobs();
         RebuildAddressPresets();
     }
 

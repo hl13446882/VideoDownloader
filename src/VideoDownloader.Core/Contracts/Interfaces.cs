@@ -88,6 +88,12 @@ public interface IDownloadEngine
     Task<string> RenameAsync(Guid jobId, string newStem, CancellationToken ct = default);
 
     /// <summary>
+    /// Moves completed on-disk files under <paramref name="newRoot"/> (preserving site subfolders),
+    /// updates TargetPath, and deletes sources. Refuses when any job is in-flight.
+    /// </summary>
+    Task<DownloadMigrateResult> MigrateCompletedToSaveRootAsync(string newRoot, CancellationToken ct = default);
+
+    /// <summary>
     /// Updates completed-library fields: optional title head (meta suffix preserved), caption, video kind.
     /// </summary>
     Task UpdateLibraryItemAsync(

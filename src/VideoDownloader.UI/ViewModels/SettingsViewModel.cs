@@ -4,6 +4,8 @@ using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.DependencyInjection;
+using VideoDownloader.Core.Contracts;
+using VideoDownloader.Core.Models;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Logging;
 using VideoDownloader.Infrastructure.Security;
@@ -47,11 +49,17 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     private bool _checkUpdateEnabled = true;
 
+    [ObservableProperty]
+    private bool _migrateEnabled = true;
+
     public LocalizationService L => _loc;
 
     public string AppVersionText => "V" + AppVersionInfo.SemVer;
 
     public IReadOnlyList<int> ConcurrentOptions { get; } = [1, 2, 3, 4, 5];
+
+    /// <summary>Raised after a successful migrate so the main window can refresh the queue.</summary>
+    public event EventHandler? DownloadsMigrated;
 
     public SettingsViewModel(
         AppOptions options,
@@ -82,22 +90,110 @@ public sealed partial class SettingsViewModel : ObservableObject
     [RelayCommand]
     private void Save()
     {
+        if (!TryPersistSettings(out var error))
+        {
+            StatusMessage = error;
+            return;
+        }
+
+        StatusMessage = _loc.T("settings.saved");
+    }
+
+    [RelayCommand]
+    private async Task MigrateDownloadsAsync()
+    {
+        if (!TryPersistSettings(out var error))
+        {
+            StatusMessage = error;
+            return;
+        }
+
+        var engine = _services.GetRequiredService<IDownloadEngine>();
+        var root = PathExpander.Expand(_options.Download.DefaultSavePath.Trim());
+        string rootFull;
+        try
+        {
+            rootFull = Path.GetFullPath(root);
+        }
+        catch
+        {
+            StatusMessage = _loc.T("settings.migrateInvalidPath");
+            return;
+        }
+
+        var candidateCount = engine.GetActiveJobs().Count(j =>
+            j.Status == DownloadStatus.Completed &&
+            !string.IsNullOrWhiteSpace(j.TargetPath) &&
+            File.Exists(j.TargetPath) &&
+            !IsUnderRoot(j.TargetPath, rootFull));
+
+        if (candidateCount == 0)
+        {
+            StatusMessage = _loc.T("settings.migrateNone");
+            return;
+        }
+
+        var confirm = MessageBox.Show(
+            _loc.Format("settings.migrateConfirm", candidateCount),
+            _loc.T("settings.migrate"),
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question);
+        if (confirm != MessageBoxResult.Yes)
+            return;
+
+        MigrateEnabled = false;
+        try
+        {
+            var result = await engine.MigrateCompletedToSaveRootAsync(rootFull);
+            if (result.BlockReason is "in-flight")
+            {
+                StatusMessage = _loc.T("settings.migrateBlocked");
+                return;
+            }
+
+            if (result.BlockReason is "invalid-root" or "empty-root")
+            {
+                StatusMessage = _loc.T("settings.migrateInvalidPath");
+                return;
+            }
+
+            StatusMessage = _loc.Format(
+                "settings.migrateDone",
+                result.Moved,
+                result.Skipped,
+                result.Failed);
+            if (result.Moved > 0)
+                DownloadsMigrated?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = _loc.Format("settings.migrateFailed", ex.Message);
+        }
+        finally
+        {
+            MigrateEnabled = true;
+        }
+    }
+
+    private bool TryPersistSettings(out string error)
+    {
+        error = string.Empty;
         if (!PathValidator.IsValidSaveDirectory(SavePath.Trim()))
         {
-            StatusMessage = _loc.T("settings.invalidPath");
-            return;
+            error = _loc.T("settings.invalidPath");
+            return false;
         }
 
         if (!int.TryParse(RetryCountText, out var retryCount))
         {
-            StatusMessage = _loc.T("settings.invalidRetry");
-            return;
+            error = _loc.T("settings.invalidRetry");
+            return false;
         }
 
         if (!int.TryParse(FailedRetryIntervalText, out var failedRetryInterval))
         {
-            StatusMessage = _loc.T("settings.invalidFailedRetryInterval");
-            return;
+            error = _loc.T("settings.invalidFailedRetryInterval");
+            return false;
         }
 
         _options.Download.DefaultSavePath = SavePath.Trim();
@@ -111,7 +207,24 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         _store.Save(_options);
         _appLog.ApplyFromOptions();
-        StatusMessage = _loc.T("settings.saved");
+        return true;
+    }
+
+    private static bool IsUnderRoot(string filePath, string fullRoot)
+    {
+        try
+        {
+            var root = Path.GetFullPath(fullRoot)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var file = Path.GetFullPath(filePath);
+            var prefix = root + Path.DirectorySeparatorChar;
+            return file.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(file, root, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     [RelayCommand]

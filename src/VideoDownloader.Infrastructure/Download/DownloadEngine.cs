@@ -284,6 +284,163 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         return stem;
     }
 
+    public async Task<DownloadMigrateResult> MigrateCompletedToSaveRootAsync(
+        string newRoot,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(newRoot))
+            return new DownloadMigrateResult(0, 0, 0, "empty-root");
+
+        string root;
+        try
+        {
+            root = Path.GetFullPath(PathExpander.Expand(newRoot.Trim()));
+        }
+        catch
+        {
+            return new DownloadMigrateResult(0, 0, 0, "invalid-root");
+        }
+
+        if (!PathValidator.IsValidSaveDirectory(root))
+            return new DownloadMigrateResult(0, 0, 0, "invalid-root");
+
+        Directory.CreateDirectory(root);
+
+        var inFlight = _jobs.Values.Any(j =>
+            j.Status is DownloadStatus.Pending
+                or DownloadStatus.Preparing
+                or DownloadStatus.Downloading
+                or DownloadStatus.Muxing
+                or DownloadStatus.Paused);
+        if (inFlight)
+            return new DownloadMigrateResult(0, 0, 0, "in-flight");
+
+        var moved = 0;
+        var skipped = 0;
+        var failed = 0;
+        var candidates = _jobs.Values
+            .Where(j => j.Status == DownloadStatus.Completed &&
+                        !string.IsNullOrWhiteSpace(j.TargetPath) &&
+                        File.Exists(j.TargetPath))
+            .ToList();
+
+        foreach (var job in candidates)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                var oldPath = Path.GetFullPath(job.TargetPath);
+                if (IsPathUnderRoot(oldPath, root))
+                {
+                    skipped++;
+                    continue;
+                }
+
+                var fileName = Path.GetFileName(oldPath);
+                var extension = Path.GetExtension(fileName);
+                var stem = Path.GetFileNameWithoutExtension(fileName);
+                if (string.IsNullOrWhiteSpace(stem))
+                {
+                    failed++;
+                    continue;
+                }
+
+                var saveDir = DownloadSiteFolder.CombineSaveDirectory(root, job.PageUrl);
+                Directory.CreateDirectory(saveDir);
+
+                string targetPath;
+                lock (_targetPathSync)
+                {
+                    var candidateStem = stem;
+                    var sequence = 2;
+                    while (true)
+                    {
+                        targetPath = Path.Combine(saveDir, candidateStem + extension);
+                        var conflict = File.Exists(targetPath) ||
+                                       File.Exists(targetPath + ".part") ||
+                                       _jobs.Values.Any(j =>
+                                           j.Id != job.Id &&
+                                           string.Equals(j.TargetPath, targetPath, StringComparison.OrdinalIgnoreCase));
+                        if (!conflict)
+                            break;
+                        candidateStem = DownloadFileNameBuilder.WithSequenceSuffix(stem, sequence++);
+                    }
+
+                    if (string.Equals(oldPath, Path.GetFullPath(targetPath), StringComparison.OrdinalIgnoreCase))
+                    {
+                        skipped++;
+                        continue;
+                    }
+
+                    var oldPartsDir = Path.Combine(
+                        Path.GetDirectoryName(oldPath) ?? string.Empty,
+                        ".parts",
+                        job.Id.ToString("N"));
+
+                    MoveFileAcrossVolumes(oldPath, targetPath);
+                    TryDeleteFile(oldPath + ".part");
+                    TryDeleteDirectory(oldPartsDir);
+                    TryDeleteEmptyPartsRoot(Path.GetDirectoryName(oldPath) ?? string.Empty);
+
+                    job.TargetPath = targetPath;
+                    job.DisplayName = Path.GetFileNameWithoutExtension(targetPath);
+                    job.EditedAt = DateTimeOffset.UtcNow;
+                }
+
+                await _repository.SaveAsync(job, ct);
+                moved++;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Migrate failed for job {JobId}", job.Id);
+                failed++;
+            }
+        }
+
+        return new DownloadMigrateResult(moved, skipped, failed);
+    }
+
+    private static bool IsPathUnderRoot(string fullFilePath, string fullRoot)
+    {
+        var root = Path.GetFullPath(fullRoot)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var file = Path.GetFullPath(fullFilePath);
+        if (string.Equals(file, root, StringComparison.OrdinalIgnoreCase))
+            return true;
+        var prefix = root + Path.DirectorySeparatorChar;
+        return file.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void MoveFileAcrossVolumes(string source, string destination)
+    {
+        if (!File.Exists(source))
+            throw new FileNotFoundException("源文件不存在。", source);
+        if (File.Exists(destination))
+            throw new IOException($"目标已存在：{Path.GetFileName(destination)}");
+
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        try
+        {
+            File.Move(source, destination);
+            return;
+        }
+        catch (IOException)
+        {
+            // Cross-volume or locked briefly — copy then delete source.
+        }
+
+        File.Copy(source, destination, overwrite: false);
+        var srcLen = new FileInfo(source).Length;
+        var dstLen = new FileInfo(destination).Length;
+        if (srcLen != dstLen)
+        {
+            TryDeleteFile(destination);
+            throw new IOException("复制后文件大小不一致。");
+        }
+
+        File.Delete(source);
+    }
+
     public async Task UpdateLibraryItemAsync(
         Guid jobId,
         string? titleHead = null,

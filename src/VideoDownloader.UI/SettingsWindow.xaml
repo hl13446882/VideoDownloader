@@ -28,7 +28,18 @@
         </Grid.ColumnDefinitions>
 
         <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding L.SettingsSavePath}" VerticalAlignment="Center" Margin="0,0,8,8"/>
-        <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding SavePath, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,8"/>
+        <DockPanel Grid.Row="0" Grid.Column="1" Margin="0,0,0,8" LastChildFill="True">
+            <Button DockPanel.Dock="Right"
+                    Content="{Binding L.SettingsMigrate}"
+                    Command="{Binding MigrateDownloadsCommand}"
+                    IsEnabled="{Binding MigrateEnabled}"
+                    Padding="12,4" Margin="8,0,0,0"
+                    MinWidth="64"
+                    ToolTip="{Binding L.SettingsMigrateTip}"/>
+            <TextBox Text="{Binding SavePath, UpdateSourceTrigger=PropertyChanged}"
+                     VerticalContentAlignment="Center"
+                     ToolTip="{Binding SavePath}"/>
+        </DockPanel>
 
         <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding L.SettingsMaxConcurrent}" VerticalAlignment="Center" Margin="0,0,8,8"/>
         <ComboBox Grid.Row="1" Grid.Column="1"
