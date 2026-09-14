@@ -30,7 +30,7 @@ DATABASE = DATA_DIR / "licenses.db"
 PRIVATE_KEY_FILE = DATA_DIR / "signing-key.pem"
 SESSION_SECRET_FILE = DATA_DIR / "session-secret.bin"
 SESSION_TTL = timedelta(hours=8)
-LICENSE_TTL = timedelta(days=7)
+LICENSE_TTL = timedelta(days=90)
 
 
 def utcnow():
