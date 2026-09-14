@@ -2101,12 +2101,11 @@ public sealed partial class MainViewModel : ObservableObject
         Math.Max(0, (int)Math.Ceiling((sessionEndUtc - DateTime.UtcNow).TotalMinutes));
 
     /// <summary>
-    /// Queues the first detected card under the concurrency gate, advances after 1 min with no address,
-    /// or signals live skip. Uses the fixed session end (not a per-item idle window).
+    /// Waits for the first detected card from the normal detection pipeline (nav/SPA/session),
+    /// then applies download. Does not call Refresh/RestartDetection — auto must not re-orchestrate probe.
     /// </summary>
     private async Task<AutoProbeResult> TryAutoEnqueueUntilAsync(DateTime sessionEndUtc, CancellationToken token)
     {
-        var lastProbeAt = DateTime.MinValue;
         var lastLiveCheckAt = DateTime.MinValue;
         var noAddressSinceUtc = DateTime.UtcNow;
         var trackedIdentity = CaptureAutoIdentity();
@@ -2127,23 +2126,9 @@ public sealed partial class MainViewModel : ObservableObject
                     return new AutoProbeResult(null, SkipLive: true);
             }
 
-            var remainingMin = RemainingSessionMinutes(sessionEndUtc);
             DetectedVideoViewModel? candidate = null;
             await Application.Current.Dispatcher.InvokeAsync(() =>
-            {
-                candidate = FindAutoDownloadCandidate();
-                if (!IsAutoCandidateDownloadable(candidate) &&
-                    DateTime.UtcNow - lastProbeAt >= TimeSpan.FromSeconds(8))
-                {
-                    var pageUrl = SelectedTab?.Host.CurrentPageUrl
-                                  ?? (Uri.TryCreate(AddressBar, UriKind.Absolute, out var uri) ? uri : null);
-                    if (pageUrl is not null && !LocalLibraryHost.IsLocalLibraryHost(pageUrl))
-                    {
-                        lastProbeAt = DateTime.UtcNow;
-                        Refresh();
-                    }
-                }
-            });
+                candidate = FindAutoDownloadCandidate());
 
             if (candidate is not null &&
                 candidate.Video.Variants.Count > 0 &&
@@ -2161,7 +2146,7 @@ public sealed partial class MainViewModel : ObservableObject
                     if (await IsCurrentPlaybackLiveAsync(token))
                         return new AutoProbeResult(null, SkipLive: true);
 
-                    remainingMin = RemainingSessionMinutes(sessionEndUtc);
+                    var remainingMin = RemainingSessionMinutes(sessionEndUtc);
                     await Application.Current.Dispatcher.InvokeAsync(() =>
                         SetStatusKey("status.autoWaitingSlot", remainingMin));
                     await Task.Delay(400, token);
@@ -2170,7 +2155,7 @@ public sealed partial class MainViewModel : ObservableObject
                 if (token.IsCancellationRequested || DateTime.UtcNow >= sessionEndUtc)
                     break;
 
-                // Apply-download beat: enqueue only after this delay (not a probe delay).
+                // Apply-download beat only — not a probe delay.
                 var settle = await DelayForAutoSettleAsync(
                     AutoApplyDownloadDelay,
                     sessionEndUtc,
