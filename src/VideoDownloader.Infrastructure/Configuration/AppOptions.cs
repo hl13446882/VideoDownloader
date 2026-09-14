@@ -58,6 +58,7 @@ public sealed class DownloadOptions
     /// <summary>Max simultaneous download jobs (UI allows 1–5).</summary>
     public int MaxConcurrentDownloads { get; set; } = 3;
     public int RetryCount { get; set; } = 3;
+    /// <summary>On startup only: auto-resume interrupted/paused downloads up to MaxConcurrentDownloads.</summary>
     public bool AutoRecoverDownloads { get; set; } = false;
 
     /// <summary>

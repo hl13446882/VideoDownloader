@@ -659,13 +659,12 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
 
             if (recovered == DownloadStatus.Paused)
             {
-                // Do NOT Fail(CONTEXT_EXPIRED) here. Exceeding concurrency (or looking
-                // "stale") only means defer auto-start — the user can still Resume, and
-                // PumpAutoRecoverQueue will start more when a slot frees.
+                // Startup-only auto-recover: start up to concurrency once. Excess stay Paused
+                // until the user resumes — do not keep pumping when slots free later.
                 if (IsStaleForAutoRecover(job))
                 {
                     _logger.LogInformation(
-                        "Deferred auto-recover for job {JobId} (stale signature/age; kept Paused)",
+                        "Skipped auto-recover for job {JobId} (stale signature/age; kept Paused)",
                         job.Id);
                     continue;
                 }
@@ -673,7 +672,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                 if (autoStarted >= maxAutoStart)
                 {
                     _logger.LogInformation(
-                        "Deferred auto-recover for job {JobId} (concurrency budget {Budget})",
+                        "Skipped auto-recover for job {JobId} (startup concurrency budget {Budget})",
                         job.Id,
                         maxAutoStart);
                     continue;
@@ -1118,35 +1117,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             // CancelAsync may run while ffmpeg/HTTP still hold files; wipe after handles close.
             if (_removedJobs.ContainsKey(job.Id) || job.Status == DownloadStatus.Cancelled)
                 await WipeCancelledScratchAsync(job);
-
-            PumpAutoRecoverQueue();
         }
-    }
-
-    /// <summary>
-    /// After a concurrency slot frees, start another deferred Paused job (if auto-recover is on).
-    /// </summary>
-    private void PumpAutoRecoverQueue()
-    {
-        if (!_options.Download.AutoRecoverDownloads || _lifetime.IsCancellationRequested)
-            return;
-
-        var available = _concurrency.CurrentCount;
-        if (available <= 0)
-            return;
-
-        var candidates = _jobs.Values
-            .Where(j =>
-                j.Status == DownloadStatus.Paused &&
-                !_ctsMap.ContainsKey(j.Id) &&
-                !_removedJobs.ContainsKey(j.Id) &&
-                !IsStaleForAutoRecover(j))
-            .OrderByDescending(j => j.UpdatedAt)
-            .Take(available)
-            .ToArray();
-
-        foreach (var next in candidates)
-            _ = RunJobAsync(next);
     }
 
     private async Task ExecuteDownloadAsync(

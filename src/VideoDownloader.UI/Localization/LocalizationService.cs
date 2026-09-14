@@ -267,7 +267,7 @@ public sealed partial class LocalizationService : ObservableObject
         ["settings.openLogsFolderTip"] = ("在资源管理器中打开应用日志目录。", "Open the app logs directory in Explorer."),
         ["settings.openLogsFolderDone"] = ("已打开日志目录：{0}", "Opened logs folder: {0}"),
         ["settings.openLogsFolderFailed"] = ("无法打开日志目录：{0}", "Cannot open logs folder: {0}"),
-        ["settings.autoRecover"] = ("启动时自动恢复已暂停的下载", "Auto-resume paused downloads on startup"),
+        ["settings.autoRecover"] = ("启动时自动恢复已暂停的下载（仅启动时执行一次）", "Auto-resume paused downloads once on startup"),
         ["settings.appVersion"] = ("应用版本", "App version"),
         ["settings.copyright"] = ("版权", "Copyright"),
         ["settings.checkUpdate"] = ("检查更新", "Check for updates"),
