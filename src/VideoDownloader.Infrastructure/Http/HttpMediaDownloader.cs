@@ -903,9 +903,9 @@ public sealed class HttpMediaDownloader
         if (job.TotalBytes is long expected && actualLength != expected)
         {
             if ((softMedia && actualLength >= 1024) ||
-                (tiktokSigned && actualLength >= 256L * 1024) ||
+                (tiktokSigned && actualLength >= MediaResourceSizeFilter.MinDropdownBytes) ||
                 (job.Variant.Tracks.Any(t => t.HttpDashFragmentCount is > 1) &&
-                 actualLength >= MediaResourceSizeFilter.MinProgressiveVideoBytes))
+                 actualLength >= MediaResourceSizeFilter.MinDropdownBytes))
             {
                 job.TotalBytes = actualLength;
             }
@@ -916,13 +916,9 @@ public sealed class HttpMediaDownloader
             }
         }
 
-        var minBytes = tiktokSigned
-            ? 256L * 1024
-            : job.Variant.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
-            ? MediaResourceSizeFilter.MinProgressiveVideoBytes
-            : softMedia
-                ? 1024
-                : MediaResourceSizeFilter.MinDisplayBytes;
+        var minBytes = softMedia
+            ? 1024L
+            : MediaResourceSizeFilter.MinDropdownBytes;
         if (job.DownloadedBytes > 0 && job.DownloadedBytes < minBytes)
         {
             throw new DownloadException(

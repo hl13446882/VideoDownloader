@@ -9,6 +9,7 @@ using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Web.WebView2.Wpf;
 using VideoDownloader.Core.Contracts;
+using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Core.Naming;
@@ -107,10 +108,8 @@ public sealed partial class DetectedVideoViewModel : ObservableObject
         var previousVariantId = SelectedVariant?.Variant.VariantId;
         var previousUrl = SelectedVariant?.Variant.SourceUrl.AbsoluteUri;
 
-        var built = video.Variants
-            .OrderBy(v => MediaVariantRanking.IsMseOrPartialVariant(v) ? 1 : 0)
-            .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
-            .ThenByDescending(v => v.Height ?? 0)
+        var built = MediaVariantRanking.Rank(
+                video.Variants.Where(v => !MediaResourceSizeFilter.ShouldExcludeFromDropdown(v)))
             .Select(variant => FormatVariantItem(variant, video))
             .GroupBy(v => v.Label, StringComparer.Ordinal)
             .Select(g => g.First())
@@ -138,10 +137,10 @@ public sealed partial class DetectedVideoViewModel : ObservableObject
         else
             ApplyModeFilter();
 
+        // Rank already put largest first; keep prior selection when still present.
         SelectedVariant =
             Variants.FirstOrDefault(v => v.Variant.VariantId == previousVariantId) ??
             Variants.FirstOrDefault(v => v.Variant.SourceUrl.AbsoluteUri == previousUrl) ??
-            Variants.FirstOrDefault(v => !MediaVariantRanking.IsMseOrPartialVariant(v.Variant)) ??
             Variants.FirstOrDefault();
     }
 
@@ -164,6 +163,7 @@ public sealed partial class DetectedVideoViewModel : ObservableObject
         foreach (var item in AllVariants.Where(v => MatchesMode(v.Variant, mode)))
             Variants.Add(item);
 
+        // AllVariants is size-ranked; first match is the largest for this mode.
         SelectedVariant =
             Variants.FirstOrDefault(v => v.Variant.VariantId == previousId) ??
             Variants.FirstOrDefault(v => v.Variant.SourceUrl.AbsoluteUri == previousUrl) ??

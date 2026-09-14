@@ -6,7 +6,11 @@ public static class MediaResourceSizeFilter
 {
     public const long MinDisplayBytes = 64 * 1024;
     public const long MinStrongMimeBytes = 1024;
-    /// <summary>Floor for a credible progressive Douyin/TikTok VOD object (rejects ~200KB crumbs).</summary>
+    /// <summary>UI dropdown: hide known objects smaller than this (crumbs / stubs).</summary>
+    public const long MinDropdownBytes = 200 * 1024;
+    /// <summary>
+    /// Soft heuristic for ranking progressive Douyin/TikTok candidates (not a hard download gate).
+    /// </summary>
     public const long MinProgressiveVideoBytes = 512 * 1024;
     /// <summary>Generic multi-video pages: objects below 2 MiB are teaser/junk, not downloadable cards.</summary>
     public const long MinGenericVideoBytes = 2L * 1024 * 1024;
@@ -46,6 +50,18 @@ public static class MediaResourceSizeFilter
             return false;
 
         return total < MinDisplayBytes;
+    }
+
+    /// <summary>
+    /// Dropdown list: drop known undersized crumbs (&lt;200 KiB). Unknown size stays visible.
+    /// </summary>
+    public static bool ShouldExcludeFromDropdown(MediaVariant variant)
+    {
+        if (ShouldExcludeVariant(variant))
+            return true;
+
+        var size = EffectiveSize(variant);
+        return size is > 0 and < MinDropdownBytes;
     }
 
     /// <summary>
@@ -92,4 +108,8 @@ public static class MediaResourceSizeFilter
 
         return video with { Variants = variants };
     }
+
+    public static long EffectiveSize(MediaVariant variant) =>
+        variant.TotalContentLength
+        ?? variant.Tracks.Select(t => t.ContentLength ?? 0).DefaultIfEmpty(0).Max();
 }

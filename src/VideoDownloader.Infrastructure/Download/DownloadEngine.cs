@@ -1851,10 +1851,18 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         if (intervalSeconds <= 0)
             return;
 
+        // Failed jobs must not queue on the concurrency gate ahead of new downloads.
+        var freeSlots = _concurrency.CurrentCount;
+        if (freeSlots <= 0)
+            return;
+
         var minAge = TimeSpan.FromSeconds(intervalSeconds);
         var now = DateTimeOffset.UtcNow;
+        var picked = 0;
         foreach (var job in _jobs.Values)
         {
+            if (picked >= freeSlots)
+                break;
             if (job.Status != DownloadStatus.Failed)
                 continue;
             if (_removedJobs.ContainsKey(job.Id) || _ctsMap.ContainsKey(job.Id))
@@ -1877,6 +1885,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                 job.Id,
                 intervalSeconds,
                 job.LastErrorCode);
+            picked++;
             _ = ResumeAsync(job.Id);
         }
     }

@@ -140,18 +140,18 @@ internal static class MediaAddressRenewal
         return null;
     }
 
-    /// <summary>Reject watermark / preview shells whose declared size is below a credible VOD floor.</summary>
+    /// <summary>Reject watermark / preview shells whose declared size is below the dropdown crumb floor.</summary>
     internal static bool IsKnownUndersizedVideo(MediaVariant variant)
     {
         if (!variant.Tracks.Any(t => t.Kind is MediaTrackKind.Combined or MediaTrackKind.Video))
             return false;
 
-        if (variant.TotalContentLength is > 0 and < MediaResourceSizeFilter.MinProgressiveVideoBytes)
+        if (variant.TotalContentLength is > 0 and < MediaResourceSizeFilter.MinDropdownBytes)
             return true;
 
         return variant.Tracks.Any(t =>
             t.Kind is MediaTrackKind.Combined or MediaTrackKind.Video &&
-            t.ContentLength is > 0 and < MediaResourceSizeFilter.MinProgressiveVideoBytes);
+            t.ContentLength is > 0 and < MediaResourceSizeFilter.MinDropdownBytes);
     }
 
     internal static bool Compatible(MediaVariant a, MediaVariant b) =>

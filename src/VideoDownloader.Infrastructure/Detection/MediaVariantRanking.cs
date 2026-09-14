@@ -1,3 +1,4 @@
+using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
 
 namespace VideoDownloader.Infrastructure.Detection;
@@ -30,31 +31,22 @@ public static class MediaVariantRanking
         variant.Tracks.Any(t => t.Kind is MediaTrackKind.Audio or MediaTrackKind.Combined);
 
     /// <summary>
-    /// Prefer progressive/muxed VOD over MSE/partial tracks; size only ranks within the same delivery class.
+    /// Rank for UI dropdown / default selection: largest file size first (after excluding junk classes).
     /// </summary>
     public static IReadOnlyList<MediaVariant> Rank(IEnumerable<MediaVariant> variants) =>
         variants
             .OrderBy(v => IsFlvLike(v) ? 1 : 0)
+            .ThenBy(v => IsMseOrPartialVariant(v) ? 1 : 0)
             .ThenByDescending(v =>
                 string.Equals(v.Container, "album", StringComparison.OrdinalIgnoreCase) &&
                 v.Tracks.Count(t => t.Kind == MediaTrackKind.Image) >= 2
                     ? 1 : 0)
             .ThenByDescending(v => HasVideo(v) ? 1 : 0)
             .ThenByDescending(v => MediaVariantReconciler.HasCompleteAudio(v) ? 1 : 0)
-            // Ordinary progressive Combined first; MSE adaptive tracks last (never default).
-            .ThenBy(v => IsMseOrPartialVariant(v) ? 1 : 0)
-            // Prefer real playlists over bare fMP4/TS segments observed via MSE.
-            .ThenByDescending(v =>
-                string.Equals(v.Container, "hls", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(v.Container, "dash", StringComparison.OrdinalIgnoreCase)
-                    ? 1 : 0)
-            .ThenBy(v => v.Tracks.Any(t => MediaUrlNormalizer.IsLikelySegment(t.SourceUrl)) ? 1 : 0)
-            // Prefer CDN objects over Douyin /aweme/v1/play gateways that only 302.
-            .ThenBy(v => v.Tracks.Any(t => UnifiedMediaPipeline.IsDouyinPlayGateway(t.SourceUrl)) ? 1 : 0)
-            // Demote Douyin/TikTok MSE Range windows that somehow remain with a tiny known length.
             .ThenBy(v => v.Tracks.Any(t =>
                 UnifiedMediaPipeline.IsInsufficientByteDanceDownloadObject(t.SourceUrl, t.ContentLength)) ? 1 : 0)
-            .ThenByDescending(v => v.TotalContentLength ?? 0)
+            // Primary: known file size (largest first). Bandwidth / height only break ties.
+            .ThenByDescending(v => MediaResourceSizeFilter.EffectiveSize(v))
             .ThenByDescending(v => v.Bandwidth ?? 0)
             .ThenByDescending(v => v.Height ?? 0)
             .ToArray();
