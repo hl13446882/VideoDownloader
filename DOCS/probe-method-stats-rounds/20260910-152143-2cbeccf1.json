@@ -1,0 +1,323 @@
+{
+  "runId": "20260910-152143-2cbeccf1",
+  "finishedAt": "2026-09-10T15:52:26.171777+08:00",
+  "note": "Rates are per-detector; never cross-mix youtube/bilibili/douyin/tiktok.",
+  "entries": [
+    {
+      "detectorId": "youtube",
+      "address": "https://www.youtube.com/watch?v=oe9rK1jzNbA\u0026list=RDoe9rK1jzNbA\u0026start_radio=1",
+      "winningMethod": "ytdlp.default",
+      "pass": true,
+      "discoveryMs": 21548,
+      "invalidProbes": []
+    },
+    {
+      "detectorId": "youtube",
+      "address": "https://www.youtube.com/watch?v=Y_tPE3o5NWk\u0026list=RDY_tPE3o5NWk\u0026start_radio=1",
+      "winningMethod": "ytdlp.default",
+      "pass": false,
+      "discoveryMs": 121447,
+      "invalidProbes": [
+        "discovery_timeout",
+        "empty_complete_x2"
+      ]
+    },
+    {
+      "detectorId": "youtube",
+      "address": "https://www.youtube.com/watch?v=rKrq5V3GJWI\u0026list=RDrKrq5V3GJWI\u0026start_radio=1",
+      "winningMethod": "ytdlp.default",
+      "pass": true,
+      "discoveryMs": 21650,
+      "invalidProbes": []
+    },
+    {
+      "detectorId": "douyin",
+      "address": "https://www.douyin.com/?recommend=1",
+      "winningMethod": "router_data",
+      "pass": true,
+      "discoveryMs": 7930,
+      "invalidProbes": []
+    },
+    {
+      "detectorId": "douyin",
+      "address": "https://www.douyin.com/?recommend=1",
+      "winningMethod": "router_data",
+      "pass": true,
+      "discoveryMs": 6067,
+      "invalidProbes": []
+    },
+    {
+      "detectorId": "douyin",
+      "address": "https://www.douyin.com/?recommend=1",
+      "winningMethod": "router_data",
+      "pass": true,
+      "discoveryMs": 7659,
+      "invalidProbes": []
+    },
+    {
+      "detectorId": "douyin",
+      "address": "https://www.douyin.com/?recommend=1",
+      "winningMethod": "router_data",
+      "pass": true,
+      "discoveryMs": 6231,
+      "invalidProbes": []
+    },
+    {
+      "detectorId": "douyin",
+      "address": "https://www.douyin.com/jingxuan?modal_id=7660503158577286451",
+      "winningMethod": "router_data",
+      "pass": true,
+      "discoveryMs": 23,
+      "invalidProbes": []
+    },
+    {
+      "detectorId": "douyin",
+      "address": "https://v.douyin.com/9cY9PQIM6HY/",
+      "winningMethod": "album",
+      "pass": false,
+      "discoveryMs": 7571,
+      "invalidProbes": []
+    },
+    {
+      "detectorId": "tiktok",
+      "address": "https://www.tiktok.com/",
+      "pass": false,
+      "discoveryMs": 120979,
+      "invalidProbes": [
+        "discovery_timeout"
+      ]
+    },
+    {
+      "detectorId": "tiktok",
+      "address": "https://www.tiktok.com/",
+      "winningMethod": "ytdlp",
+      "pass": true,
+      "discoveryMs": 22685,
+      "invalidProbes": []
+    },
+    {
+      "detectorId": "tiktok",
+      "address": "https://www.tiktok.com/",
+      "winningMethod": "ytdlp",
+      "pass": false,
+      "discoveryMs": 27262,
+      "invalidProbes": []
+    },
+    {
+      "detectorId": "tiktok",
+      "address": "https://www.tiktok.com/",
+      "winningMethod": "ytdlp",
+      "pass": false,
+      "discoveryMs": 121396,
+      "invalidProbes": [
+        "discovery_timeout",
+        "empty_complete_x1",
+        "wasted_page_probe_x30"
+      ]
+    },
+    {
+      "detectorId": "tiktok",
+      "address": "https://www.tiktok.com/",
+      "winningMethod": "ytdlp",
+      "pass": true,
+      "discoveryMs": 24201,
+      "invalidProbes": []
+    },
+    {
+      "detectorId": "tiktok",
+      "address": "https://www.tiktok.com/",
+      "winningMethod": "ytdlp",
+      "pass": true,
+      "discoveryMs": 22764,
+      "invalidProbes": []
+    },
+    {
+      "detectorId": "bilibili",
+      "address": "https://www.bilibili.com/video/BV1xMtw6XEAu",
+      "winningMethod": "ytdlp",
+      "pass": true,
+      "discoveryMs": 11496,
+      "invalidProbes": []
+    },
+    {
+      "detectorId": "bilibili",
+      "address": "https://www.bilibili.com/video/BV1CXWuz3E7V/",
+      "winningMethod": "ytdlp",
+      "pass": false,
+      "discoveryMs": 7616,
+      "invalidProbes": []
+    },
+    {
+      "detectorId": "bilibili",
+      "address": "https://www.bilibili.com/video/BV1x8g56LEsz/",
+      "winningMethod": "network_playurl",
+      "pass": false,
+      "discoveryMs": 3224,
+      "invalidProbes": []
+    },
+    {
+      "detectorId": "generic",
+      "address": "https://www.xmfyy.com/index.php/vod/play/id/290850/sid/1/nid/1.html",
+      "pass": false,
+      "discoveryMs": 120979,
+      "invalidProbes": [
+        "discovery_timeout",
+        "empty_complete_x1"
+      ]
+    },
+    {
+      "detectorId": "generic",
+      "address": "https://ally.vkzxbprqm.cc/archives/274623/",
+      "winningMethod": "network_media",
+      "pass": true,
+      "discoveryMs": 24364,
+      "invalidProbes": []
+    }
+  ],
+  "byDetector": {
+    "youtube": [
+      {
+        "detectorId": "youtube",
+        "detectorName": "YouTube \u63A2\u6D4B\u5668",
+        "method": "ytdlp",
+        "attempts": 12,
+        "successes": 9,
+        "rate": 0.75
+      },
+      {
+        "detectorId": "youtube",
+        "detectorName": "YouTube \u63A2\u6D4B\u5668",
+        "method": "ytdlp.client:tv_embedded",
+        "attempts": 14,
+        "successes": 6,
+        "rate": 0.42857142857142855
+      },
+      {
+        "detectorId": "youtube",
+        "detectorName": "YouTube \u63A2\u6D4B\u5668",
+        "method": "ytdlp.default",
+        "attempts": 16,
+        "successes": 6,
+        "rate": 0.375
+      },
+      {
+        "detectorId": "youtube",
+        "detectorName": "YouTube \u63A2\u6D4B\u5668",
+        "method": "ytdlp.client:android,web",
+        "attempts": 7,
+        "successes": 0,
+        "rate": 0
+      },
+      {
+        "detectorId": "youtube",
+        "detectorName": "YouTube \u63A2\u6D4B\u5668",
+        "method": "ytdlp.client:ios,web",
+        "attempts": 7,
+        "successes": 0,
+        "rate": 0
+      },
+      {
+        "detectorId": "youtube",
+        "detectorName": "YouTube \u63A2\u6D4B\u5668",
+        "method": "ytdlp.client:web",
+        "attempts": 7,
+        "successes": 0,
+        "rate": 0
+      },
+      {
+        "detectorId": "youtube",
+        "detectorName": "YouTube \u63A2\u6D4B\u5668",
+        "method": "ytdlp.client:default",
+        "attempts": 6,
+        "successes": 0,
+        "rate": 0
+      },
+      {
+        "detectorId": "youtube",
+        "detectorName": "YouTube \u63A2\u6D4B\u5668",
+        "method": "ytdlp.pot_mweb",
+        "attempts": 3,
+        "successes": 0,
+        "rate": 0
+      },
+      {
+        "detectorId": "youtube",
+        "detectorName": "YouTube \u63A2\u6D4B\u5668",
+        "method": "ytdlp.web_embedded",
+        "attempts": 3,
+        "successes": 0,
+        "rate": 0
+      }
+    ],
+    "bilibili": [
+      {
+        "detectorId": "bilibili",
+        "detectorName": "B\u7AD9 \u63A2\u6D4B\u5668",
+        "method": "ytdlp",
+        "attempts": 2,
+        "successes": 2,
+        "rate": 1
+      },
+      {
+        "detectorId": "bilibili",
+        "detectorName": "B\u7AD9 \u63A2\u6D4B\u5668",
+        "method": "network_playurl",
+        "attempts": 1,
+        "successes": 1,
+        "rate": 1
+      }
+    ],
+    "douyin": [
+      {
+        "detectorId": "douyin",
+        "detectorName": "\u6296\u97F3 \u63A2\u6D4B\u5668",
+        "method": "router_data",
+        "attempts": 10,
+        "successes": 10,
+        "rate": 1
+      },
+      {
+        "detectorId": "douyin",
+        "detectorName": "\u6296\u97F3 \u63A2\u6D4B\u5668",
+        "method": "album",
+        "attempts": 1,
+        "successes": 1,
+        "rate": 1
+      },
+      {
+        "detectorId": "douyin",
+        "detectorName": "\u6296\u97F3 \u63A2\u6D4B\u5668",
+        "method": "album_images",
+        "attempts": 1,
+        "successes": 1,
+        "rate": 1
+      },
+      {
+        "detectorId": "douyin",
+        "detectorName": "\u6296\u97F3 \u63A2\u6D4B\u5668",
+        "method": "dom_observation",
+        "attempts": 5,
+        "successes": 1,
+        "rate": 0.2
+      },
+      {
+        "detectorId": "douyin",
+        "detectorName": "\u6296\u97F3 \u63A2\u6D4B\u5668",
+        "method": "aweme_detail",
+        "attempts": 1,
+        "successes": 0,
+        "rate": 0
+      }
+    ],
+    "tiktok": [
+      {
+        "detectorId": "tiktok",
+        "detectorName": "TikTok \u63A2\u6D4B\u5668",
+        "method": "ytdlp",
+        "attempts": 7,
+        "successes": 4,
+        "rate": 0.5714285714285714
+      }
+    ]
+  }
+}
