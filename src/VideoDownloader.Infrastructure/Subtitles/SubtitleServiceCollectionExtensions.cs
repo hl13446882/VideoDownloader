@@ -31,6 +31,7 @@ public static class SubtitleServiceCollectionExtensions
         services.AddSingleton<ISubtitleTranslator>(sp => sp.GetRequiredService<LocalLlmTranslator>());
         services.AddSingleton<CloudTranslatorStub>();
         services.AddSingleton<TranslationRouter>();
+        services.AddSingleton<SubtitleMediaVariantRegistry>();
 
         // Timeline/pipeline are transient: each WebView/tab owns an isolated subtitle session.
         services.AddTransient<ISubtitleTimeline, SubtitleTimeline>();
