@@ -234,6 +234,30 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
         return null;
     }
 
+    public TimeSpan? GetRecognitionCursor(TimeSpan mediaTime)
+    {
+        lock (_coverageSync)
+        {
+            TimeSpan? insideEnd = null;
+            TimeSpan? priorEnd = null;
+            foreach (var range in _coverage)
+            {
+                if (range.End <= mediaTime)
+                {
+                    priorEnd = priorEnd is { } existing && existing > range.End ? existing : range.End;
+                    continue;
+                }
+
+                if (mediaTime >= range.Start && mediaTime <= range.End)
+                    insideEnd = range.End;
+
+                break;
+            }
+
+            return insideEnd ?? priorEnd;
+        }
+    }
+
     public Task StopSessionAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();

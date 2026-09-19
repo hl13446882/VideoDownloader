@@ -177,11 +177,13 @@
                                   SelectedValuePath="Value"
                                   Margin="0,0,0,10"/>
 
-                        <TextBlock Grid.Row="8" Grid.Column="0" Text="距下边界" VerticalAlignment="Center" Margin="0,0,8,10"/>
-                        <ComboBox Grid.Row="8" Grid.Column="1"
-                                  ItemsSource="{Binding SubtitleBottomOffsetOptions}"
-                                  SelectedItem="{Binding SubtitleBottomOffsetPx}"
-                                  Margin="0,0,0,10"/>
+                        <TextBlock Grid.Row="8" Grid.Column="0" Text="距画面下边" VerticalAlignment="Center" Margin="0,0,8,10"/>
+                        <StackPanel Grid.Row="8" Grid.Column="1" Margin="0,0,0,10">
+                            <ComboBox ItemsSource="{Binding SubtitleBottomOffsetOptions}"
+                                      SelectedItem="{Binding SubtitleBottomOffsetPx}"/>
+                            <TextBlock Text="相对视频画面底边的像素距离（含黑边内的实际画面），不是相对窗口。"
+                                       Foreground="#777" FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                        </StackPanel>
 
                         <Separator Grid.Row="9" Grid.Column="0" Grid.ColumnSpan="2" Margin="0,4,0,12"/>
 

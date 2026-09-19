@@ -159,24 +159,9 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
 (() => {
   if (window.__vdSubtitle) return;
 
-  const ensureOverlay = () => {
-    let el = document.getElementById('vd-subtitle-overlay');
-    if (el) return el;
-    el = document.createElement('div');
-    el.id = 'vd-subtitle-overlay';
-    Object.assign(el.style, {
-      position: 'fixed', left: '50%', transform: 'translateX(-50%)', bottom: '60px',
-      zIndex: '2147483647', pointerEvents: 'none', textAlign: 'center',
-      fontFamily: 'Microsoft YaHei, sans-serif', fontSize: '28px', fontWeight: '700',
-      color: '#FFFFFF', backgroundColor: '#000000', opacity: '1', padding: '4px 10px',
-      borderRadius: '4px', maxWidth: '85vw', whiteSpace: 'pre-wrap',
-      lineHeight: '1.35', display: 'none', textShadow: '-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000'
-    });
-    (document.body || document.documentElement).appendChild(el);
-    return el;
-  };
-
   let style = {};
+  let lastText = '';
+
   const hexToRgba = (hex, alpha) => {
     const value = String(hex || '').trim();
     const m = /^#([0-9a-f]{6})$/i.exec(value);
@@ -184,33 +169,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     const n = parseInt(m[1], 16);
     return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
   };
-  const applyStyle = (s) => {
-    style = Object.assign(style, s || {});
-    const el = ensureOverlay();
-    if (style.fontFamily) el.style.fontFamily = style.fontFamily;
-    if (Number.isFinite(style.fontSize)) el.style.fontSize = style.fontSize + 'px';
-    el.style.fontWeight = style.bold ? '700' : '400';
-    if (style.textColor) el.style.color = style.textColor;
-    if (Number.isFinite(style.bottomOffsetPx)) el.style.bottom = style.bottomOffsetPx + 'px';
-    if (Number.isFinite(style.maxWidthPercent)) el.style.maxWidth = style.maxWidthPercent + 'vw';
-    const opacity = Number.isFinite(style.backgroundOpacity) ? style.backgroundOpacity : .35;
-    el.style.backgroundColor = hexToRgba(style.backgroundColor || '#000000', opacity);
-    const outline = Number.isFinite(style.outlineSize) ? style.outlineSize : 2;
-    const oc = style.outlineColor || '#000000';
-    el.style.webkitTextStroke = outline > 0 ? outline + 'px ' + oc : '0 transparent';
-  };
 
-  window.__vdSubtitle = {
-    setText(text) {
-      const el = ensureOverlay();
-      const value = String(text || '').trim();
-      el.textContent = value;
-      el.style.display = value ? 'block' : 'none';
-    },
-    setStyle: applyStyle
-  };
-
-  let lastSent = 0;
   const chooseMedia = () => {
     const all = [...document.querySelectorAll('video,audio')];
     if (!all.length) return null;
@@ -223,8 +182,110 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     return pool[0] || null;
   };
 
+  // Actual painted frame inside a video element (accounts for object-fit: contain letterboxing).
+  const getPictureRect = (video) => {
+    const rect = video.getBoundingClientRect();
+    const vw = Number(video.videoWidth) || 0;
+    const vh = Number(video.videoHeight) || 0;
+    if (!vw || !vh || rect.width <= 0 || rect.height <= 0) {
+      return { left: rect.left, top: rect.top, width: rect.width, height: rect.height,
+        bottom: rect.bottom, right: rect.right };
+    }
+    const videoRatio = vw / vh;
+    const boxRatio = rect.width / rect.height;
+    let width, height, left, top;
+    if (boxRatio > videoRatio) {
+      height = rect.height;
+      width = height * videoRatio;
+      left = rect.left + (rect.width - width) / 2;
+      top = rect.top;
+    } else {
+      width = rect.width;
+      height = width / videoRatio;
+      left = rect.left;
+      top = rect.top + (rect.height - height) / 2;
+    }
+    return { left, top, width, height, bottom: top + height, right: left + width };
+  };
+
+  const ensureOverlay = () => {
+    let el = document.getElementById('vd-subtitle-overlay');
+    if (el) return el;
+    el = document.createElement('div');
+    el.id = 'vd-subtitle-overlay';
+    Object.assign(el.style, {
+      position: 'fixed', left: '50%', transform: 'translateX(-50%)', bottom: '60px',
+      zIndex: '2147483647', pointerEvents: 'none', textAlign: 'center',
+      fontFamily: 'Microsoft YaHei, sans-serif', fontSize: '28px', fontWeight: '700',
+      color: '#FFFFFF', backgroundColor: 'rgba(0,0,0,0.35)', padding: '4px 10px',
+      borderRadius: '4px', maxWidth: '85vw', whiteSpace: 'pre-wrap',
+      lineHeight: '1.35', display: 'none', boxSizing: 'border-box',
+      textShadow: '-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000'
+    });
+    (document.body || document.documentElement).appendChild(el);
+    return el;
+  };
+
+  const layoutOverlay = () => {
+    const el = ensureOverlay();
+    const media = chooseMedia();
+    if (!media || media.tagName !== 'VIDEO') {
+      // Fallback: keep window-bottom placement only when no video picture exists.
+      const offset = Number.isFinite(style.bottomOffsetPx) ? style.bottomOffsetPx : 60;
+      el.style.left = '50%';
+      el.style.transform = 'translateX(-50%)';
+      el.style.bottom = offset + 'px';
+      el.style.top = 'auto';
+      el.style.width = 'auto';
+      el.style.maxWidth = (Number.isFinite(style.maxWidthPercent) ? style.maxWidthPercent : 85) + 'vw';
+      return;
+    }
+
+    const picture = getPictureRect(media);
+    const offset = Number.isFinite(style.bottomOffsetPx) ? style.bottomOffsetPx : 60;
+    const maxPct = Number.isFinite(style.maxWidthPercent) ? style.maxWidthPercent : 85;
+    const maxWidth = Math.max(40, picture.width * maxPct / 100);
+    // Distance is from the bottom edge of the video picture, not the browser window.
+    const bottom = Math.max(0, window.innerHeight - picture.bottom + offset);
+    el.style.left = (picture.left + picture.width / 2) + 'px';
+    el.style.transform = 'translateX(-50%)';
+    el.style.bottom = bottom + 'px';
+    el.style.top = 'auto';
+    el.style.width = 'auto';
+    el.style.maxWidth = maxWidth + 'px';
+  };
+
+  const applyStyle = (s) => {
+    style = Object.assign(style, s || {});
+    const el = ensureOverlay();
+    if (style.fontFamily) el.style.fontFamily = style.fontFamily;
+    if (Number.isFinite(style.fontSize)) el.style.fontSize = style.fontSize + 'px';
+    el.style.fontWeight = style.bold ? '700' : '400';
+    if (style.textColor) el.style.color = style.textColor;
+    const opacity = Number.isFinite(style.backgroundOpacity) ? style.backgroundOpacity : .35;
+    el.style.backgroundColor = hexToRgba(style.backgroundColor || '#000000', opacity);
+    const outline = Number.isFinite(style.outlineSize) ? style.outlineSize : 2;
+    const oc = style.outlineColor || '#000000';
+    el.style.webkitTextStroke = outline > 0 ? outline + 'px ' + oc : '0 transparent';
+    layoutOverlay();
+  };
+
+  window.__vdSubtitle = {
+    setText(text) {
+      const el = ensureOverlay();
+      const value = String(text || '').trim();
+      lastText = value;
+      el.textContent = value;
+      el.style.display = value ? 'block' : 'none';
+      if (value) layoutOverlay();
+    },
+    setStyle: applyStyle
+  };
+
+  let lastSent = 0;
   const mediaKey = (m) => String(m.currentSrc || m.src || location.href || '');
   const tick = (now) => {
+    layoutOverlay();
     if (now - lastSent >= 150) {
       lastSent = now;
       const m = chooseMedia();
@@ -245,6 +306,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     }
     requestAnimationFrame(tick);
   };
+  window.addEventListener('resize', layoutOverlay, { passive: true });
   requestAnimationFrame(tick);
 })();
 """;

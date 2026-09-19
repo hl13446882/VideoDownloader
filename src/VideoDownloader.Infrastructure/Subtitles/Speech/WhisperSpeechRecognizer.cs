@@ -40,6 +40,9 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer, IDisposable
             var samples = ConvertPcm16ToFloat(audio.Pcm16Mono16Khz.Span);
             using var processor = _factory!.CreateBuilder()
                 .WithLanguage(string.IsNullOrWhiteSpace(_options.Language) ? "auto" : _options.Language)
+                // Lower than whisper.cpp default (~0.6) so soft / brief speech is less often dropped.
+                .WithNoSpeechThreshold(0.35f)
+                .WithProbabilities()
                 .Build();
 
             var detectedLanguage = !string.IsNullOrWhiteSpace(context.LanguageHint) &&
@@ -56,8 +59,15 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer, IDisposable
                 if (string.IsNullOrWhiteSpace(text))
                     continue;
 
+                // Drop near-empty Whisper hallucinations / noise tokens.
+                if (text is "." or "。" or "?" or "？" or "!" or "！")
+                    continue;
+
                 var absoluteStart = audio.MediaStart + result.Start;
                 var absoluteEnd = audio.MediaStart + result.End;
+                if (absoluteEnd <= absoluteStart)
+                    absoluteEnd = absoluteStart + TimeSpan.FromMilliseconds(200);
+
                 segments.Add(new SubtitleSegment
                 {
                     // Stable across windows and re-recognition of the same absolute segment start.

@@ -14,6 +14,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
 {
     private static readonly TimeSpan FastWarmupWindow = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan StartSnapThreshold = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan WindowOverlap = TimeSpan.FromSeconds(1.5);
     private const string ModelMissingHint = "请先在设置中安装字幕模型";
     private const string NativeRuntimeHint = "字幕引擎组件缺失，请更新到最新版本";
     private const string FfmpegMissingHint = "未找到 FFmpeg，无法识别字幕";
@@ -128,7 +129,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                 return;
 
             var windowSize = TimeSpan.FromSeconds(Math.Clamp(_options.PreloadAheadSeconds, 10, 90));
-            var refillThreshold = TimeSpan.FromSeconds(Math.Max(5, windowSize.TotalSeconds / 3));
+            // Stay well ahead of the playhead so slow ASR does not leave silent gaps.
+            var refillThreshold = TimeSpan.FromSeconds(Math.Clamp(windowSize.TotalSeconds / 2, 8, 30));
             var coveredUntil = _pipeline.GetCoveredUntil(state.CurrentTime);
             if (coveredUntil is null || state.CurrentTime + refillThreshold >= coveredUntil.Value)
                 await EnsureWindowAsync(state.CurrentTime, state.Duration, windowSize, cancellationToken).ConfigureAwait(false);
@@ -289,9 +291,13 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
 
             _modelMissingNotified = false;
 
-            var coveredUntil = _pipeline.GetCoveredUntil(currentTime);
-            var start = coveredUntil ?? (currentTime <= StartSnapThreshold ? TimeSpan.Zero : currentTime);
-            var desiredWindow = coveredUntil is null && windowSize > FastWarmupWindow
+            var cursor = _pipeline.GetRecognitionCursor(currentTime);
+            var start = cursor ?? (currentTime <= StartSnapThreshold ? TimeSpan.Zero : currentTime);
+            // Overlap successive windows so words straddling chunk boundaries are not dropped.
+            if (cursor is not null && start > WindowOverlap)
+                start -= WindowOverlap;
+
+            var desiredWindow = cursor is null && windowSize > FastWarmupWindow
                 ? FastWarmupWindow
                 : windowSize;
             var remaining = duration is { } total ? total - start : desiredWindow;

@@ -205,6 +205,34 @@ public sealed class SubtitlePipelineTests
     }
 
     [Fact]
+    public void Recognition_cursor_resumes_from_prior_coverage_when_playhead_runs_ahead()
+    {
+        var recognizer = Substitute.For<ISpeechRecognizer>();
+        recognizer.RecognizeAsync(
+                Arg.Any<AudioChunk>(),
+                Arg.Any<SpeechRecognitionContext>(),
+                Arg.Any<CancellationToken>())
+            .Returns(Array.Empty<SubtitleSegment>());
+
+        var translator = Substitute.For<ISubtitleTranslator>();
+        var cache = Substitute.For<ISubtitleCacheStore>();
+        cache.LoadAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(SubtitleCacheSnapshot.Empty);
+
+        var pipeline = new SubtitlePipeline(recognizer, new SubtitleTimeline(), translator, cache);
+        pipeline.StartSessionAsync("s1", "media-1").GetAwaiter().GetResult();
+        pipeline.SubmitAudioAsync(new AudioChunk(
+            new byte[16000 * 2 * 4],
+            TimeSpan.Zero,
+            TimeSpan.FromSeconds(12))).GetAwaiter().GetResult();
+
+        Assert.Equal(TimeSpan.FromSeconds(12), pipeline.GetCoveredUntil(TimeSpan.FromSeconds(5)));
+        Assert.Null(pipeline.GetCoveredUntil(TimeSpan.FromSeconds(15)));
+        Assert.Equal(TimeSpan.FromSeconds(12), pipeline.GetRecognitionCursor(TimeSpan.FromSeconds(15)));
+        Assert.Equal(TimeSpan.FromSeconds(12), pipeline.GetRecognitionCursor(TimeSpan.FromSeconds(10)));
+    }
+
+    [Fact]
     public async Task Local_translator_rejects_non_loopback_endpoint_before_network_call()
     {
         var translator = new LocalLlmTranslator(
