@@ -12,6 +12,9 @@ namespace VideoDownloader.Infrastructure.Subtitles.Browser;
 /// </summary>
 public sealed class BrowserSubtitleRuntime : IAsyncDisposable
 {
+    private static readonly TimeSpan FastWarmupWindow = TimeSpan.FromSeconds(12);
+    private static readonly TimeSpan StartSnapThreshold = TimeSpan.FromSeconds(2);
+
     private readonly WebViewSubtitleBridge _bridge;
     private readonly ISubtitlePipeline _pipeline;
     private readonly IMediaAudioDecoder _audioDecoder;
@@ -111,7 +114,9 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                 RequestMissingTranslation(segment, _options.Mode, cancellationToken);
             await SetDisplayedAsync(segment?.GetDisplayText(_options.Mode), cancellationToken).ConfigureAwait(false);
 
-            if (state.Paused || state.Seeking)
+            // Local files are immediately seekable, so warm the first subtitle window even while
+            // the HTML video is still paused/buffering. This keeps ASR/translation ahead of playback.
+            if (state.Seeking)
                 return;
 
             var windowSize = TimeSpan.FromSeconds(Math.Clamp(_options.PreloadAheadSeconds, 10, 90));
@@ -261,12 +266,16 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             if (_workTask is { IsCompleted: false })
                 return;
 
-            var start = _pipeline.GetCoveredUntil(currentTime) ?? currentTime;
-            var remaining = duration is { } total ? total - start : windowSize;
+            var coveredUntil = _pipeline.GetCoveredUntil(currentTime);
+            var start = coveredUntil ?? (currentTime <= StartSnapThreshold ? TimeSpan.Zero : currentTime);
+            var desiredWindow = coveredUntil is null && windowSize > FastWarmupWindow
+                ? FastWarmupWindow
+                : windowSize;
+            var remaining = duration is { } total ? total - start : desiredWindow;
             if (remaining <= TimeSpan.Zero)
                 return;
 
-            var length = remaining < windowSize ? remaining : windowSize;
+            var length = remaining < desiredWindow ? remaining : desiredWindow;
             if (length < TimeSpan.FromSeconds(1))
                 return;
 
