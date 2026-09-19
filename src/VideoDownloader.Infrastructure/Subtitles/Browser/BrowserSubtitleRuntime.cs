@@ -17,13 +17,13 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     private readonly ISubtitlePipeline _pipeline;
     private readonly IMediaAudioDecoder _audioDecoder;
     private readonly SemaphoreSlim _scheduleGate = new(1, 1);
-    private CancellationTokenSource _lifetimeCts = new();
+    private readonly CancellationTokenSource _lifetimeCts = new();
     private CancellationTokenSource? _workCts;
     private Task? _workTask;
     private string? _mediaKey;
     private MediaVariant? _variant;
     private TimeSpan _coveredUntil;
-    private SubtitleMode _mode = SubtitleMode.Original;
+    private SubtitleMode _mode = SubtitleMode.Chinese;
     private string? _lastDisplayed;
 
     public BrowserSubtitleRuntime(
@@ -132,6 +132,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             var token = _workCts.Token;
             var variant = _variant;
             var mediaKey = _mediaKey;
+            var mode = _mode;
 
             _workTask = Task.Run(async () =>
             {
@@ -140,7 +141,11 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                     var audio = await _audioDecoder.DecodeAsync(variant, start, length, token).ConfigureAwait(false);
                     if (!string.Equals(mediaKey, _mediaKey, StringComparison.Ordinal))
                         return;
+
                     await _pipeline.SubmitAudioAsync(audio, token).ConfigureAwait(false);
+                    await _pipeline.PrepareTranslationsAsync(mode, audio.MediaStart, audio.MediaEnd, token)
+                        .ConfigureAwait(false);
+
                     if (string.Equals(mediaKey, _mediaKey, StringComparison.Ordinal))
                         _coveredUntil = audio.MediaEnd;
                 }
@@ -150,7 +155,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                 }
                 catch
                 {
-                    // Keep playback intact. A later detected-variant path may still recover this source.
+                    // Keep playback intact. Translation/ASR failures fall back to no/original subtitles.
                 }
             }, token);
         }
