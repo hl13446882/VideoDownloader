@@ -26,7 +26,7 @@ public sealed class FileSubtitleCacheStore : ISubtitleCacheStore
         if (string.IsNullOrWhiteSpace(mediaIdentity))
             return SubtitleCacheSnapshot.Empty;
 
-        var path = GetPath(mediaIdentity);
+        var path = GetJsonPath(mediaIdentity);
         if (!File.Exists(path))
             return SubtitleCacheSnapshot.Empty;
 
@@ -41,7 +41,15 @@ public sealed class FileSubtitleCacheStore : ISubtitleCacheStore
             if (cached is null)
                 return SubtitleCacheSnapshot.Empty;
 
-            try { File.SetLastWriteTimeUtc(path, DateTime.UtcNow); } catch { }
+            try
+            {
+                File.SetLastWriteTimeUtc(path, DateTime.UtcNow);
+                var transcriptPath = GetTranscriptPath(mediaIdentity);
+                if (File.Exists(transcriptPath))
+                    File.SetLastWriteTimeUtc(transcriptPath, DateTime.UtcNow);
+            }
+            catch { }
+
             var segments = (cached.Segments ?? Array.Empty<SubtitleSegment>())
                 .Where(x => x.End > x.Start && !string.IsNullOrWhiteSpace(x.OriginalText))
                 .OrderBy(x => x.Start)
@@ -75,15 +83,16 @@ public sealed class FileSubtitleCacheStore : ISubtitleCacheStore
         try
         {
             Directory.CreateDirectory(_root);
-            var path = GetPath(mediaIdentity);
-            var temp = path + ".tmp";
+            var orderedSegments = snapshot.Segments.OrderBy(x => x.Start).ToArray();
+            var jsonPath = GetJsonPath(mediaIdentity);
+            var jsonTemp = jsonPath + ".tmp";
             var payload = new CachedSubtitles(
                 mediaIdentity,
                 DateTimeOffset.UtcNow,
-                snapshot.Segments.OrderBy(x => x.Start).ToArray(),
+                orderedSegments,
                 snapshot.Coverage.OrderBy(x => x.Start).ToArray());
 
-            await using (var stream = File.Create(temp))
+            await using (var stream = File.Create(jsonTemp))
             {
                 await JsonSerializer.SerializeAsync(
                     stream,
@@ -91,8 +100,19 @@ public sealed class FileSubtitleCacheStore : ISubtitleCacheStore
                     JsonOptions,
                     cancellationToken).ConfigureAwait(false);
             }
+            File.Move(jsonTemp, jsonPath, overwrite: true);
 
-            File.Move(temp, path, overwrite: true);
+            // Human-readable recognition transcript. Deliberately contains source recognition only:
+            // translations are optional/replaceable and remain in the JSON machine cache.
+            var transcriptPath = GetTranscriptPath(mediaIdentity);
+            var transcriptTemp = transcriptPath + ".tmp";
+            await File.WriteAllTextAsync(
+                transcriptTemp,
+                BuildRecognitionTranscript(orderedSegments),
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: true),
+                cancellationToken).ConfigureAwait(false);
+            File.Move(transcriptTemp, transcriptPath, overwrite: true);
+
             TrimCache();
         }
         finally
@@ -101,11 +121,45 @@ public sealed class FileSubtitleCacheStore : ISubtitleCacheStore
         }
     }
 
-    private string GetPath(string mediaIdentity)
+    private string GetJsonPath(string mediaIdentity) =>
+        Path.Combine(_root, GetCacheName(mediaIdentity) + ".json");
+
+    private string GetTranscriptPath(string mediaIdentity) =>
+        Path.Combine(_root, GetCacheName(mediaIdentity) + ".speech.txt");
+
+    private static string GetCacheName(string mediaIdentity)
     {
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(mediaIdentity));
-        var name = Convert.ToHexString(bytes).ToLowerInvariant();
-        return Path.Combine(_root, name + ".json");
+        return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    private static string BuildRecognitionTranscript(IEnumerable<SubtitleSegment> segments)
+    {
+        var builder = new StringBuilder();
+        foreach (var segment in segments)
+        {
+            if (segment.End <= segment.Start || string.IsNullOrWhiteSpace(segment.OriginalText))
+                continue;
+
+            builder.Append('[')
+                .Append(FormatTimestamp(segment.Start))
+                .Append(" --> ")
+                .Append(FormatTimestamp(segment.End))
+                .Append(']');
+            if (!string.IsNullOrWhiteSpace(segment.SourceLanguage))
+                builder.Append(" [").Append(segment.SourceLanguage.Trim()).Append(']');
+            builder.AppendLine();
+            builder.AppendLine(segment.OriginalText.Trim());
+            builder.AppendLine();
+        }
+        return builder.ToString();
+    }
+
+    private static string FormatTimestamp(TimeSpan value)
+    {
+        if (value < TimeSpan.Zero)
+            value = TimeSpan.Zero;
+        return $"{(int)value.TotalHours:00}:{value.Minutes:00}:{value.Seconds:00}.{value.Milliseconds:000}";
     }
 
     private void TrimCache()
@@ -113,12 +167,20 @@ public sealed class FileSubtitleCacheStore : ISubtitleCacheStore
         try
         {
             var directory = new DirectoryInfo(_root);
-            var files = directory.GetFiles("*.json")
+            var jsonFiles = directory.GetFiles("*.json")
                 .OrderByDescending(x => x.LastWriteTimeUtc)
                 .ToArray();
-            foreach (var file in files.Skip(500))
+            foreach (var file in jsonFiles.Skip(500))
             {
-                try { file.Delete(); } catch { }
+                try
+                {
+                    var stem = Path.GetFileNameWithoutExtension(file.Name);
+                    file.Delete();
+                    var transcript = Path.Combine(_root, stem + ".speech.txt");
+                    if (File.Exists(transcript))
+                        File.Delete(transcript);
+                }
+                catch { }
             }
         }
         catch
