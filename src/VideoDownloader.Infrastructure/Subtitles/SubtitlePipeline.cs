@@ -8,6 +8,7 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
     private readonly ISpeechRecognizer _speechRecognizer;
     private readonly ISubtitleTimeline _timeline;
     private readonly ISubtitleTranslator _translator;
+    private readonly ISubtitleCacheStore _cache;
     private readonly SemaphoreSlim _recognitionGate = new(1, 1);
     private readonly SemaphoreSlim _translationGate = new(1, 1);
     private CancellationTokenSource? _sessionCts;
@@ -16,16 +17,18 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
     public SubtitlePipeline(
         ISpeechRecognizer speechRecognizer,
         ISubtitleTimeline timeline,
-        ISubtitleTranslator translator)
+        ISubtitleTranslator translator,
+        ISubtitleCacheStore cache)
     {
         _speechRecognizer = speechRecognizer;
         _timeline = timeline;
         _translator = translator;
+        _cache = cache;
     }
 
     public string? ActiveSessionId { get; private set; }
 
-    public Task StartSessionAsync(
+    public async Task StartSessionAsync(
         string sessionId,
         string? mediaIdentity,
         CancellationToken cancellationToken = default)
@@ -36,7 +39,24 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
         _mediaIdentity = mediaIdentity;
         _timeline.Clear();
         _sessionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        return Task.CompletedTask;
+
+        if (string.IsNullOrWhiteSpace(mediaIdentity))
+            return;
+
+        try
+        {
+            var cached = await _cache.LoadAsync(mediaIdentity, _sessionCts.Token).ConfigureAwait(false);
+            if (string.Equals(sessionId, ActiveSessionId, StringComparison.Ordinal))
+                _timeline.AddOrUpdate(cached);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // A newer subtitle session replaced this one while the cache was loading.
+        }
+        catch
+        {
+            // Cache corruption or IO failure must never block a fresh subtitle session.
+        }
     }
 
     public async Task SubmitAudioAsync(
@@ -62,8 +82,11 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
                 new SpeechRecognitionContext(sessionId, _mediaIdentity),
                 linked.Token).ConfigureAwait(false);
 
-            if (string.Equals(sessionId, ActiveSessionId, StringComparison.Ordinal))
-                _timeline.AddOrUpdate(result);
+            if (!string.Equals(sessionId, ActiveSessionId, StringComparison.Ordinal))
+                return;
+
+            _timeline.AddOrUpdate(result);
+            await PersistAsync(sessionId, linked.Token).ConfigureAwait(false);
         }
         finally
         {
@@ -144,6 +167,8 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
                         segment.EnglishText = text;
                     segment.State = SubtitleSegmentState.Ready;
                 }
+
+                await PersistAsync(sessionId, linked.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -173,6 +198,16 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
         cancellationToken.ThrowIfCancellationRequested();
         StopSessionCore();
         return Task.CompletedTask;
+    }
+
+    private async Task PersistAsync(string sessionId, CancellationToken cancellationToken)
+    {
+        var identity = _mediaIdentity;
+        if (string.IsNullOrWhiteSpace(identity) ||
+            !string.Equals(sessionId, ActiveSessionId, StringComparison.Ordinal))
+            return;
+
+        await _cache.SaveAsync(identity, _timeline.Snapshot(), cancellationToken).ConfigureAwait(false);
     }
 
     private static bool IsAlreadyReady(SubtitleSegment segment, SubtitleMode mode) =>
