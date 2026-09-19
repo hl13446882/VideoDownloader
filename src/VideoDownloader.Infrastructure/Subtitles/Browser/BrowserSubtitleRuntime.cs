@@ -1,20 +1,21 @@
-using VideoDownloader.Core.Models;
 using VideoDownloader.Core.Subtitles;
 using VideoDownloader.Core.Subtitles.Contracts;
 using VideoDownloader.Infrastructure.Configuration;
+using VideoDownloader.Infrastructure.LocalLibrary;
 
 namespace VideoDownloader.Infrastructure.Subtitles.Browser;
 
 /// <summary>
-/// Per-WebView subtitle runtime. It prefers variants already discovered by the normal detection
-/// pipeline and falls back to the browser's direct http(s) currentSrc when available.
+/// Subtitle runtime for the application's local-library player.
+/// WebView2 is used only as the playback clock/overlay; speech recognition reads the completed
+/// media file directly from disk. Ordinary web pages never start ASR or translation work.
 /// </summary>
 public sealed class BrowserSubtitleRuntime : IAsyncDisposable
 {
     private readonly WebViewSubtitleBridge _bridge;
     private readonly ISubtitlePipeline _pipeline;
     private readonly IMediaAudioDecoder _audioDecoder;
-    private readonly SubtitleMediaVariantRegistry _variantRegistry;
+    private readonly LocalPlaybackMediaSourceResolver _localSourceResolver;
     private readonly SubtitleOptions _options;
     private readonly SemaphoreSlim _scheduleGate = new(1, 1);
     private readonly CancellationTokenSource _lifetimeCts = new();
@@ -24,22 +25,23 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     private Task? _workTask;
     private string? _mediaKey;
     private string? _pageUrl;
-    private MediaVariant? _variant;
+    private LocalPlaybackMediaSource? _localSource;
     private TimeSpan? _lastPlaybackTime;
     private string? _lastDisplayed;
     private string? _styleFingerprint;
+    private bool _sessionActive;
 
     public BrowserSubtitleRuntime(
         WebViewSubtitleBridge bridge,
         ISubtitlePipeline pipeline,
         IMediaAudioDecoder audioDecoder,
-        SubtitleMediaVariantRegistry variantRegistry,
+        LocalPlaybackMediaSourceResolver localSourceResolver,
         SubtitleOptions options)
     {
         _bridge = bridge;
         _pipeline = pipeline;
         _audioDecoder = audioDecoder;
-        _variantRegistry = variantRegistry;
+        _localSourceResolver = localSourceResolver;
         _options = options;
         _bridge.PlaybackStateChanged += OnPlaybackStateChanged;
     }
@@ -65,6 +67,12 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     {
         try
         {
+            if (!IsLocalPlayback(state.PageUrl))
+            {
+                await LeaveLocalPlaybackAsync(cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
             await ApplyStyleIfChangedAsync(cancellationToken).ConfigureAwait(false);
 
             if (!_options.Enabled)
@@ -84,11 +92,9 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             {
                 await SwitchMediaAsync(state.MediaKey, state.PageUrl, cancellationToken).ConfigureAwait(false);
             }
-            else if (_variant is null)
-            {
-                // Detection may finish after playback begins. Pick it up without restarting the session.
-                _variant = _variantRegistry.Resolve(state.PageUrl, state.MediaKey) ?? CreateDirectVariant(state.MediaKey);
-            }
+
+            if (_localSource is null)
+                return;
 
             var jumped = _lastPlaybackTime is { } previous &&
                          Math.Abs((state.CurrentTime - previous).TotalSeconds) >= 2.5;
@@ -99,12 +105,13 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             var displayTime = state.CurrentTime - TimeSpan.FromMilliseconds(_options.SubtitleOffsetMs);
             if (displayTime < TimeSpan.Zero)
                 displayTime = TimeSpan.Zero;
+
             var segment = _pipeline.GetCurrent(displayTime, _options.Mode);
             if (segment is not null)
                 RequestMissingTranslation(segment, _options.Mode, cancellationToken);
             await SetDisplayedAsync(segment?.GetDisplayText(_options.Mode), cancellationToken).ConfigureAwait(false);
 
-            if (_variant is null || state.Paused || state.Seeking)
+            if (state.Paused || state.Seeking)
                 return;
 
             var windowSize = TimeSpan.FromSeconds(Math.Clamp(_options.PreloadAheadSeconds, 10, 90));
@@ -119,8 +126,35 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         }
         catch
         {
-            // Subtitle failures must never interrupt playback.
+            // Subtitle failures must never interrupt local video playback.
         }
+    }
+
+    private static bool IsLocalPlayback(string? pageUrl) =>
+        Uri.TryCreate(pageUrl, UriKind.Absolute, out var uri) && LocalLibraryHost.IsLocalPlayerUrl(uri);
+
+    private async Task LeaveLocalPlaybackAsync(CancellationToken cancellationToken)
+    {
+        if (!_sessionActive && _localSource is null && _lastDisplayed is null)
+            return;
+
+        CancelActiveWindow();
+        _workCts?.Dispose();
+        _workCts = null;
+        _workTask = null;
+        _mediaKey = null;
+        _pageUrl = null;
+        _localSource = null;
+        _lastPlaybackTime = null;
+        lock (_translationSync)
+            _translationRequests.Clear();
+
+        if (_sessionActive)
+        {
+            await _pipeline.StopSessionAsync(cancellationToken).ConfigureAwait(false);
+            _sessionActive = false;
+        }
+        await SetDisplayedAsync(null, cancellationToken).ConfigureAwait(false);
     }
 
     private void RequestMissingTranslation(
@@ -175,23 +209,27 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _lastPlaybackTime = null;
         _mediaKey = mediaKey;
         _pageUrl = pageUrl;
-        _variant = _variantRegistry.Resolve(pageUrl, mediaKey) ?? CreateDirectVariant(mediaKey);
+        _localSource = await _localSourceResolver.ResolveAsync(pageUrl, cancellationToken).ConfigureAwait(false);
         _lastDisplayed = null;
         lock (_translationSync)
             _translationRequests.Clear();
 
         await _bridge.ClearSubtitleAsync(cancellationToken).ConfigureAwait(false);
-        await _pipeline.StartSessionAsync(
-            "webview:" + Guid.NewGuid().ToString("N"),
-            ResolveMediaIdentity(mediaKey),
-            cancellationToken).ConfigureAwait(false);
-    }
 
-    private string ResolveMediaIdentity(string mediaKey)
-    {
-        if (!string.IsNullOrWhiteSpace(_variant?.ContentIdentity))
-            return _variant.ContentIdentity!;
-        return mediaKey;
+        if (_sessionActive)
+        {
+            await _pipeline.StopSessionAsync(cancellationToken).ConfigureAwait(false);
+            _sessionActive = false;
+        }
+
+        if (_localSource is null)
+            return;
+
+        await _pipeline.StartSessionAsync(
+            "local:" + Guid.NewGuid().ToString("N"),
+            _localSource.CacheIdentity,
+            cancellationToken).ConfigureAwait(false);
+        _sessionActive = true;
     }
 
     private void CancelActiveWindow()
@@ -213,7 +251,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         TimeSpan windowSize,
         CancellationToken cancellationToken)
     {
-        if (_variant is null)
+        var localSource = _localSource;
+        if (localSource is null)
             return;
 
         await _scheduleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -234,16 +273,22 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             _workCts?.Dispose();
             _workCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetimeCts.Token);
             var token = _workCts.Token;
-            var variant = _variant;
             var mediaKey = _mediaKey;
+            var cacheIdentity = localSource.CacheIdentity;
             var mode = _options.Mode;
 
             _workTask = Task.Run(async () =>
             {
                 try
                 {
-                    var audio = await _audioDecoder.DecodeAsync(variant, start, length, token).ConfigureAwait(false);
-                    if (!string.Equals(mediaKey, _mediaKey, StringComparison.Ordinal))
+                    var audio = await _audioDecoder.DecodeLocalFileAsync(
+                        localSource.FilePath,
+                        start,
+                        length,
+                        token).ConfigureAwait(false);
+
+                    if (!string.Equals(mediaKey, _mediaKey, StringComparison.Ordinal) ||
+                        !string.Equals(cacheIdentity, _localSource?.CacheIdentity, StringComparison.Ordinal))
                         return;
 
                     await _pipeline.SubmitAudioAsync(audio, token).ConfigureAwait(false);
@@ -323,18 +368,6 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             : source is "en" or "en-us" or "en-gb" or "english";
     }
 
-    private static MediaVariant? CreateDirectVariant(string mediaKey)
-    {
-        if (!Uri.TryCreate(mediaKey, UriKind.Absolute, out var uri) ||
-            (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
-            return null;
-
-        return MediaVariant.FromCombinedTrack(
-            "subtitle-direct",
-            uri,
-            RequestContext.CreateEmpty());
-    }
-
     public async ValueTask DisposeAsync()
     {
         _bridge.PlaybackStateChanged -= OnPlaybackStateChanged;
@@ -344,7 +377,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         {
             try { await _workTask.ConfigureAwait(false); } catch { }
         }
-        await _pipeline.StopSessionAsync().ConfigureAwait(false);
+        if (_sessionActive)
+            await _pipeline.StopSessionAsync().ConfigureAwait(false);
         await _bridge.DisposeAsync().ConfigureAwait(false);
         _workCts?.Dispose();
         _lifetimeCts.Dispose();
