@@ -18,6 +18,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     private readonly SubtitleOptions _options;
     private readonly SemaphoreSlim _scheduleGate = new(1, 1);
     private readonly CancellationTokenSource _lifetimeCts = new();
+    private readonly HashSet<string> _translationRequests = new(StringComparer.Ordinal);
+    private readonly object _translationSync = new();
     private CancellationTokenSource? _workCts;
     private Task? _workTask;
     private string? _mediaKey;
@@ -25,6 +27,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     private MediaVariant? _variant;
     private TimeSpan _coveredUntil;
     private string? _lastDisplayed;
+    private string? _styleFingerprint;
 
     public BrowserSubtitleRuntime(
         WebViewSubtitleBridge bridge,
@@ -44,11 +47,14 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         await _bridge.InitializeAsync(cancellationToken).ConfigureAwait(false);
-        await _bridge.ApplyStyleAsync(BuildStyle(), cancellationToken).ConfigureAwait(false);
+        await ApplyStyleIfChangedAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public Task ApplyCurrentStyleAsync(CancellationToken cancellationToken = default) =>
-        _bridge.ApplyStyleAsync(BuildStyle(), cancellationToken);
+    public Task ApplyCurrentStyleAsync(CancellationToken cancellationToken = default)
+    {
+        _styleFingerprint = null;
+        return ApplyStyleIfChangedAsync(cancellationToken);
+    }
 
     private void OnPlaybackStateChanged(object? sender, SubtitlePlaybackState state)
     {
@@ -59,6 +65,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     {
         try
         {
+            await ApplyStyleIfChangedAsync(cancellationToken).ConfigureAwait(false);
+
             if (!_options.Enabled)
             {
                 await SetDisplayedAsync(null, cancellationToken).ConfigureAwait(false);
@@ -86,6 +94,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             if (displayTime < TimeSpan.Zero)
                 displayTime = TimeSpan.Zero;
             var segment = _pipeline.GetCurrent(displayTime, _options.Mode);
+            if (segment is not null)
+                RequestMissingTranslation(segment, _options.Mode, cancellationToken);
             await SetDisplayedAsync(segment?.GetDisplayText(_options.Mode), cancellationToken).ConfigureAwait(false);
 
             if (_variant is null || state.Paused || state.Seeking)
@@ -106,6 +116,46 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         }
     }
 
+    private void RequestMissingTranslation(
+        SubtitleSegment segment,
+        SubtitleMode mode,
+        CancellationToken cancellationToken)
+    {
+        if (mode == SubtitleMode.Original || HasTargetText(segment, mode) || IsSameLanguage(segment.SourceLanguage, mode))
+            return;
+
+        var key = segment.Id + ":" + mode;
+        lock (_translationSync)
+        {
+            if (!_translationRequests.Add(key))
+                return;
+        }
+
+        _ = TranslateExistingAsync(segment, mode, key, cancellationToken);
+    }
+
+    private async Task TranslateExistingAsync(
+        SubtitleSegment segment,
+        SubtitleMode mode,
+        string key,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _pipeline.PrepareTranslationsAsync(mode, segment.Start, segment.End, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            lock (_translationSync)
+                _translationRequests.Remove(key);
+        }
+        catch
+        {
+            // Original text remains visible.
+        }
+    }
+
     private async Task SwitchMediaAsync(
         string mediaKey,
         string? pageUrl,
@@ -120,6 +170,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _pageUrl = pageUrl;
         _variant = _variantRegistry.Resolve(pageUrl, mediaKey) ?? CreateDirectVariant(mediaKey);
         _lastDisplayed = null;
+        lock (_translationSync)
+            _translationRequests.Clear();
 
         await _bridge.ClearSubtitleAsync(cancellationToken).ConfigureAwait(false);
         await _pipeline.StartSessionAsync(
@@ -190,6 +242,26 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         }
     }
 
+    private async Task ApplyStyleIfChangedAsync(CancellationToken cancellationToken)
+    {
+        var fingerprint = string.Join('|',
+            _options.FontFamily,
+            _options.FontSize,
+            _options.Bold,
+            _options.TextColor,
+            _options.OutlineColor,
+            _options.OutlineSize,
+            _options.BackgroundColor,
+            _options.BackgroundOpacity,
+            _options.BottomOffsetPx,
+            _options.MaxLines,
+            _options.MaxWidthPercent);
+        if (string.Equals(fingerprint, _styleFingerprint, StringComparison.Ordinal))
+            return;
+        await _bridge.ApplyStyleAsync(BuildStyle(), cancellationToken).ConfigureAwait(false);
+        _styleFingerprint = fingerprint;
+    }
+
     private async Task SetDisplayedAsync(string? text, CancellationToken cancellationToken)
     {
         text = string.IsNullOrWhiteSpace(text) ? null : text.Trim();
@@ -213,6 +285,19 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         MaxLines = _options.MaxLines,
         MaxWidthPercent = _options.MaxWidthPercent
     };
+
+    private static bool HasTargetText(SubtitleSegment segment, SubtitleMode mode) =>
+        mode == SubtitleMode.Chinese
+            ? !string.IsNullOrWhiteSpace(segment.ChineseText)
+            : !string.IsNullOrWhiteSpace(segment.EnglishText);
+
+    private static bool IsSameLanguage(string source, SubtitleMode mode)
+    {
+        source = source?.Trim().ToLowerInvariant() ?? string.Empty;
+        return mode == SubtitleMode.Chinese
+            ? source is "zh" or "zh-cn" or "chinese"
+            : source is "en" or "en-us" or "en-gb" or "english";
+    }
 
     private static MediaVariant? CreateDirectVariant(string mediaKey)
     {
