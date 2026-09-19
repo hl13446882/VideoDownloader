@@ -15,6 +15,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     private static readonly TimeSpan FastWarmupWindow = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan StartSnapThreshold = TimeSpan.FromSeconds(2);
     private const string ModelMissingHint = "请先在设置中安装字幕模型";
+    private const string NativeRuntimeHint = "字幕引擎组件缺失，请更新到最新版本";
+    private const string FfmpegMissingHint = "未找到 FFmpeg，无法识别字幕";
 
     private readonly WebViewSubtitleBridge _bridge;
     private readonly ISubtitlePipeline _pipeline;
@@ -285,6 +287,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                 return;
             }
 
+            _modelMissingNotified = false;
+
             var coveredUntil = _pipeline.GetCoveredUntil(currentTime);
             var start = coveredUntil ?? (currentTime <= StartSnapThreshold ? TimeSpan.Zero : currentTime);
             var desiredWindow = coveredUntil is null && windowSize > FastWarmupWindow
@@ -328,12 +332,24 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                 {
                     // Expected on seek/media/session change.
                 }
-                catch (FileNotFoundException)
+                catch (FileNotFoundException ex)
                 {
-                    _modelMissingNotified = true;
+                    var hint = ClassifyMissingDependency(ex);
+                    _modelMissingNotified = string.Equals(hint, ModelMissingHint, StringComparison.Ordinal);
                     try
                     {
-                        await SetDisplayedAsync(ModelMissingHint, token).ConfigureAwait(false);
+                        await SetDisplayedAsync(hint, token).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // Overlay update is best-effort.
+                    }
+                }
+                catch (Exception ex) when (IsNativeLibraryFailure(ex))
+                {
+                    try
+                    {
+                        await SetDisplayedAsync(NativeRuntimeHint, token).ConfigureAwait(false);
                     }
                     catch
                     {
@@ -357,12 +373,43 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         try
         {
             var path = PathExpander.Expand(_options.WhisperModelPath);
-            return !string.IsNullOrWhiteSpace(path) && File.Exists(path);
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+                return false;
+            // Ignore truncated / failed downloads (full ggml-base.bin is ~141 MiB).
+            return new FileInfo(path).Length > 100L * 1024 * 1024;
         }
         catch
         {
             return false;
         }
+    }
+
+    private static string ClassifyMissingDependency(FileNotFoundException ex)
+    {
+        var message = ex.Message ?? string.Empty;
+        var name = ex.FileName ?? string.Empty;
+        if (message.Contains("Native Library", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("Whisper.net.Runtime", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("ggml", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("whisper", StringComparison.OrdinalIgnoreCase))
+            return NativeRuntimeHint;
+
+        if (message.Contains("FFmpeg", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase))
+            return FfmpegMissingHint;
+
+        if (message.Contains("Whisper model", StringComparison.OrdinalIgnoreCase) ||
+            name.EndsWith(".bin", StringComparison.OrdinalIgnoreCase))
+            return ModelMissingHint;
+
+        return ModelMissingHint;
+    }
+
+    private static bool IsNativeLibraryFailure(Exception ex)
+    {
+        var text = ex.ToString();
+        return text.Contains("Native Library not found", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("Whisper.net.Runtime", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task ApplyStyleIfChangedAsync(CancellationToken cancellationToken)

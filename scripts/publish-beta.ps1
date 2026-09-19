@@ -34,7 +34,9 @@ $package = Join-Path $stage 'VideoDownload'
 
 dotnet publish (Join-Path $root 'src\VideoDownloader.UI\VideoDownloader.UI.csproj') `
   -c $Configuration -r win-x64 --self-contained false `
-  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+  -p:PublishSingleFile=true `
+  -p:IncludeNativeLibrariesForSelfExtract=true `
+  -p:IncludeAllContentForSelfExtract=true `
   -p:DebugType=None -p:DebugSymbols=false -p:PublishReadyToRun=false `
   -o $appBuild
 if ($LASTEXITCODE -ne 0) { throw 'Application publish failed' }
