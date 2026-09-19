@@ -5,8 +5,8 @@ using VideoDownloader.Core.Subtitles.Contracts;
 namespace VideoDownloader.Infrastructure.Subtitles.Browser;
 
 /// <summary>
-/// Per-WebView subtitle runtime. The first integration path handles direct http(s) media URLs.
-/// MSE/blob playback is intentionally left for the detected MediaVariant integration path.
+/// Per-WebView subtitle runtime. It prefers variants already discovered by the normal detection
+/// pipeline and falls back to the browser's direct http(s) currentSrc when available.
 /// </summary>
 public sealed class BrowserSubtitleRuntime : IAsyncDisposable
 {
@@ -16,11 +16,13 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     private readonly WebViewSubtitleBridge _bridge;
     private readonly ISubtitlePipeline _pipeline;
     private readonly IMediaAudioDecoder _audioDecoder;
+    private readonly SubtitleMediaVariantRegistry _variantRegistry;
     private readonly SemaphoreSlim _scheduleGate = new(1, 1);
     private readonly CancellationTokenSource _lifetimeCts = new();
     private CancellationTokenSource? _workCts;
     private Task? _workTask;
     private string? _mediaKey;
+    private string? _pageUrl;
     private MediaVariant? _variant;
     private TimeSpan _coveredUntil;
     private SubtitleMode _mode = SubtitleMode.Chinese;
@@ -29,11 +31,13 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     public BrowserSubtitleRuntime(
         WebViewSubtitleBridge bridge,
         ISubtitlePipeline pipeline,
-        IMediaAudioDecoder audioDecoder)
+        IMediaAudioDecoder audioDecoder,
+        SubtitleMediaVariantRegistry variantRegistry)
     {
         _bridge = bridge;
         _pipeline = pipeline;
         _audioDecoder = audioDecoder;
+        _variantRegistry = variantRegistry;
         _bridge.PlaybackStateChanged += OnPlaybackStateChanged;
     }
 
@@ -64,8 +68,16 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                 return;
             }
 
-            if (!string.Equals(_mediaKey, state.MediaKey, StringComparison.Ordinal))
-                await SwitchMediaAsync(state.MediaKey, cancellationToken).ConfigureAwait(false);
+            if (!string.Equals(_mediaKey, state.MediaKey, StringComparison.Ordinal) ||
+                !string.Equals(_pageUrl, state.PageUrl, StringComparison.Ordinal))
+            {
+                await SwitchMediaAsync(state.MediaKey, state.PageUrl, cancellationToken).ConfigureAwait(false);
+            }
+            else if (_variant is null)
+            {
+                // Detection may finish after playback begins. Pick it up without restarting the session.
+                _variant = _variantRegistry.Resolve(state.PageUrl, state.MediaKey) ?? CreateDirectVariant(state.MediaKey);
+            }
 
             var segment = _pipeline.GetCurrent(state.CurrentTime, _mode);
             await SetDisplayedAsync(segment?.GetDisplayText(_mode), cancellationToken).ConfigureAwait(false);
@@ -86,7 +98,10 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         }
     }
 
-    private async Task SwitchMediaAsync(string mediaKey, CancellationToken cancellationToken)
+    private async Task SwitchMediaAsync(
+        string mediaKey,
+        string? pageUrl,
+        CancellationToken cancellationToken)
     {
         _workCts?.Cancel();
         _workCts?.Dispose();
@@ -94,7 +109,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _workTask = null;
         _coveredUntil = TimeSpan.Zero;
         _mediaKey = mediaKey;
-        _variant = CreateDirectVariant(mediaKey);
+        _pageUrl = pageUrl;
+        _variant = _variantRegistry.Resolve(pageUrl, mediaKey) ?? CreateDirectVariant(mediaKey);
         _lastDisplayed = null;
 
         await _bridge.ClearSubtitleAsync(cancellationToken).ConfigureAwait(false);
