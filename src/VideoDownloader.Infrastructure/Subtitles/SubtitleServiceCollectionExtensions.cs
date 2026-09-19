@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using VideoDownloader.Core.Subtitles.Contracts;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Subtitles.Audio;
+using VideoDownloader.Infrastructure.Subtitles.Cache;
 using VideoDownloader.Infrastructure.Subtitles.Speech;
 using VideoDownloader.Infrastructure.Subtitles.Translation;
 
@@ -27,6 +28,7 @@ public static class SubtitleServiceCollectionExtensions
 
         services.AddSingleton<ISpeechRecognizer, WhisperSpeechRecognizer>();
         services.AddSingleton<IMediaAudioDecoder, FfmpegMediaAudioDecoder>();
+        services.AddSingleton<ISubtitleCacheStore, FileSubtitleCacheStore>();
 
         services.AddHttpClient("subtitle-local-translation", client =>
         {
