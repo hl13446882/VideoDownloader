@@ -10,6 +10,8 @@ using VideoDownloader.Core.Subtitles;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Logging;
 using VideoDownloader.Infrastructure.Security;
+using VideoDownloader.Infrastructure.Subtitles.Speech;
+using VideoDownloader.Infrastructure.Subtitles.Translation;
 using VideoDownloader.Infrastructure.Update;
 using VideoDownloader.UI.Localization;
 
@@ -59,7 +61,6 @@ public sealed partial class SettingsViewModel : ObservableObject
     public IReadOnlyList<SubtitleMode> SubtitleModeOptions { get; } =
         [SubtitleMode.Original, SubtitleMode.Chinese, SubtitleMode.English];
 
-    /// <summary>Raised after a successful migrate so the main window can refresh the queue.</summary>
     public event EventHandler? DownloadsMigrated;
 
     public SettingsViewModel(
@@ -230,7 +231,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         subtitles.Enabled = SubtitleEnabled;
         subtitles.Mode = SubtitleMode;
         subtitles.PreloadAheadSeconds = Math.Clamp(SubtitlePreloadAheadSeconds, 10, 90);
-        subtitles.TranslationProvider = "local"; // Cloud entry is reserved but not implemented in this phase.
+        subtitles.TranslationProvider = "local";
         subtitles.FontFamily = string.IsNullOrWhiteSpace(SubtitleFontFamily) ? "Microsoft YaHei" : SubtitleFontFamily.Trim();
         subtitles.FontSize = Math.Clamp(SubtitleFontSize, 10, 96);
         subtitles.Bold = SubtitleBold;
@@ -248,6 +249,17 @@ public sealed partial class SettingsViewModel : ObservableObject
         subtitles.LocalTranslationModel = string.IsNullOrWhiteSpace(SubtitleLocalTranslationModel)
             ? "local-model"
             : SubtitleLocalTranslationModel.Trim();
+
+        // Keep already-created local engines in sync; no application restart is required.
+        var whisperRuntime = _services.GetService<WhisperSpeechRecognizerOptions>();
+        if (whisperRuntime is not null)
+            whisperRuntime.ModelPath = subtitles.WhisperModelPath;
+        var translationRuntime = _services.GetService<LocalLlmTranslatorOptions>();
+        if (translationRuntime is not null)
+        {
+            translationRuntime.Endpoint = subtitles.LocalTranslationEndpoint;
+            translationRuntime.Model = subtitles.LocalTranslationModel;
+        }
 
         _store.Save(_options);
         _appLog.ApplyFromOptions();
