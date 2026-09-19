@@ -11,6 +11,8 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
     private readonly ISubtitleCacheStore _cache;
     private readonly SemaphoreSlim _recognitionGate = new(1, 1);
     private readonly SemaphoreSlim _translationGate = new(1, 1);
+    private readonly object _coverageSync = new();
+    private readonly List<SubtitleCoverageRange> _coverage = new();
     private CancellationTokenSource? _sessionCts;
     private string? _mediaIdentity;
 
@@ -38,6 +40,8 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
         ActiveSessionId = sessionId;
         _mediaIdentity = mediaIdentity;
         _timeline.Clear();
+        lock (_coverageSync)
+            _coverage.Clear();
         _sessionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
         if (string.IsNullOrWhiteSpace(mediaIdentity))
@@ -46,8 +50,11 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
         try
         {
             var cached = await _cache.LoadAsync(mediaIdentity, _sessionCts.Token).ConfigureAwait(false);
-            if (string.Equals(sessionId, ActiveSessionId, StringComparison.Ordinal))
-                _timeline.AddOrUpdate(cached);
+            if (!string.Equals(sessionId, ActiveSessionId, StringComparison.Ordinal))
+                return;
+
+            _timeline.AddOrUpdate(cached.Segments);
+            ReplaceCoverage(cached.Coverage);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -86,6 +93,7 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
                 return;
 
             _timeline.AddOrUpdate(result);
+            AddCoverage(chunk.MediaStart, chunk.MediaEnd);
             await PersistAsync(sessionId, linked.Token).ConfigureAwait(false);
         }
         finally
@@ -193,11 +201,75 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
         return _timeline.Find(mediaTime);
     }
 
+    public TimeSpan? GetCoveredUntil(TimeSpan mediaTime)
+    {
+        lock (_coverageSync)
+        {
+            foreach (var range in _coverage)
+            {
+                if (mediaTime < range.Start)
+                    break;
+                if (mediaTime >= range.Start && mediaTime <= range.End)
+                    return range.End;
+            }
+        }
+        return null;
+    }
+
     public Task StopSessionAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         StopSessionCore();
         return Task.CompletedTask;
+    }
+
+    private void ReplaceCoverage(IEnumerable<SubtitleCoverageRange> ranges)
+    {
+        lock (_coverageSync)
+        {
+            _coverage.Clear();
+            foreach (var range in ranges.Where(x => x.End > x.Start).OrderBy(x => x.Start))
+                AddCoverageLocked(range.Start, range.End);
+        }
+    }
+
+    private void AddCoverage(TimeSpan start, TimeSpan end)
+    {
+        if (end <= start)
+            return;
+        lock (_coverageSync)
+            AddCoverageLocked(start, end);
+    }
+
+    private void AddCoverageLocked(TimeSpan start, TimeSpan end)
+    {
+        var mergedStart = start;
+        var mergedEnd = end;
+        var tolerance = TimeSpan.FromMilliseconds(750);
+
+        for (var i = _coverage.Count - 1; i >= 0; i--)
+        {
+            var current = _coverage[i];
+            if (current.End + tolerance < mergedStart || current.Start - tolerance > mergedEnd)
+                continue;
+
+            if (current.Start < mergedStart)
+                mergedStart = current.Start;
+            if (current.End > mergedEnd)
+                mergedEnd = current.End;
+            _coverage.RemoveAt(i);
+        }
+
+        _coverage.Add(new SubtitleCoverageRange(mergedStart, mergedEnd));
+        _coverage.Sort((a, b) => a.Start.CompareTo(b.Start));
+    }
+
+    private SubtitleCacheSnapshot SnapshotForCache()
+    {
+        SubtitleCoverageRange[] coverage;
+        lock (_coverageSync)
+            coverage = _coverage.ToArray();
+        return new SubtitleCacheSnapshot(_timeline.Snapshot(), coverage);
     }
 
     private async Task PersistAsync(string sessionId, CancellationToken cancellationToken)
@@ -207,7 +279,7 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
             !string.Equals(sessionId, ActiveSessionId, StringComparison.Ordinal))
             return;
 
-        await _cache.SaveAsync(identity, _timeline.Snapshot(), cancellationToken).ConfigureAwait(false);
+        await _cache.SaveAsync(identity, SnapshotForCache(), cancellationToken).ConfigureAwait(false);
     }
 
     private static bool IsAlreadyReady(SubtitleSegment segment, SubtitleMode mode) =>
