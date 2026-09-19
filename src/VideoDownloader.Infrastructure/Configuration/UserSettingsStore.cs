@@ -62,7 +62,8 @@ public sealed class UserSettingsStore
             ExternalResolvers = loaded.ExternalResolvers ?? defaults.ExternalResolvers,
             License = defaults.License,
             Update = defaults.Update,
-            Ui = loaded.Ui ?? defaults.Ui
+            Ui = loaded.Ui ?? defaults.Ui,
+            Subtitles = loaded.Subtitles ?? defaults.Subtitles
         };
         Sanitize(merged);
         return merged;
@@ -74,6 +75,19 @@ public sealed class UserSettingsStore
             Math.Clamp(options.Download.MaxConcurrentDownloads, 1, 5);
         if (options.Ui.AutoModeIdleMinutes < 1)
             options.Ui.AutoModeIdleMinutes = 5;
+
+        options.Subtitles.PreloadAheadSeconds = Math.Clamp(options.Subtitles.PreloadAheadSeconds, 10, 90);
+        options.Subtitles.FontSize = Math.Clamp(options.Subtitles.FontSize, 10, 96);
+        options.Subtitles.OutlineSize = Math.Clamp(options.Subtitles.OutlineSize, 0, 8);
+        options.Subtitles.BackgroundOpacity = Math.Clamp(options.Subtitles.BackgroundOpacity, 0, 1);
+        options.Subtitles.BottomOffsetPx = Math.Clamp(options.Subtitles.BottomOffsetPx, 0, 1000);
+        options.Subtitles.MaxLines = Math.Clamp(options.Subtitles.MaxLines, 1, 4);
+        options.Subtitles.MaxWidthPercent = Math.Clamp(options.Subtitles.MaxWidthPercent, 20, 100);
+        options.Subtitles.SubtitleOffsetMs = Math.Clamp(options.Subtitles.SubtitleOffsetMs, -5000, 5000);
+        options.Subtitles.TranslationProvider = string.Equals(
+            options.Subtitles.TranslationProvider,
+            "cloud",
+            StringComparison.OrdinalIgnoreCase) ? "cloud" : "local";
     }
 
     private static AppOptions Clone(AppOptions source)
@@ -154,6 +168,28 @@ public sealed class UserSettingsStore
                 AutoModeIdleMinutes = source.Ui?.AutoModeIdleMinutes > 0
                     ? source.Ui.AutoModeIdleMinutes
                     : 5
+            },
+            Subtitles = new SubtitleOptions
+            {
+                Enabled = source.Subtitles.Enabled,
+                Mode = source.Subtitles.Mode,
+                PreloadAheadSeconds = source.Subtitles.PreloadAheadSeconds,
+                TranslationProvider = source.Subtitles.TranslationProvider,
+                LocalTranslationEndpoint = source.Subtitles.LocalTranslationEndpoint,
+                LocalTranslationModel = source.Subtitles.LocalTranslationModel,
+                WhisperModelPath = source.Subtitles.WhisperModelPath,
+                FontFamily = source.Subtitles.FontFamily,
+                FontSize = source.Subtitles.FontSize,
+                Bold = source.Subtitles.Bold,
+                TextColor = source.Subtitles.TextColor,
+                OutlineColor = source.Subtitles.OutlineColor,
+                OutlineSize = source.Subtitles.OutlineSize,
+                BackgroundColor = source.Subtitles.BackgroundColor,
+                BackgroundOpacity = source.Subtitles.BackgroundOpacity,
+                BottomOffsetPx = source.Subtitles.BottomOffsetPx,
+                MaxLines = source.Subtitles.MaxLines,
+                MaxWidthPercent = source.Subtitles.MaxWidthPercent,
+                SubtitleOffsetMs = source.Subtitles.SubtitleOffsetMs
             }
         };
         Sanitize(clone);
