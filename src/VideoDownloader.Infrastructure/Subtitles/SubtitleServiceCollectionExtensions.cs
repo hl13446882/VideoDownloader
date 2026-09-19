@@ -39,12 +39,19 @@ public static class SubtitleServiceCollectionExtensions
             UseCookies = false
         });
 
+        // Model download is user-triggered and may use the system proxy/network route.
+        services.AddHttpClient("subtitle-model-download", client =>
+        {
+            client.Timeout = TimeSpan.FromMinutes(30);
+        });
+
         services.AddSingleton(sp => new LocalLlmTranslator(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient("subtitle-local-translation"),
             sp.GetRequiredService<LocalLlmTranslatorOptions>()));
         services.AddSingleton<ISubtitleTranslator>(sp => sp.GetRequiredService<LocalLlmTranslator>());
         services.AddSingleton<CloudTranslatorStub>();
         services.AddSingleton<TranslationRouter>();
+        services.AddSingleton<WhisperModelInstaller>();
         services.AddSingleton<SubtitleMediaVariantRegistry>();
         services.AddSingleton<LocalPlaybackMediaSourceResolver>();
 
