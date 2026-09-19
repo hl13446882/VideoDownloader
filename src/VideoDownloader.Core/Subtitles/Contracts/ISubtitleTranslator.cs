@@ -1,3 +1,5 @@
+using VideoDownloader.Core.Subtitles;
+
 namespace VideoDownloader.Core.Subtitles.Contracts;
 
 public interface ISubtitleTranslator
