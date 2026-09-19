@@ -15,6 +15,12 @@ public interface ISubtitlePipeline
         AudioChunk chunk,
         CancellationToken cancellationToken = default);
 
+    Task PrepareTranslationsAsync(
+        SubtitleMode mode,
+        TimeSpan start,
+        TimeSpan end,
+        CancellationToken cancellationToken = default);
+
     SubtitleSegment? GetCurrent(TimeSpan mediaTime, SubtitleMode mode);
 
     Task StopSessionAsync(CancellationToken cancellationToken = default);
