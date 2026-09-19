@@ -2,6 +2,7 @@ namespace VideoDownloader.Core.Subtitles;
 
 public sealed record SubtitlePlaybackState(
     string? MediaKey,
+    string? PageUrl,
     TimeSpan CurrentTime,
     TimeSpan? Duration,
     bool Paused,
