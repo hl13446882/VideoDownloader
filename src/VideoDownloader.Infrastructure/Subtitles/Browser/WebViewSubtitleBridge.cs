@@ -108,9 +108,11 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
         var paused = root.TryGetProperty("paused", out var pausedEl) && pausedEl.ValueKind == JsonValueKind.True;
         var seeking = root.TryGetProperty("seeking", out var seekingEl) && seekingEl.ValueKind == JsonValueKind.True;
         var mediaKey = root.TryGetProperty("mediaKey", out var keyEl) ? keyEl.GetString() : null;
+        var pageUrl = root.TryGetProperty("pageUrl", out var pageEl) ? pageEl.GetString() : null;
 
         PlaybackStateChanged?.Invoke(this, new SubtitlePlaybackState(
             mediaKey,
+            pageUrl,
             TimeSpan.FromSeconds(Math.Max(0, current)),
             duration is > 0 ? TimeSpan.FromSeconds(duration.Value) : null,
             paused,
@@ -150,7 +152,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
       position: 'fixed', left: '50%', transform: 'translateX(-50%)', bottom: '60px',
       zIndex: '2147483647', pointerEvents: 'none', textAlign: 'center',
       fontFamily: 'Microsoft YaHei, sans-serif', fontSize: '28px', fontWeight: '700',
-      color: '#FFFFFF', background: 'rgba(0,0,0,.35)', padding: '4px 10px',
+      color: '#FFFFFF', backgroundColor: '#000000', opacity: '1', padding: '4px 10px',
       borderRadius: '4px', maxWidth: '85vw', whiteSpace: 'pre-wrap',
       lineHeight: '1.35', display: 'none', textShadow: '-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000'
     });
@@ -159,6 +161,13 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
   };
 
   let style = {};
+  const hexToRgba = (hex, alpha) => {
+    const value = String(hex || '').trim();
+    const m = /^#([0-9a-f]{6})$/i.exec(value);
+    if (!m) return value || `rgba(0,0,0,${alpha})`;
+    const n = parseInt(m[1], 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+  };
   const applyStyle = (s) => {
     style = Object.assign(style, s || {});
     const el = ensureOverlay();
@@ -168,13 +177,8 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     if (style.textColor) el.style.color = style.textColor;
     if (Number.isFinite(style.bottomOffsetPx)) el.style.bottom = style.bottomOffsetPx + 'px';
     if (Number.isFinite(style.maxWidthPercent)) el.style.maxWidth = style.maxWidthPercent + 'vw';
-    if (style.backgroundColor) {
-      const opacity = Number.isFinite(style.backgroundOpacity) ? style.backgroundOpacity : .35;
-      const c = style.backgroundColor;
-      el.style.background = c;
-      el.style.opacity = '1';
-      el.style.setProperty('--vd-bg-opacity', String(opacity));
-    }
+    const opacity = Number.isFinite(style.backgroundOpacity) ? style.backgroundOpacity : .35;
+    el.style.backgroundColor = hexToRgba(style.backgroundColor || '#000000', opacity);
     const outline = Number.isFinite(style.outlineSize) ? style.outlineSize : 2;
     const oc = style.outlineColor || '#000000';
     el.style.webkitTextStroke = outline > 0 ? outline + 'px ' + oc : '0 transparent';
@@ -213,6 +217,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
           chrome.webview.postMessage({
             type: 'vd-subtitle-playback',
             mediaKey: mediaKey(m),
+            pageUrl: String(location.href || ''),
             currentTime: Number(m.currentTime || 0),
             duration: Number.isFinite(m.duration) ? Number(m.duration) : null,
             paused: !!m.paused,
