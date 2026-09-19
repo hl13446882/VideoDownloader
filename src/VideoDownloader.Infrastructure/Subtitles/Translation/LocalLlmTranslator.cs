@@ -27,16 +27,27 @@ public sealed class LocalLlmTranslator : ISubtitleTranslator
         TranslationRequest request,
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(request.Text))
-            return new TranslationResult(string.Empty, ProviderId, ProviderVersion);
+        var results = await TranslateBatchAsync([request], cancellationToken).ConfigureAwait(false);
+        return results.Count == 0
+            ? new TranslationResult(string.Empty, ProviderId, ProviderVersion)
+            : results[0];
+    }
+
+    public async Task<IReadOnlyList<TranslationResult>> TranslateBatchAsync(
+        IReadOnlyList<TranslationRequest> requests,
+        CancellationToken cancellationToken = default)
+    {
+        if (requests.Count == 0)
+            return Array.Empty<TranslationResult>();
 
         EnsureLocalEndpoint(_options.Endpoint);
-
-        var targetName = request.TargetLanguage.Equals("zh", StringComparison.OrdinalIgnoreCase)
-            ? "Simplified Chinese"
-            : request.TargetLanguage.Equals("en", StringComparison.OrdinalIgnoreCase)
-                ? "English"
-                : request.TargetLanguage;
+        var items = requests.Select((request, index) => new
+        {
+            id = index,
+            source = request.SourceLanguage,
+            target = NormalizeTarget(request.TargetLanguage),
+            text = request.Text
+        }).ToArray();
 
         var payload = new
         {
@@ -47,12 +58,12 @@ public sealed class LocalLlmTranslator : ISubtitleTranslator
                 new
                 {
                     role = "system",
-                    content = "You are a video subtitle translation engine. Translate only the supplied subtitle text. Preserve meaning, use natural concise spoken language, add no explanation, and output only the translation."
+                    content = "You are a video subtitle translation engine. Translate each JSON item independently but use neighboring items for context. Preserve meaning, use concise natural spoken language, add no explanation. Return ONLY a JSON array with the same number and order of items. Each output item must be {\"id\":number,\"text\":\"translated subtitle\"}."
                 },
                 new
                 {
                     role = "user",
-                    content = $"Source language: {request.SourceLanguage}\nTarget language: {targetName}\nSubtitle:\n{request.Text}"
+                    content = JsonSerializer.Serialize(items)
                 }
             }
         };
@@ -63,21 +74,66 @@ public sealed class LocalLlmTranslator : ISubtitleTranslator
             .ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
 
-        using var json = await JsonDocument.ParseAsync(
+        using var envelope = await JsonDocument.ParseAsync(
             await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false),
             cancellationToken: timeout.Token).ConfigureAwait(false);
-
-        var text = json.RootElement
+        var content = envelope.RootElement
             .GetProperty("choices")[0]
             .GetProperty("message")
             .GetProperty("content")
-            .GetString()
-            ?.Trim();
+            .GetString();
 
-        if (string.IsNullOrWhiteSpace(text))
+        if (string.IsNullOrWhiteSpace(content))
             throw new InvalidOperationException("Local translation returned empty text.");
 
-        return new TranslationResult(text, ProviderId, ProviderVersion);
+        var jsonText = ExtractJsonArray(content);
+        using var translated = JsonDocument.Parse(jsonText);
+        if (translated.RootElement.ValueKind != JsonValueKind.Array ||
+            translated.RootElement.GetArrayLength() != requests.Count)
+            throw new InvalidOperationException("Local translation returned an invalid batch size.");
+
+        var byId = new Dictionary<int, string>();
+        foreach (var item in translated.RootElement.EnumerateArray())
+        {
+            if (!item.TryGetProperty("id", out var idElement) || !idElement.TryGetInt32(out var id) ||
+                !item.TryGetProperty("text", out var textElement))
+                continue;
+            var text = textElement.GetString()?.Trim();
+            if (id >= 0 && id < requests.Count && !string.IsNullOrWhiteSpace(text))
+                byId[id] = text;
+        }
+
+        if (byId.Count != requests.Count)
+            throw new InvalidOperationException("Local translation batch response is incomplete.");
+
+        return Enumerable.Range(0, requests.Count)
+            .Select(i => new TranslationResult(byId[i], ProviderId, ProviderVersion))
+            .ToArray();
+    }
+
+    private static string NormalizeTarget(string targetLanguage) =>
+        targetLanguage.Equals("zh", StringComparison.OrdinalIgnoreCase)
+            ? "Simplified Chinese"
+            : targetLanguage.Equals("en", StringComparison.OrdinalIgnoreCase)
+                ? "English"
+                : targetLanguage;
+
+    private static string ExtractJsonArray(string content)
+    {
+        var text = content.Trim();
+        if (text.StartsWith("```", StringComparison.Ordinal))
+        {
+            var firstLine = text.IndexOf('\n');
+            var lastFence = text.LastIndexOf("```", StringComparison.Ordinal);
+            if (firstLine >= 0 && lastFence > firstLine)
+                text = text[(firstLine + 1)..lastFence].Trim();
+        }
+
+        var start = text.IndexOf('[');
+        var end = text.LastIndexOf(']');
+        if (start < 0 || end < start)
+            throw new InvalidOperationException("Local translation did not return a JSON array.");
+        return text[start..(end + 1)];
     }
 
     private static void EnsureLocalEndpoint(string endpoint)
