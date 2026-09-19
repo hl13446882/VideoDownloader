@@ -9,4 +9,10 @@ public interface IMediaAudioDecoder
         TimeSpan start,
         TimeSpan duration,
         CancellationToken cancellationToken = default);
+
+    Task<AudioChunk> DecodeLocalFileAsync(
+        string filePath,
+        TimeSpan start,
+        TimeSpan duration,
+        CancellationToken cancellationToken = default);
 }
