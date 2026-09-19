@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using VideoDownloader.Core.Subtitles.Contracts;
+using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Subtitles.Audio;
 using VideoDownloader.Infrastructure.Subtitles.Speech;
 using VideoDownloader.Infrastructure.Subtitles.Translation;
@@ -8,10 +9,21 @@ namespace VideoDownloader.Infrastructure.Subtitles;
 
 public static class SubtitleServiceCollectionExtensions
 {
-    public static IServiceCollection AddVideoDownloaderSubtitles(this IServiceCollection services)
+    public static IServiceCollection AddVideoDownloaderSubtitles(
+        this IServiceCollection services,
+        AppOptions options)
     {
-        services.AddSingleton(new WhisperSpeechRecognizerOptions());
-        services.AddSingleton(new LocalLlmTranslatorOptions());
+        services.AddSingleton(options.Subtitles);
+        services.AddSingleton(new WhisperSpeechRecognizerOptions
+        {
+            ModelPath = options.Subtitles.WhisperModelPath,
+            Language = "auto"
+        });
+        services.AddSingleton(new LocalLlmTranslatorOptions
+        {
+            Endpoint = options.Subtitles.LocalTranslationEndpoint,
+            Model = options.Subtitles.LocalTranslationModel
+        });
 
         services.AddSingleton<ISpeechRecognizer, WhisperSpeechRecognizer>();
         services.AddSingleton<IMediaAudioDecoder, FfmpegMediaAudioDecoder>();
