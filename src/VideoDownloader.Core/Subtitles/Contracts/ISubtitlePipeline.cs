@@ -23,5 +23,7 @@ public interface ISubtitlePipeline
 
     SubtitleSegment? GetCurrent(TimeSpan mediaTime, SubtitleMode mode);
 
+    TimeSpan? GetCoveredUntil(TimeSpan mediaTime);
+
     Task StopSessionAsync(CancellationToken cancellationToken = default);
 }
