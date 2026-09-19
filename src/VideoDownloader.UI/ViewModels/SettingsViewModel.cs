@@ -54,6 +54,8 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string _subtitleWhisperModelPath;
     [ObservableProperty] private string _subtitleLocalTranslationEndpoint;
     [ObservableProperty] private string _subtitleLocalTranslationModel;
+    [ObservableProperty] private string _subtitleModelInstallStatus = string.Empty;
+    [ObservableProperty] private bool _subtitleModelInstallEnabled = true;
 
     public LocalizationService L => _loc;
     public string AppVersionText => "V" + AppVersionInfo.SemVer;
@@ -103,6 +105,17 @@ public sealed partial class SettingsViewModel : ObservableObject
         _subtitleLocalTranslationEndpoint = subtitles.LocalTranslationEndpoint;
         _subtitleLocalTranslationModel = subtitles.LocalTranslationModel;
 
+        try
+        {
+            var installer = _services.GetService<WhisperModelInstaller>();
+            if (installer?.IsInstalled(_subtitleWhisperModelPath) == true)
+                _subtitleModelInstallStatus = "Whisper base 模型已安装。";
+        }
+        catch
+        {
+            // Settings can still open if model probing fails.
+        }
+
         _loc.LanguageChanged += (_, _) =>
         {
             OnPropertyChanged(nameof(L));
@@ -119,6 +132,56 @@ public sealed partial class SettingsViewModel : ObservableObject
             return;
         }
         StatusMessage = _loc.T("settings.saved");
+    }
+
+    [RelayCommand]
+    private async Task InstallWhisperModelAsync()
+    {
+        if (!SubtitleModelInstallEnabled)
+            return;
+
+        var configuredPath = SubtitleWhisperModelPath?.Trim();
+        if (string.IsNullOrWhiteSpace(configuredPath))
+        {
+            SubtitleModelInstallStatus = "请先填写 Whisper 模型路径。";
+            return;
+        }
+
+        SubtitleModelInstallEnabled = false;
+        try
+        {
+            var installer = _services.GetRequiredService<WhisperModelInstaller>();
+            if (installer.IsInstalled(configuredPath))
+            {
+                SubtitleModelInstallStatus = "Whisper base 模型已安装。";
+                return;
+            }
+
+            SubtitleModelInstallStatus = "正在下载 Whisper base 模型…";
+            var progress = new Progress<double>(value =>
+            {
+                SubtitleModelInstallStatus = $"正在下载 Whisper base 模型… {value:P0}";
+            });
+            var installedPath = await installer.InstallBaseModelAsync(configuredPath, progress);
+
+            var runtime = _services.GetService<WhisperSpeechRecognizerOptions>();
+            if (runtime is not null)
+                runtime.ModelPath = configuredPath;
+
+            SubtitleModelInstallStatus = $"模型已安装：{installedPath}";
+        }
+        catch (OperationCanceledException)
+        {
+            SubtitleModelInstallStatus = "模型下载已取消。";
+        }
+        catch (Exception ex)
+        {
+            SubtitleModelInstallStatus = "模型安装失败：" + ex.Message;
+        }
+        finally
+        {
+            SubtitleModelInstallEnabled = true;
+        }
     }
 
     [RelayCommand]
