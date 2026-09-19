@@ -25,7 +25,6 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     private string? _mediaKey;
     private string? _pageUrl;
     private MediaVariant? _variant;
-    private TimeSpan _coveredUntil;
     private TimeSpan? _lastPlaybackTime;
     private string? _lastDisplayed;
     private string? _styleFingerprint;
@@ -110,7 +109,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
 
             var windowSize = TimeSpan.FromSeconds(Math.Clamp(_options.PreloadAheadSeconds, 10, 90));
             var refillThreshold = TimeSpan.FromSeconds(Math.Max(5, windowSize.TotalSeconds / 3));
-            if (state.CurrentTime + refillThreshold >= _coveredUntil)
+            var coveredUntil = _pipeline.GetCoveredUntil(state.CurrentTime);
+            if (coveredUntil is null || state.CurrentTime + refillThreshold >= coveredUntil.Value)
                 await EnsureWindowAsync(state.CurrentTime, state.Duration, windowSize, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -172,7 +172,6 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _workCts?.Dispose();
         _workCts = null;
         _workTask = null;
-        _coveredUntil = TimeSpan.Zero;
         _lastPlaybackTime = null;
         _mediaKey = mediaKey;
         _pageUrl = pageUrl;
@@ -184,8 +183,15 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         await _bridge.ClearSubtitleAsync(cancellationToken).ConfigureAwait(false);
         await _pipeline.StartSessionAsync(
             "webview:" + Guid.NewGuid().ToString("N"),
-            mediaKey,
+            ResolveMediaIdentity(mediaKey),
             cancellationToken).ConfigureAwait(false);
+    }
+
+    private string ResolveMediaIdentity(string mediaKey)
+    {
+        if (!string.IsNullOrWhiteSpace(_variant?.ContentIdentity))
+            return _variant.ContentIdentity!;
+        return mediaKey;
     }
 
     private void CancelActiveWindow()
@@ -216,7 +222,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             if (_workTask is { IsCompleted: false })
                 return;
 
-            var start = currentTime < _coveredUntil ? _coveredUntil : currentTime;
+            var start = _pipeline.GetCoveredUntil(currentTime) ?? currentTime;
             var remaining = duration is { } total ? total - start : windowSize;
             if (remaining <= TimeSpan.Zero)
                 return;
@@ -243,9 +249,6 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                     await _pipeline.SubmitAudioAsync(audio, token).ConfigureAwait(false);
                     await _pipeline.PrepareTranslationsAsync(mode, audio.MediaStart, audio.MediaEnd, token)
                         .ConfigureAwait(false);
-
-                    if (string.Equals(mediaKey, _mediaKey, StringComparison.Ordinal))
-                        _coveredUntil = audio.MediaEnd;
                 }
                 catch (OperationCanceledException)
                 {
