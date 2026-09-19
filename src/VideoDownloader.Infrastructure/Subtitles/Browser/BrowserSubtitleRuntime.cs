@@ -52,6 +52,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _localSourceResolver = localSourceResolver;
         _options = options;
         _bridge.PlaybackStateChanged += OnPlaybackStateChanged;
+        _bridge.EditSubtitleRequested += OnEditSubtitleRequested;
+        _bridge.EditSubtitleCommitted += OnEditSubtitleCommitted;
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
@@ -64,6 +66,123 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     {
         _styleFingerprint = null;
         return ApplyStyleIfChangedAsync(cancellationToken);
+    }
+
+    private void OnEditSubtitleRequested(object? sender, SubtitleEditRequestEventArgs e)
+    {
+        _ = HandleEditRequestAsync(e, _lifetimeCts.Token);
+    }
+
+    private void OnEditSubtitleCommitted(object? sender, SubtitleEditCommitEventArgs e)
+    {
+        _ = HandleEditCommitAsync(e, _lifetimeCts.Token);
+    }
+
+    private async Task HandleEditRequestAsync(
+        SubtitleEditRequestEventArgs e,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!_sessionActive || _localSource is null)
+                return;
+
+            var mediaTime = e.CurrentTime - TimeSpan.FromMilliseconds(_options.SubtitleOffsetMs);
+            if (mediaTime < TimeSpan.Zero)
+                mediaTime = TimeSpan.Zero;
+
+            var segment = _pipeline.GetCurrent(mediaTime, _options.Mode);
+            if (segment is null || string.IsNullOrWhiteSpace(segment.OriginalText))
+                return;
+
+            // System hints are not editable subtitle rows.
+            if (string.Equals(segment.OriginalText, ModelMissingHint, StringComparison.Ordinal) ||
+                string.Equals(segment.OriginalText, NativeRuntimeHint, StringComparison.Ordinal) ||
+                string.Equals(segment.OriginalText, FfmpegMissingHint, StringComparison.Ordinal))
+                return;
+
+            var hasZh = !string.IsNullOrWhiteSpace(segment.ChineseText);
+            var hasEn = !string.IsNullOrWhiteSpace(segment.EnglishText);
+            var multilingual = hasZh || hasEn;
+
+            await _bridge.OpenSubtitleEditorAsync(new SubtitleEditorOpenModel
+            {
+                OriginalText = segment.OriginalText,
+                ChineseText = segment.ChineseText,
+                EnglishText = segment.EnglishText,
+                Multilingual = multilingual,
+                CurrentTimeSeconds = e.CurrentTime.TotalSeconds
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch
+        {
+            // Edit UI is best-effort.
+        }
+    }
+
+    private async Task HandleEditCommitAsync(
+        SubtitleEditCommitEventArgs e,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!_sessionActive || _localSource is null)
+                return;
+
+            var mediaTime = e.CurrentTime - TimeSpan.FromMilliseconds(_options.SubtitleOffsetMs);
+            if (mediaTime < TimeSpan.Zero)
+                mediaTime = TimeSpan.Zero;
+
+            SubtitleSegment? updated;
+            if (e.Multilingual)
+            {
+                updated = await _pipeline.ApplyManualEditAsync(
+                    mediaTime,
+                    e.OriginalText,
+                    e.ChineseText,
+                    e.EnglishText,
+                    preserveExistingTranslations: false,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                // Single-line edit replaces recognition text; clear MT so missing sides can refill,
+                // while the time range stays covered (Whisper still skipped).
+                updated = await _pipeline.ApplyManualEditAsync(
+                    mediaTime,
+                    e.OriginalText,
+                    chineseText: null,
+                    englishText: null,
+                    preserveExistingTranslations: false,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            if (updated is null)
+                return;
+
+            lock (_translationSync)
+            {
+                _translationRequests.Remove(updated.Id + ":" + SubtitleMode.Chinese);
+                _translationRequests.Remove(updated.Id + ":" + SubtitleMode.English);
+                _translationRequests.Remove(updated.Id + ":" + SubtitleMode.Bilingual);
+            }
+
+            var display = updated.GetDisplayText(_options.Mode);
+            await SetDisplayedAsync(display, cancellationToken).ConfigureAwait(false);
+
+            // Only request MT for sides still missing after the edit.
+            RequestMissingTranslation(updated, _options.Mode, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch
+        {
+            // Keep playback intact if a manual edit fails to persist.
+        }
     }
 
     private void OnPlaybackStateChanged(object? sender, SubtitlePlaybackState state)
@@ -487,6 +606,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _bridge.PlaybackStateChanged -= OnPlaybackStateChanged;
+        _bridge.EditSubtitleRequested -= OnEditSubtitleRequested;
+        _bridge.EditSubtitleCommitted -= OnEditSubtitleCommitted;
         _lifetimeCts.Cancel();
         CancelActiveWindow();
         if (_workTask is not null)

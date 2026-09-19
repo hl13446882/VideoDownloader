@@ -5,8 +5,8 @@ public sealed class SubtitleSegment
     public long Id { get; init; }
     public TimeSpan Start { get; init; }
     public TimeSpan End { get; init; }
-    public string SourceLanguage { get; init; } = string.Empty;
-    public string OriginalText { get; init; } = string.Empty;
+    public string SourceLanguage { get; set; } = string.Empty;
+    public string OriginalText { get; set; } = string.Empty;
     public string? ChineseText { get; set; }
     public string? EnglishText { get; set; }
     public SubtitleSegmentState State { get; set; } = SubtitleSegmentState.Recognized;

@@ -21,6 +21,8 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     }
 
     public event EventHandler<SubtitlePlaybackState>? PlaybackStateChanged;
+    public event EventHandler<SubtitleEditRequestEventArgs>? EditSubtitleRequested;
+    public event EventHandler<SubtitleEditCommitEventArgs>? EditSubtitleCommitted;
 
     public Task InitializeAsync(CancellationToken cancellationToken = default) =>
         RunOnUiAsync(async () =>
@@ -52,6 +54,28 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
 
     public Task ClearSubtitleAsync(CancellationToken cancellationToken = default) =>
         SetSubtitleAsync(string.Empty, cancellationToken);
+
+    public Task OpenSubtitleEditorAsync(
+        SubtitleEditorOpenModel model,
+        CancellationToken cancellationToken = default)
+    {
+        var json = JsonSerializer.Serialize(new
+        {
+            original = model.OriginalText ?? string.Empty,
+            chinese = model.ChineseText ?? string.Empty,
+            english = model.EnglishText ?? string.Empty,
+            multilingual = model.Multilingual,
+            currentTime = model.CurrentTimeSeconds
+        });
+        return RunOnUiAsync(async () =>
+        {
+            if (_core is null)
+                return;
+            await _core.ExecuteScriptAsync(
+                    $"window.__vdSubtitle&&window.__vdSubtitle.openEditor({json});")
+                .WaitAsync(cancellationToken);
+        });
+    }
 
     public Task ApplyStyleAsync(
         SubtitleStyleOptions style,
@@ -114,8 +138,35 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
 
     private void HandleMessage(JsonElement root)
     {
-        if (!root.TryGetProperty("type", out var type) ||
-            type.GetString() != "vd-subtitle-playback")
+        if (!root.TryGetProperty("type", out var typeEl))
+            return;
+        var type = typeEl.GetString();
+        if (type == "vd-edit-subtitle-request")
+        {
+            var t = GetFiniteDouble(root, "currentTime") ?? 0;
+            EditSubtitleRequested?.Invoke(this, new SubtitleEditRequestEventArgs(
+                TimeSpan.FromSeconds(Math.Max(0, t))));
+            return;
+        }
+
+        if (type == "vd-edit-subtitle-commit")
+        {
+            var t = GetFiniteDouble(root, "currentTime") ?? 0;
+            var original = root.TryGetProperty("original", out var o) ? o.GetString() ?? string.Empty : string.Empty;
+            var chinese = root.TryGetProperty("chinese", out var c) ? c.GetString() : null;
+            var english = root.TryGetProperty("english", out var e) ? e.GetString() : null;
+            var multilingual = root.TryGetProperty("multilingual", out var m) &&
+                               m.ValueKind is JsonValueKind.True;
+            EditSubtitleCommitted?.Invoke(this, new SubtitleEditCommitEventArgs(
+                TimeSpan.FromSeconds(Math.Max(0, t)),
+                original,
+                chinese,
+                english,
+                multilingual));
+            return;
+        }
+
+        if (type != "vd-subtitle-playback")
             return;
 
         var current = GetFiniteDouble(root, "currentTime") ?? 0;
@@ -220,7 +271,8 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
       color: '#FFFFFF', backgroundColor: 'rgba(0,0,0,0.35)', padding: '4px 10px',
       borderRadius: '4px', maxWidth: '85vw', whiteSpace: 'pre-wrap',
       lineHeight: '1.35', display: 'none', boxSizing: 'border-box',
-      textShadow: '-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000'
+      textShadow: '-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000',
+      cursor: 'default'
     });
     (document.body || document.documentElement).appendChild(el);
     return el;
@@ -270,17 +322,180 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     layoutOverlay();
   };
 
+  let editing = false;
+  let editCurrentTime = 0;
+
+  const closeEditor = () => {
+    editing = false;
+    const mask = document.getElementById('vd-subtitle-edit-mask');
+    if (mask) mask.style.display = 'none';
+  };
+
+  const ensureEditor = () => {
+    let mask = document.getElementById('vd-subtitle-edit-mask');
+    if (mask) return mask;
+    mask = document.createElement('div');
+    mask.id = 'vd-subtitle-edit-mask';
+    Object.assign(mask.style, {
+      position: 'fixed', inset: '0', zIndex: '2147483647', display: 'none',
+      background: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center'
+    });
+    const panel = document.createElement('div');
+    panel.id = 'vd-subtitle-edit-panel';
+    Object.assign(panel.style, {
+      width: 'min(520px, 92vw)', background: '#111827', color: '#f9fafb',
+      border: '1px solid #4b5563', borderRadius: '10px', padding: '16px 16px 12px',
+      boxShadow: '0 16px 48px rgba(0,0,0,.5)', fontFamily: 'Microsoft YaHei, sans-serif'
+    });
+    const title = document.createElement('div');
+    title.id = 'vd-subtitle-edit-title';
+    title.textContent = '编辑字幕';
+    Object.assign(title.style, { fontSize: '15px', fontWeight: '600', marginBottom: '12px' });
+    const fields = document.createElement('div');
+    fields.id = 'vd-subtitle-edit-fields';
+    const actions = document.createElement('div');
+    Object.assign(actions.style, { display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '12px' });
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = '取消';
+    Object.assign(cancel.style, {
+      padding: '8px 14px', borderRadius: '6px', border: '1px solid #4b5563',
+      background: 'transparent', color: '#e5e7eb', cursor: 'pointer'
+    });
+    const ok = document.createElement('button');
+    ok.type = 'button';
+    ok.textContent = '确定';
+    Object.assign(ok.style, {
+      padding: '8px 14px', borderRadius: '6px', border: 'none',
+      background: '#2563eb', color: '#fff', cursor: 'pointer'
+    });
+    cancel.onclick = (ev) => { ev.preventDefault(); closeEditor(); };
+    ok.onclick = (ev) => {
+      ev.preventDefault();
+      const multilingual = mask.dataset.multilingual === '1';
+      const originalEl = document.getElementById('vd-edit-original');
+      const chineseEl = document.getElementById('vd-edit-chinese');
+      const englishEl = document.getElementById('vd-edit-english');
+      const original = originalEl ? String(originalEl.value || '').trim() : '';
+      if (!original) return;
+      const chinese = chineseEl ? String(chineseEl.value || '').trim() : '';
+      const english = englishEl ? String(englishEl.value || '').trim() : '';
+      try {
+        chrome.webview.postMessage({
+          type: 'vd-edit-subtitle-commit',
+          currentTime: editCurrentTime,
+          original,
+          chinese: multilingual ? chinese : null,
+          english: multilingual ? english : null,
+          multilingual
+        });
+      } catch {}
+      closeEditor();
+    };
+    actions.appendChild(cancel);
+    actions.appendChild(ok);
+    panel.appendChild(title);
+    panel.appendChild(fields);
+    panel.appendChild(actions);
+    mask.appendChild(panel);
+    mask.addEventListener('mousedown', (ev) => {
+      if (ev.target === mask) closeEditor();
+    });
+    (document.body || document.documentElement).appendChild(mask);
+    return mask;
+  };
+
+  const fieldStyle = {
+    width: '100%', boxSizing: 'border-box', marginTop: '6px', marginBottom: '10px',
+    padding: '8px 10px', borderRadius: '6px', border: '1px solid #4b5563',
+    background: '#0f172a', color: '#f9fafb', fontFamily: 'inherit', fontSize: '14px'
+  };
+
+  const makeLabeledInput = (id, label, value, multiline) => {
+    const wrap = document.createElement('div');
+    const lab = document.createElement('label');
+    lab.textContent = label;
+    lab.setAttribute('for', id);
+    Object.assign(lab.style, { fontSize: '12px', color: '#9ca3af', display: 'block' });
+    const input = multiline ? document.createElement('textarea') : document.createElement('input');
+    input.id = id;
+    if (!multiline) input.type = 'text';
+    else { input.rows = 2; input.style.resize = 'vertical'; }
+    input.value = value || '';
+    Object.assign(input.style, fieldStyle);
+    wrap.appendChild(lab);
+    wrap.appendChild(input);
+    return wrap;
+  };
+
+  const openEditor = (payload) => {
+    const mask = ensureEditor();
+    const fields = document.getElementById('vd-subtitle-edit-fields');
+    const title = document.getElementById('vd-subtitle-edit-title');
+    if (!fields || !title) return;
+    fields.innerHTML = '';
+    const multilingual = !!payload.multilingual;
+    editCurrentTime = Number(payload.currentTime) || 0;
+    mask.dataset.multilingual = multilingual ? '1' : '0';
+    title.textContent = multilingual ? '编辑字幕（原文 / 中文 / 英文）' : '编辑字幕';
+    if (multilingual) {
+      fields.appendChild(makeLabeledInput('vd-edit-original', '原文', payload.original || '', true));
+      fields.appendChild(makeLabeledInput('vd-edit-chinese', '中文', payload.chinese || '', true));
+      fields.appendChild(makeLabeledInput('vd-edit-english', '英文', payload.english || '', true));
+    } else {
+      fields.appendChild(makeLabeledInput('vd-edit-original', '字幕', payload.original || '', false));
+    }
+    editing = true;
+    mask.style.display = 'flex';
+    const focusEl = document.getElementById('vd-edit-original');
+    if (focusEl) {
+      focusEl.focus();
+      if (focusEl.select) focusEl.select();
+    }
+  };
+
   window.__vdSubtitle = {
     setText(text) {
+      if (editing) return;
       const el = ensureOverlay();
       const value = String(text || '').trim();
       lastText = value;
       el.textContent = value;
       el.style.display = value ? 'block' : 'none';
+      el.style.pointerEvents = value ? 'auto' : 'none';
+      el.style.cursor = value ? 'context-menu' : 'default';
       if (value) layoutOverlay();
     },
-    setStyle: applyStyle
+    setStyle: applyStyle,
+    openEditor
   };
+
+  // Enable hit-testing on the subtitle so right-click can open the editor.
+  const bindOverlayEdit = () => {
+    const el = ensureOverlay();
+    if (el.dataset.editBound === '1') return;
+    el.dataset.editBound = '1';
+    el.addEventListener('contextmenu', (ev) => {
+      try {
+        const path = String(location.pathname || '');
+        if (!path.startsWith('/play/')) return;
+        if (!lastText || editing) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        const m = chooseMedia();
+        const t = m ? Number(m.currentTime || 0) : 0;
+        if (m) { try { m.pause(); } catch {} }
+        try {
+          chrome.webview.postMessage({
+            type: 'vd-edit-subtitle-request',
+            currentTime: t,
+            pageUrl: String(location.href || '')
+          });
+        } catch {}
+      } catch {}
+    });
+  };
+  bindOverlayEdit();
 
   let lastSent = 0;
   const mediaKey = (m) => String(m.currentSrc || m.src || location.href || '');

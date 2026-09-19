@@ -258,6 +258,64 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
         }
     }
 
+    public void ApplyCacheSnapshot(SubtitleCacheSnapshot snapshot)
+    {
+        _timeline.Clear();
+        _timeline.AddOrUpdate(snapshot.Segments);
+        ReplaceCoverage(snapshot.Coverage);
+    }
+
+    public async Task<SubtitleSegment?> ApplyManualEditAsync(
+        TimeSpan mediaTime,
+        string originalText,
+        string? chineseText = null,
+        string? englishText = null,
+        bool preserveExistingTranslations = false,
+        CancellationToken cancellationToken = default)
+    {
+        var text = (originalText ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(text))
+            return null;
+
+        var sessionId = ActiveSessionId;
+        if (sessionId is null)
+            return null;
+
+        var existing = _timeline.Find(mediaTime);
+        if (existing is null)
+            return null;
+
+        string? zh;
+        string? en;
+        if (preserveExistingTranslations)
+        {
+            zh = existing.ChineseText;
+            en = existing.EnglishText;
+        }
+        else
+        {
+            zh = string.IsNullOrWhiteSpace(chineseText) ? null : chineseText.Trim();
+            en = string.IsNullOrWhiteSpace(englishText) ? null : englishText.Trim();
+        }
+
+        var updated = new SubtitleSegment
+        {
+            Id = existing.Id != 0 ? existing.Id : existing.Start.Ticks,
+            Start = existing.Start,
+            End = existing.End,
+            SourceLanguage = existing.SourceLanguage,
+            OriginalText = text,
+            ChineseText = zh,
+            EnglishText = en,
+            State = SubtitleSegmentState.Ready
+        };
+        _timeline.AddOrUpdate([updated]);
+        // Recognition + translation cache for this range: Whisper and MT both skip when filled.
+        AddCoverage(updated.Start, updated.End);
+        await PersistAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        return updated;
+    }
+
     public Task StopSessionAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();

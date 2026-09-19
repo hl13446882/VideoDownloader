@@ -32,5 +32,21 @@ public interface ISubtitlePipeline
     /// </summary>
     TimeSpan? GetRecognitionCursor(TimeSpan mediaTime);
 
+    /// <summary>Replace timeline + coverage from cache/transcript without resetting the session id.</summary>
+    void ApplyCacheSnapshot(SubtitleCacheSnapshot snapshot);
+
+    /// <summary>
+    /// Updates the segment at <paramref name="mediaTime"/> and marks that range as covered so
+    /// Whisper will not re-recognize it. Non-null Chinese/English values are stored as translation
+    /// cache and will skip machine translation on later playback.
+    /// </summary>
+    Task<SubtitleSegment?> ApplyManualEditAsync(
+        TimeSpan mediaTime,
+        string originalText,
+        string? chineseText = null,
+        string? englishText = null,
+        bool preserveExistingTranslations = false,
+        CancellationToken cancellationToken = default);
+
     Task StopSessionAsync(CancellationToken cancellationToken = default);
 }

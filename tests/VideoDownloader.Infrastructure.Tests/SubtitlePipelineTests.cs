@@ -248,4 +248,82 @@ public sealed class SubtitlePipelineTests
 
         Assert.Contains("loopback", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public async Task Manual_edit_with_translations_is_cached_and_skips_mt_and_marks_coverage()
+    {
+        var recognizer = Substitute.For<ISpeechRecognizer>();
+        var translator = Substitute.For<ISubtitleTranslator>();
+        var cache = Substitute.For<ISubtitleCacheStore>();
+        cache.LoadAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(new SubtitleCacheSnapshot(
+                [
+                    new SubtitleSegment
+                    {
+                        Id = 1,
+                        Start = TimeSpan.FromSeconds(1),
+                        End = TimeSpan.FromSeconds(4),
+                        SourceLanguage = "en",
+                        OriginalText = "hello",
+                        ChineseText = "你好",
+                        EnglishText = "hello"
+                    }
+                ],
+                [new SubtitleCoverageRange(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(4))]));
+
+        SubtitleCacheSnapshot? saved = null;
+        cache.SaveAsync(
+                Arg.Any<string>(),
+                Arg.Do<SubtitleCacheSnapshot>(x => saved = x),
+                Arg.Any<CancellationToken>())
+            .Returns(Task.CompletedTask);
+
+        var pipeline = new SubtitlePipeline(recognizer, new SubtitleTimeline(), translator, cache);
+        await pipeline.StartSessionAsync("s1", "media-1");
+
+        var updated = await pipeline.ApplyManualEditAsync(
+            TimeSpan.FromSeconds(2),
+            "hi there",
+            "嗨",
+            "hi there");
+
+        Assert.NotNull(updated);
+        Assert.Equal("hi there", updated!.OriginalText);
+        Assert.Equal("嗨", updated.ChineseText);
+        Assert.Equal("hi there", updated.EnglishText);
+        Assert.Equal(TimeSpan.FromSeconds(4), pipeline.GetCoveredUntil(TimeSpan.FromSeconds(2)));
+        Assert.NotNull(saved);
+        Assert.Equal("嗨", saved!.Segments[0].ChineseText);
+
+        await pipeline.PrepareTranslationsAsync(
+            SubtitleMode.Bilingual,
+            TimeSpan.FromSeconds(1),
+            TimeSpan.FromSeconds(4));
+
+        await translator.DidNotReceive().TranslateBatchAsync(
+            Arg.Any<IReadOnlyList<TranslationRequest>>(),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public void Recognition_transcript_parser_reads_editable_ranges()
+    {
+        const string text = """
+            # comment
+            [00:00:01.000 --> 00:00:03.500] [en]
+            hello world
+
+            [00:00:04.000 --> 00:00:06.000]
+            第二句
+            """;
+
+        var segments = VideoDownloader.Infrastructure.Subtitles.Cache.FileSubtitleCacheStore
+            .ParseRecognitionTranscript(text);
+
+        Assert.Equal(2, segments.Count);
+        Assert.Equal(TimeSpan.FromSeconds(1), segments[0].Start);
+        Assert.Equal("hello world", segments[0].OriginalText);
+        Assert.Equal("en", segments[0].SourceLanguage);
+        Assert.Equal("第二句", segments[1].OriginalText);
+    }
 }
