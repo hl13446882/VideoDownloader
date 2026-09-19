@@ -1,4 +1,3 @@
-using System.Text;
 using VideoDownloader.Core.Subtitles;
 using VideoDownloader.Core.Subtitles.Contracts;
 using VideoDownloader.Infrastructure.Configuration;
@@ -31,15 +30,22 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer
                 "Whisper model is not installed. Configure or install the local speech model first.",
                 modelPath);
 
+        var samples = ConvertPcm16ToFloat(audio.Pcm16Mono16Khz.Span);
         using var factory = WhisperFactory.FromPath(modelPath);
         using var processor = factory.CreateBuilder()
             .WithLanguage(string.IsNullOrWhiteSpace(_options.Language) ? "auto" : _options.Language)
             .Build();
-        using var wav = CreateWaveStream(audio.Pcm16Mono16Khz);
+
+        var detectedLanguage = !string.IsNullOrWhiteSpace(context.LanguageHint) &&
+                               !string.Equals(context.LanguageHint, "auto", StringComparison.OrdinalIgnoreCase)
+            ? context.LanguageHint!
+            : processor.DetectLanguage(samples);
+        if (string.IsNullOrWhiteSpace(detectedLanguage))
+            detectedLanguage = "auto";
 
         var segments = new List<SubtitleSegment>();
         long id = 0;
-        await foreach (var result in processor.ProcessAsync(wav, cancellationToken))
+        await foreach (var result in processor.ProcessAsync(samples, cancellationToken))
         {
             var text = result.Text?.Trim();
             if (string.IsNullOrWhiteSpace(text))
@@ -50,7 +56,7 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer
                 Id = ++id,
                 Start = audio.MediaStart + result.Start,
                 End = audio.MediaStart + result.End,
-                SourceLanguage = context.LanguageHint ?? _options.Language,
+                SourceLanguage = detectedLanguage,
                 OriginalText = text,
                 State = SubtitleSegmentState.Recognized
             });
@@ -59,34 +65,17 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer
         return segments;
     }
 
-    private static MemoryStream CreateWaveStream(ReadOnlyMemory<byte> pcm)
+    private static float[] ConvertPcm16ToFloat(ReadOnlySpan<byte> pcm)
     {
-        const int sampleRate = 16000;
-        const short channels = 1;
-        const short bitsPerSample = 16;
-        const short blockAlign = channels * (bitsPerSample / 8);
-        const int byteRate = sampleRate * blockAlign;
-
-        var stream = new MemoryStream(44 + pcm.Length);
-        using (var writer = new BinaryWriter(stream, Encoding.ASCII, leaveOpen: true))
+        var sampleCount = pcm.Length / 2;
+        var samples = new float[sampleCount];
+        for (var i = 0; i < sampleCount; i++)
         {
-            writer.Write(Encoding.ASCII.GetBytes("RIFF"));
-            writer.Write(36 + pcm.Length);
-            writer.Write(Encoding.ASCII.GetBytes("WAVE"));
-            writer.Write(Encoding.ASCII.GetBytes("fmt "));
-            writer.Write(16);
-            writer.Write((short)1);
-            writer.Write(channels);
-            writer.Write(sampleRate);
-            writer.Write(byteRate);
-            writer.Write(blockAlign);
-            writer.Write(bitsPerSample);
-            writer.Write(Encoding.ASCII.GetBytes("data"));
-            writer.Write(pcm.Length);
-            writer.Write(pcm.Span);
+            var lo = pcm[i * 2];
+            var hi = pcm[i * 2 + 1];
+            var value = (short)(lo | (hi << 8));
+            samples[i] = value / 32768f;
         }
-
-        stream.Position = 0;
-        return stream;
+        return samples;
     }
 }
