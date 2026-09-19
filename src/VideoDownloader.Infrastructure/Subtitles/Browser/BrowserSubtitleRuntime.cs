@@ -26,6 +26,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     private string? _pageUrl;
     private MediaVariant? _variant;
     private TimeSpan _coveredUntil;
+    private TimeSpan? _lastPlaybackTime;
     private string? _lastDisplayed;
     private string? _styleFingerprint;
 
@@ -89,6 +90,12 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                 // Detection may finish after playback begins. Pick it up without restarting the session.
                 _variant = _variantRegistry.Resolve(state.PageUrl, state.MediaKey) ?? CreateDirectVariant(state.MediaKey);
             }
+
+            var jumped = _lastPlaybackTime is { } previous &&
+                         Math.Abs((state.CurrentTime - previous).TotalSeconds) >= 2.5;
+            _lastPlaybackTime = state.CurrentTime;
+            if (state.Seeking || jumped)
+                CancelActiveWindow();
 
             var displayTime = state.CurrentTime - TimeSpan.FromMilliseconds(_options.SubtitleOffsetMs);
             if (displayTime < TimeSpan.Zero)
@@ -161,11 +168,12 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         string? pageUrl,
         CancellationToken cancellationToken)
     {
-        _workCts?.Cancel();
+        CancelActiveWindow();
         _workCts?.Dispose();
         _workCts = null;
         _workTask = null;
         _coveredUntil = TimeSpan.Zero;
+        _lastPlaybackTime = null;
         _mediaKey = mediaKey;
         _pageUrl = pageUrl;
         _variant = _variantRegistry.Resolve(pageUrl, mediaKey) ?? CreateDirectVariant(mediaKey);
@@ -178,6 +186,19 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             "webview:" + Guid.NewGuid().ToString("N"),
             mediaKey,
             cancellationToken).ConfigureAwait(false);
+    }
+
+    private void CancelActiveWindow()
+    {
+        try
+        {
+            if (_workTask is { IsCompleted: false })
+                _workCts?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // A concurrent media switch already disposed the token source.
+        }
     }
 
     private async Task EnsureWindowAsync(
@@ -228,7 +249,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                 }
                 catch (OperationCanceledException)
                 {
-                    // Expected on media/session change.
+                    // Expected on seek/media/session change.
                 }
                 catch
                 {
@@ -315,7 +336,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     {
         _bridge.PlaybackStateChanged -= OnPlaybackStateChanged;
         _lifetimeCts.Cancel();
-        _workCts?.Cancel();
+        CancelActiveWindow();
         if (_workTask is not null)
         {
             try { await _workTask.ConfigureAwait(false); } catch { }
