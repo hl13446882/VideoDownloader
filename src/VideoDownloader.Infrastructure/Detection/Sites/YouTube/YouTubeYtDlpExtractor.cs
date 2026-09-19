@@ -20,6 +20,8 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
     private readonly ILogger<YouTubeYtDlpExtractor> _logger;
     private readonly IProbeMethodStats _probeStats;
     private bool? _available;
+    /// <summary>null = unknown; false = last YouTube win did not use browser cookies.</summary>
+    private bool? _lastWinUsedCookies;
 
     public YouTubeYtDlpExtractor(
         IOptions<AppOptions> options,
@@ -107,13 +109,34 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
             var clientAttempts = _probeStats.OrderBySuccessRate(
                 SiteIds.YouTube,
                 clientAttemptsDefault,
-                ProbeMethods.YouTubeClientMethod).ToArray();
+                ProbeMethods.YouTubeClientMethod).ToList();
+            // Recent successful probes are ytdlp.default. Pin that method (or the last win)
+            // to the front; other clients still run if it fails.
+            var winning = _probeStats.LastWinningMethod(SiteIds.YouTube);
+            if (!string.IsNullOrWhiteSpace(winning))
+            {
+                var winIndex = clientAttempts.FindIndex(args =>
+                    string.Equals(ProbeMethods.YouTubeClientMethod(args), winning, StringComparison.Ordinal));
+                if (winIndex > 0)
+                {
+                    var winner = clientAttempts[winIndex];
+                    clientAttempts.RemoveAt(winIndex);
+                    clientAttempts.Insert(0, winner);
+                }
+            }
 
             // Browser-cookie use is opt-in. When it is enabled, retry YouTube without
             // the captured session too because stale sessions can prevent extraction.
+            // Recent wins landed on the cookieless default pass, so try that slot first
+            // when the last recorded win did not need cookies. The other slot still runs.
+            var preferCookielessFirst = cookieFile is not null &&
+                _lastWinUsedCookies != true &&
+                string.Equals(winning ?? ProbeMethods.YtDlpDefault, ProbeMethods.YtDlpDefault, StringComparison.Ordinal);
             string?[] cookieAttempts = cookieFile is null || siteId is not SiteIds.YouTube
                 ? [cookieFile]
-                : [cookieFile, null];
+                : preferCookielessFirst
+                    ? [null, cookieFile]
+                    : [cookieFile, null];
 
             try
             {
@@ -137,6 +160,7 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                             LastError = null;
                             LastFailureIsHumanVerification = false;
                             LastProbeMethod = method;
+                            _lastWinUsedCookies = cookies is not null;
                             _probeStats.Record(SiteIds.YouTube, method, true);
                             return videos;
                         }
@@ -241,8 +265,11 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
             return [];
         }
 
+        // Absolute ceiling per attempt. Clear ERROR lines kill earlier (fail-fast) so the
+        // full client×cookie chain can finish inside the ~60s page-session window.
+        const int attemptTimeoutSeconds = 15;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        timeout.CancelAfter(TimeSpan.FromSeconds(attemptTimeoutSeconds));
         using var registration = timeout.Token.Register(() =>
         {
             try { process.Kill(entireProcessTree: true); }
@@ -250,32 +277,108 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
             catch (System.ComponentModel.Win32Exception) { }
         });
 
-        // Drain pipes concurrently with WaitForExit to avoid pipe-full stalls and
-        // to finish as soon as the process ends (no serial WaitAsync after exit).
+        var earlyFail = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var errorGate = new object();
+        var errorBuffer = new System.Text.StringBuilder(512);
+        var errorTask = Task.Run(async () =>
+        {
+            try
+            {
+                while (true)
+                {
+                    var line = await process.StandardError.ReadLineAsync(timeout.Token)
+                        .ConfigureAwait(false);
+                    if (line is null)
+                        break;
+                    lock (errorGate)
+                        errorBuffer.AppendLine(line);
+                    if (IsDefinitiveYtDlpFailure(line))
+                        earlyFail.TrySetResult();
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Timeout / parent cancel — drain stops.
+            }
+            catch
+            {
+                // Best-effort stderr watch.
+            }
+        }, CancellationToken.None);
+
         var outputTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
-        var errorTask = process.StandardError.ReadToEndAsync(timeout.Token);
+        var exitTask = process.WaitForExitAsync(timeout.Token);
+
+        string SnapshotError()
+        {
+            lock (errorGate)
+                return errorBuffer.ToString();
+        }
+
         string output;
         string error;
         try
         {
-            await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
-            var streams = await Task.WhenAll(outputTask, errorTask).ConfigureAwait(false);
-            output = streams[0];
-            error = streams[1];
+            var finished = await Task.WhenAny(exitTask, earlyFail.Task).ConfigureAwait(false);
+            if (ReferenceEquals(finished, earlyFail.Task) && !exitTask.IsCompleted)
+            {
+                try { process.Kill(entireProcessTree: true); }
+                catch { /* ignore */ }
+
+                try
+                {
+                    await exitTask.WaitAsync(TimeSpan.FromMilliseconds(800), CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
+                catch { /* ignore */ }
+
+                try
+                {
+                    await Task.WhenAny(errorTask, Task.Delay(200)).ConfigureAwait(false);
+                }
+                catch { /* ignore */ }
+
+                error = SnapshotError();
+                LastError = TrimYtDlpError(error);
+                LastFailureIsHumanVerification = IsHumanVerificationError(LastError);
+                _logger.LogInformation(
+                    "yt-dlp early-fail for {SiteId}: {Error} humanVerification={Human}",
+                    siteId,
+                    SanitizedLogger.SanitizeMessage(LastError),
+                    LastFailureIsHumanVerification);
+                return [];
+            }
+
+            await exitTask.ConfigureAwait(false);
+            try
+            {
+                await Task.WhenAny(errorTask, Task.Delay(500)).ConfigureAwait(false);
+            }
+            catch { /* ignore */ }
+
+            try
+            {
+                output = await outputTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                output = string.Empty;
+            }
+
+            error = SnapshotError();
         }
         catch (OperationCanceledException)
         {
             try { process.Kill(entireProcessTree: true); } catch { /* ignore */ }
-            // Best-effort drain so we do not leave orphaned reader tasks.
-            try { await Task.WhenAny(Task.WhenAll(outputTask, errorTask), Task.Delay(200)); } catch { /* ignore */ }
-            LastError = "yt-dlp 单次解析超时（30 秒）";
+            try { await Task.WhenAny(errorTask, Task.Delay(200)); } catch { /* ignore */ }
+            LastError = $"yt-dlp 单次解析超时（{attemptTimeoutSeconds} 秒）";
             return [];
         }
 
         ct.ThrowIfCancellationRequested();
         if (timeout.IsCancellationRequested)
         {
-            LastError = "yt-dlp 单次解析超时（30 秒）";
+            LastError = $"yt-dlp 单次解析超时（{attemptTimeoutSeconds} 秒）";
             return [];
         }
         if (process.ExitCode != 0)
@@ -775,6 +878,28 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                error.Contains("unusual traffic", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Errors that mean this client/cookie attempt cannot succeed — kill yt-dlp immediately
+    /// and advance to the next attempt. Does not change attempt order or cookie policy.
+    /// </summary>
+    internal static bool IsDefinitiveYtDlpFailure(string? line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+            return false;
+        if (!line.Contains("ERROR", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        return line.Contains("page needs to be reloaded", StringComparison.OrdinalIgnoreCase) ||
+               line.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase) ||
+               line.Contains("No video formats found", StringComparison.OrdinalIgnoreCase) ||
+               line.Contains("This live event has ended", StringComparison.OrdinalIgnoreCase) ||
+               line.Contains("Video unavailable", StringComparison.OrdinalIgnoreCase) ||
+               line.Contains("Private video", StringComparison.OrdinalIgnoreCase) ||
+               line.Contains("This video is not available", StringComparison.OrdinalIgnoreCase) ||
+               line.Contains("has been removed", StringComparison.OrdinalIgnoreCase) ||
+               IsHumanVerificationError(line);
+    }
+
     private static string ResolveOutputContainer(string? videoContainer, string? audioContainer)
     {
         if (StringEquals(videoContainer, "webm") && StringEquals(audioContainer, "webm"))
@@ -894,6 +1019,10 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
         if (!TryResolveDownloadUrl(format, out var url, out var fragmentCount))
             throw new InvalidOperationException("format missing url");
 
+        var container = containerOverride ?? StringProperty(format, "ext") ?? (kind == MediaTrackKind.Audio ? "m4a" : "mp4");
+        if (IsHlsManifest(url))
+            container = "hls";
+
         return new MediaTrack(
             trackId,
             kind,
@@ -901,7 +1030,7 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
             kind == MediaTrackKind.Audio
                 ? StringProperty(format, "acodec")
                 : StringProperty(format, "vcodec"),
-            containerOverride ?? StringProperty(format, "ext") ?? (kind == MediaTrackKind.Audio ? "m4a" : "mp4"),
+            container,
             TryGetBitrate(format),
             TryGetSize(format),
             BuildRequestContext(format, fallback))
@@ -909,6 +1038,11 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
             HttpDashFragmentCount = fragmentCount
         };
     }
+
+    private static bool IsHlsManifest(string url) =>
+        url.Contains(".m3u8", StringComparison.OrdinalIgnoreCase) ||
+        url.Contains("/hls_playlist", StringComparison.OrdinalIgnoreCase) ||
+        url.Contains("/manifest/hls", StringComparison.OrdinalIgnoreCase);
 
     private static async Task<string?> WriteCookieFileAsync(
         RequestContext context,
