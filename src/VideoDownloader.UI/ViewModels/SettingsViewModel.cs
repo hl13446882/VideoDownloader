@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
@@ -70,30 +71,33 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     public IReadOnlyList<NamedValue<SubtitleMode>> SubtitleModeOptions { get; } =
     [
-        new("原文", SubtitleMode.Original),
-        new("中文", SubtitleMode.Chinese),
-        new("英文", SubtitleMode.English),
-        new("中英对照", SubtitleMode.Bilingual)
+        new(string.Empty, SubtitleMode.Original),
+        new(string.Empty, SubtitleMode.Chinese),
+        new(string.Empty, SubtitleMode.English),
+        new(string.Empty, SubtitleMode.Bilingual)
     ];
 
     public IReadOnlyList<NamedValue<string>> SubtitleTranslationProviderOptions { get; } =
     [
-        new("本地翻译", "local"),
-        new("云端大模型（暂未启用）", "cloud")
+        new(string.Empty, "local"),
+        new(string.Empty, "cloud")
     ];
 
     public IReadOnlyList<NamedValue<string>> SubtitleColorOptions { get; } =
     [
-        new("红色", "#FF0000"),
-        new("黑色", "#000000"),
-        new("蓝色", "#0000FF"),
-        new("黄色", "#FFFF00"),
-        new("绿色", "#00FF00")
+        new(string.Empty, "#FF0000"),
+        new(string.Empty, "#000000"),
+        new(string.Empty, "#0000FF"),
+        new(string.Empty, "#FFFF00"),
+        new(string.Empty, "#00FF00")
     ];
 
     public IReadOnlyList<string> SystemFontFamilies { get; }
 
     public event EventHandler? DownloadsMigrated;
+
+    private string? _subtitleStatusKey;
+    private object[] _subtitleStatusArgs = [];
 
     public SettingsViewModel(
         AppOptions options,
@@ -152,18 +156,52 @@ public sealed partial class SettingsViewModel : ObservableObject
         {
             var installer = _services.GetService<WhisperModelInstaller>();
             if (installer?.IsInstalled(_subtitleWhisperModelPath) == true)
-                _subtitleModelInstallStatus = "Whisper base 模型已安装。";
+                SetSubtitleStatus("settings.subtitle.installed");
         }
         catch
         {
             // Settings can still open if model probing fails.
         }
 
+        ApplyLocalizedOptionLabels();
         _loc.LanguageChanged += (_, _) =>
         {
             OnPropertyChanged(nameof(L));
             OnPropertyChanged(nameof(AppVersionText));
+            ApplyLocalizedOptionLabels();
+            RefreshSubtitleStatus();
         };
+    }
+
+    private void ApplyLocalizedOptionLabels()
+    {
+        SubtitleModeOptions[0].Label = _loc.T("settings.subtitle.modeOriginal");
+        SubtitleModeOptions[1].Label = _loc.T("settings.subtitle.modeChinese");
+        SubtitleModeOptions[2].Label = _loc.T("settings.subtitle.modeEnglish");
+        SubtitleModeOptions[3].Label = _loc.T("settings.subtitle.modeBilingual");
+        SubtitleTranslationProviderOptions[0].Label = _loc.T("settings.subtitle.providerLocal");
+        SubtitleTranslationProviderOptions[1].Label = _loc.T("settings.subtitle.providerCloud");
+        SubtitleColorOptions[0].Label = _loc.T("settings.subtitle.colorRed");
+        SubtitleColorOptions[1].Label = _loc.T("settings.subtitle.colorBlack");
+        SubtitleColorOptions[2].Label = _loc.T("settings.subtitle.colorBlue");
+        SubtitleColorOptions[3].Label = _loc.T("settings.subtitle.colorYellow");
+        SubtitleColorOptions[4].Label = _loc.T("settings.subtitle.colorGreen");
+    }
+
+    private void SetSubtitleStatus(string key, params object[] args)
+    {
+        _subtitleStatusKey = key;
+        _subtitleStatusArgs = args;
+        RefreshSubtitleStatus();
+    }
+
+    private void RefreshSubtitleStatus()
+    {
+        if (string.IsNullOrEmpty(_subtitleStatusKey))
+            return;
+        SubtitleModelInstallStatus = _subtitleStatusArgs.Length == 0
+            ? _loc.T(_subtitleStatusKey)
+            : _loc.Format(_subtitleStatusKey, _subtitleStatusArgs);
     }
 
     partial void OnSubtitleTranslationProviderChanged(string value)
@@ -202,7 +240,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         var configuredPath = SubtitleWhisperModelPath?.Trim();
         if (string.IsNullOrWhiteSpace(configuredPath))
         {
-            SubtitleModelInstallStatus = "请先填写 Whisper 模型路径。";
+            SetSubtitleStatus("settings.subtitle.needPath");
             return;
         }
 
@@ -212,14 +250,14 @@ public sealed partial class SettingsViewModel : ObservableObject
             var installer = _services.GetRequiredService<WhisperModelInstaller>();
             if (installer.IsInstalled(configuredPath))
             {
-                SubtitleModelInstallStatus = "Whisper base 模型已安装。";
+                SetSubtitleStatus("settings.subtitle.installed");
                 return;
             }
 
-            SubtitleModelInstallStatus = "正在下载 Whisper base 模型…";
+            SetSubtitleStatus("settings.subtitle.downloading");
             var progress = new Progress<double>(value =>
             {
-                SubtitleModelInstallStatus = $"正在下载 Whisper base 模型… {value:P0}";
+                SetSubtitleStatus("settings.subtitle.downloadingPct", value.ToString("P0"));
             });
             var installedPath = await installer.InstallBaseModelAsync(configuredPath, progress);
 
@@ -227,15 +265,15 @@ public sealed partial class SettingsViewModel : ObservableObject
             if (runtime is not null)
                 runtime.ModelPath = configuredPath;
 
-            SubtitleModelInstallStatus = $"模型已安装：{installedPath}";
+            SetSubtitleStatus("settings.subtitle.installedPath", installedPath);
         }
         catch (OperationCanceledException)
         {
-            SubtitleModelInstallStatus = "模型下载已取消。";
+            SetSubtitleStatus("settings.subtitle.cancelled");
         }
         catch (Exception ex)
         {
-            SubtitleModelInstallStatus = "模型安装失败：" + ex.Message;
+            SetSubtitleStatus("settings.subtitle.installFailed", ex.Message);
         }
         finally
         {
@@ -336,7 +374,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         if (!Uri.TryCreate(SubtitleLocalTranslationEndpoint, UriKind.Absolute, out var localEndpoint) ||
             !localEndpoint.IsLoopback)
         {
-            error = "本地翻译地址必须是 127.0.0.1/localhost。";
+            error = _loc.T("settings.subtitle.invalidEndpoint");
             return false;
         }
 
@@ -510,4 +548,29 @@ public sealed partial class SettingsViewModel : ObservableObject
     }
 }
 
-public sealed record NamedValue<T>(string Label, T Value);
+public sealed class NamedValue<T> : INotifyPropertyChanged
+{
+    private string _label;
+
+    public NamedValue(string label, T value)
+    {
+        _label = label;
+        Value = value;
+    }
+
+    public T Value { get; }
+
+    public string Label
+    {
+        get => _label;
+        set
+        {
+            if (_label == value)
+                return;
+            _label = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Label)));
+        }
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+}

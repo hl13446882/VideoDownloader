@@ -119,6 +119,27 @@ public sealed partial class LocalizationService : ObservableObject
         OnPropertyChanged(nameof(SettingsCheckUpdate));
         OnPropertyChanged(nameof(SettingsSave));
         OnPropertyChanged(nameof(SettingsClose));
+        OnPropertyChanged(nameof(SettingsTabGeneral));
+        OnPropertyChanged(nameof(SettingsTabSubtitles));
+        OnPropertyChanged(nameof(SettingsSubtitleToggle));
+        OnPropertyChanged(nameof(SettingsSubtitleEnabled));
+        OnPropertyChanged(nameof(SettingsSubtitleEnabledHint));
+        OnPropertyChanged(nameof(SettingsSubtitleMode));
+        OnPropertyChanged(nameof(SettingsSubtitleEngine));
+        OnPropertyChanged(nameof(SettingsSubtitleCloudHint));
+        OnPropertyChanged(nameof(SettingsSubtitleStyle));
+        OnPropertyChanged(nameof(SettingsSubtitleFont));
+        OnPropertyChanged(nameof(SettingsSubtitleSize));
+        OnPropertyChanged(nameof(SettingsSubtitleSizeRange));
+        OnPropertyChanged(nameof(SettingsSubtitleColor));
+        OnPropertyChanged(nameof(SettingsSubtitleBottom));
+        OnPropertyChanged(nameof(SettingsSubtitleBottomHint));
+        OnPropertyChanged(nameof(SettingsSubtitleLocalEndpoint));
+        OnPropertyChanged(nameof(SettingsSubtitleLocalEndpointTip));
+        OnPropertyChanged(nameof(SettingsSubtitleLocalModel));
+        OnPropertyChanged(nameof(SettingsSubtitleWhisper));
+        OnPropertyChanged(nameof(SettingsSubtitleInstallBase));
+        OnPropertyChanged(nameof(SettingsSubtitleInstallHint));
         OnPropertyChanged(nameof(DialogTitle));
         OnPropertyChanged(nameof(QueueTooltip));
     }
@@ -180,6 +201,27 @@ public sealed partial class LocalizationService : ObservableObject
     public string SettingsCheckUpdate => T("settings.checkUpdate");
     public string SettingsSave => T("settings.save");
     public string SettingsClose => T("settings.close");
+    public string SettingsTabGeneral => T("settings.tabGeneral");
+    public string SettingsTabSubtitles => T("settings.tabSubtitles");
+    public string SettingsSubtitleToggle => T("settings.subtitle.toggle");
+    public string SettingsSubtitleEnabled => T("settings.subtitle.enabled");
+    public string SettingsSubtitleEnabledHint => T("settings.subtitle.enabledHint");
+    public string SettingsSubtitleMode => T("settings.subtitle.mode");
+    public string SettingsSubtitleEngine => T("settings.subtitle.engine");
+    public string SettingsSubtitleCloudHint => T("settings.subtitle.cloudHint");
+    public string SettingsSubtitleStyle => T("settings.subtitle.style");
+    public string SettingsSubtitleFont => T("settings.subtitle.font");
+    public string SettingsSubtitleSize => T("settings.subtitle.size");
+    public string SettingsSubtitleSizeRange => T("settings.subtitle.sizeRange");
+    public string SettingsSubtitleColor => T("settings.subtitle.color");
+    public string SettingsSubtitleBottom => T("settings.subtitle.bottom");
+    public string SettingsSubtitleBottomHint => T("settings.subtitle.bottomHint");
+    public string SettingsSubtitleLocalEndpoint => T("settings.subtitle.localEndpoint");
+    public string SettingsSubtitleLocalEndpointTip => T("settings.subtitle.localEndpointTip");
+    public string SettingsSubtitleLocalModel => T("settings.subtitle.localModel");
+    public string SettingsSubtitleWhisper => T("settings.subtitle.whisper");
+    public string SettingsSubtitleInstallBase => T("settings.subtitle.installBase");
+    public string SettingsSubtitleInstallHint => T("settings.subtitle.installHint");
     public string DialogTitle => T("dialog.title");
     public string QueueTooltip => T("queue.tooltip");
 
@@ -280,6 +322,50 @@ public sealed partial class LocalizationService : ObservableObject
         ["settings.invalidFailedRetryInterval"] = ("失败捞起间隔必须是数字。", "Failed retry interval must be a number."),
         ["settings.saved"] = ("设置已保存。日志开关立即生效；并发数变更需重启应用后生效。",
             "Settings saved. Logging applies immediately; concurrent changes need an app restart."),
+        ["settings.tabGeneral"] = ("常规", "General"),
+        ["settings.tabSubtitles"] = ("智能字幕", "Subtitles"),
+        ["settings.subtitle.toggle"] = ("开关", "Enable"),
+        ["settings.subtitle.enabled"] = ("显示字幕", "Show subtitles"),
+        ["settings.subtitle.enabledHint"] = ("仅本地视频库播放页生效；网页在线视频不会启动识别或翻译。",
+            "Local library playback only. Online pages do not start recognition or translation."),
+        ["settings.subtitle.mode"] = ("模式", "Mode"),
+        ["settings.subtitle.engine"] = ("翻译引擎", "Engine"),
+        ["settings.subtitle.cloudHint"] = ("云端大模型：接口已预留，本版本暂未启用（选中后仍使用本地翻译）。",
+            "Cloud LLM is reserved and not enabled in this version. Local translation is still used."),
+        ["settings.subtitle.style"] = ("样式", "Style"),
+        ["settings.subtitle.font"] = ("字体", "Font"),
+        ["settings.subtitle.size"] = ("大小", "Size"),
+        ["settings.subtitle.sizeRange"] = ("（12–60）", "(12–60)"),
+        ["settings.subtitle.color"] = ("颜色", "Color"),
+        ["settings.subtitle.bottom"] = ("距画面下边", "Bottom offset"),
+        ["settings.subtitle.bottomHint"] = ("相对视频画面底边的像素距离（含黑边内的实际画面），不是相对窗口。",
+            "Pixels from the video picture bottom (the actual picture, including letterbox), not the window."),
+        ["settings.subtitle.localEndpoint"] = ("本地翻译地址", "Local endpoint"),
+        ["settings.subtitle.localEndpointTip"] = ("仅允许 127.0.0.1 / localhost", "127.0.0.1 / localhost only"),
+        ["settings.subtitle.localModel"] = ("本地翻译模型", "Local model"),
+        ["settings.subtitle.whisper"] = ("Whisper 模型", "Whisper model"),
+        ["settings.subtitle.installBase"] = ("安装 base 模型", "Install base model"),
+        ["settings.subtitle.installHint"] = ("约 142 MiB；识别完全本地。", "About 142 MiB; recognition stays local."),
+        ["settings.subtitle.modeOriginal"] = ("原文", "Original"),
+        ["settings.subtitle.modeChinese"] = ("中文", "Chinese"),
+        ["settings.subtitle.modeEnglish"] = ("英文", "English"),
+        ["settings.subtitle.modeBilingual"] = ("中英对照", "Bilingual"),
+        ["settings.subtitle.providerLocal"] = ("本地翻译", "Local"),
+        ["settings.subtitle.providerCloud"] = ("云端大模型（暂未启用）", "Cloud LLM (not enabled)"),
+        ["settings.subtitle.colorRed"] = ("红色", "Red"),
+        ["settings.subtitle.colorBlack"] = ("黑色", "Black"),
+        ["settings.subtitle.colorBlue"] = ("蓝色", "Blue"),
+        ["settings.subtitle.colorYellow"] = ("黄色", "Yellow"),
+        ["settings.subtitle.colorGreen"] = ("绿色", "Green"),
+        ["settings.subtitle.installed"] = ("Whisper base 模型已安装。", "Whisper base model is installed."),
+        ["settings.subtitle.needPath"] = ("请先填写 Whisper 模型路径。", "Enter the Whisper model path first."),
+        ["settings.subtitle.downloading"] = ("正在下载 Whisper base 模型…", "Downloading Whisper base model…"),
+        ["settings.subtitle.downloadingPct"] = ("正在下载 Whisper base 模型… {0}", "Downloading Whisper base model… {0}"),
+        ["settings.subtitle.installedPath"] = ("模型已安装：{0}", "Model installed: {0}"),
+        ["settings.subtitle.cancelled"] = ("模型下载已取消。", "Model download cancelled."),
+        ["settings.subtitle.installFailed"] = ("模型安装失败：{0}", "Model install failed: {0}"),
+        ["settings.subtitle.invalidEndpoint"] = ("本地翻译地址必须是 127.0.0.1/localhost。",
+            "Local translation URL must be 127.0.0.1 or localhost."),
         ["update.checking"] = ("正在检查更新…", "Checking for updates…"),
         ["update.foundVersion"] = ("已发现新版本 {0}", "New version found: {0}"),
         ["update.downloadingFile"] = ("正在下载：{0}", "Downloading: {0}"),
