@@ -44,18 +44,20 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer
             detectedLanguage = "auto";
 
         var segments = new List<SubtitleSegment>();
-        long id = 0;
         await foreach (var result in processor.ProcessAsync(samples, cancellationToken))
         {
             var text = result.Text?.Trim();
             if (string.IsNullOrWhiteSpace(text))
                 continue;
 
+            var absoluteStart = audio.MediaStart + result.Start;
+            var absoluteEnd = audio.MediaStart + result.End;
             segments.Add(new SubtitleSegment
             {
-                Id = ++id,
-                Start = audio.MediaStart + result.Start,
-                End = audio.MediaStart + result.End,
+                // Stable across windows and re-recognition of the same absolute segment start.
+                Id = absoluteStart.Ticks,
+                Start = absoluteStart,
+                End = absoluteEnd,
                 SourceLanguage = detectedLanguage,
                 OriginalText = text,
                 State = SubtitleSegmentState.Recognized
