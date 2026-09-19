@@ -15,6 +15,7 @@ public sealed class AppOptions
     public LicenseOptions License { get; set; } = new();
     public UpdateOptions Update { get; set; } = new();
     public UiOptions Ui { get; set; } = new();
+    public SubtitleOptions Subtitles { get; set; } = new();
 }
 
 public sealed class UiOptions
