@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 using VideoDownloader.Core.Subtitles.Contracts;
+using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Subtitles;
 using VideoDownloader.Infrastructure.Subtitles.Browser;
 
@@ -66,7 +67,8 @@ public static class SubtitleWebViewBootstrapper
             bridge,
             _services.GetRequiredService<ISubtitlePipeline>(),
             _services.GetRequiredService<IMediaAudioDecoder>(),
-            _services.GetRequiredService<SubtitleMediaVariantRegistry>());
+            _services.GetRequiredService<SubtitleMediaVariantRegistry>(),
+            _services.GetRequiredService<SubtitleOptions>());
         var holder = new RuntimeHolder(runtime);
         try
         {
