@@ -19,16 +19,16 @@ public sealed class FileSubtitleCacheStore : ISubtitleCacheStore
         "subtitles");
     private readonly SemaphoreSlim _gate = new(1, 1);
 
-    public async Task<IReadOnlyList<SubtitleSegment>> LoadAsync(
+    public async Task<SubtitleCacheSnapshot> LoadAsync(
         string mediaIdentity,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(mediaIdentity))
-            return Array.Empty<SubtitleSegment>();
+            return SubtitleCacheSnapshot.Empty;
 
         var path = GetPath(mediaIdentity);
         if (!File.Exists(path))
-            return Array.Empty<SubtitleSegment>();
+            return SubtitleCacheSnapshot.Empty;
 
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -38,17 +38,23 @@ public sealed class FileSubtitleCacheStore : ISubtitleCacheStore
                 stream,
                 JsonOptions,
                 cancellationToken).ConfigureAwait(false);
-            if (cached?.Segments is null)
-                return Array.Empty<SubtitleSegment>();
+            if (cached is null)
+                return SubtitleCacheSnapshot.Empty;
+
             try { File.SetLastWriteTimeUtc(path, DateTime.UtcNow); } catch { }
-            return cached.Segments
+            var segments = (cached.Segments ?? Array.Empty<SubtitleSegment>())
                 .Where(x => x.End > x.Start && !string.IsNullOrWhiteSpace(x.OriginalText))
                 .OrderBy(x => x.Start)
                 .ToArray();
+            var coverage = (cached.Coverage ?? Array.Empty<SubtitleCoverageRange>())
+                .Where(x => x.End > x.Start)
+                .OrderBy(x => x.Start)
+                .ToArray();
+            return new SubtitleCacheSnapshot(segments, coverage);
         }
         catch (JsonException)
         {
-            return Array.Empty<SubtitleSegment>();
+            return SubtitleCacheSnapshot.Empty;
         }
         finally
         {
@@ -58,10 +64,11 @@ public sealed class FileSubtitleCacheStore : ISubtitleCacheStore
 
     public async Task SaveAsync(
         string mediaIdentity,
-        IReadOnlyList<SubtitleSegment> segments,
+        SubtitleCacheSnapshot snapshot,
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(mediaIdentity) || segments.Count == 0)
+        if (string.IsNullOrWhiteSpace(mediaIdentity) ||
+            (snapshot.Segments.Count == 0 && snapshot.Coverage.Count == 0))
             return;
 
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -73,7 +80,8 @@ public sealed class FileSubtitleCacheStore : ISubtitleCacheStore
             var payload = new CachedSubtitles(
                 mediaIdentity,
                 DateTimeOffset.UtcNow,
-                segments.OrderBy(x => x.Start).ToArray());
+                snapshot.Segments.OrderBy(x => x.Start).ToArray(),
+                snapshot.Coverage.OrderBy(x => x.Start).ToArray());
 
             await using (var stream = File.Create(temp))
             {
@@ -122,5 +130,6 @@ public sealed class FileSubtitleCacheStore : ISubtitleCacheStore
     private sealed record CachedSubtitles(
         string MediaIdentity,
         DateTimeOffset UpdatedAt,
-        IReadOnlyList<SubtitleSegment> Segments);
+        IReadOnlyList<SubtitleSegment>? Segments,
+        IReadOnlyList<SubtitleCoverageRange>? Coverage);
 }
