@@ -121,6 +121,90 @@ public sealed class SubtitlePipelineTests
     }
 
     [Fact]
+    public void Display_text_supports_original_chinese_english_and_bilingual()
+    {
+        var englishSource = new SubtitleSegment
+        {
+            Id = 1,
+            Start = TimeSpan.Zero,
+            End = TimeSpan.FromSeconds(2),
+            SourceLanguage = "en",
+            OriginalText = "hello",
+            ChineseText = "你好"
+        };
+
+        Assert.Equal("hello", englishSource.GetDisplayText(SubtitleMode.Original));
+        Assert.Equal("你好", englishSource.GetDisplayText(SubtitleMode.Chinese));
+        Assert.Equal("hello", englishSource.GetDisplayText(SubtitleMode.English));
+        Assert.Equal("你好\nhello", englishSource.GetDisplayText(SubtitleMode.Bilingual));
+
+        var chineseSource = new SubtitleSegment
+        {
+            Id = 2,
+            Start = TimeSpan.Zero,
+            End = TimeSpan.FromSeconds(2),
+            SourceLanguage = "zh",
+            OriginalText = "你好",
+            EnglishText = "hello"
+        };
+        Assert.Equal("你好\nhello", chineseSource.GetDisplayText(SubtitleMode.Bilingual));
+    }
+
+    [Fact]
+    public async Task Bilingual_translation_fills_missing_chinese_and_english_sides()
+    {
+        var recognizer = Substitute.For<ISpeechRecognizer>();
+        recognizer.RecognizeAsync(
+                Arg.Any<AudioChunk>(),
+                Arg.Any<SpeechRecognitionContext>(),
+                Arg.Any<CancellationToken>())
+            .Returns([
+                new SubtitleSegment
+                {
+                    Id = 1,
+                    Start = TimeSpan.Zero,
+                    End = TimeSpan.FromSeconds(2),
+                    SourceLanguage = "ja",
+                    OriginalText = "こんにちは"
+                }
+            ]);
+
+        var translator = Substitute.For<ISubtitleTranslator>();
+        translator.TranslateBatchAsync(
+                Arg.Is<IReadOnlyList<TranslationRequest>>(x => x.All(r => r.TargetLanguage == "zh")),
+                Arg.Any<CancellationToken>())
+            .Returns([new TranslationResult("你好", "fake", "1")]);
+        translator.TranslateBatchAsync(
+                Arg.Is<IReadOnlyList<TranslationRequest>>(x => x.All(r => r.TargetLanguage == "en")),
+                Arg.Any<CancellationToken>())
+            .Returns([new TranslationResult("hello", "fake", "1")]);
+
+        var cache = Substitute.For<ISubtitleCacheStore>();
+        cache.LoadAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(SubtitleCacheSnapshot.Empty);
+
+        var pipeline = new SubtitlePipeline(recognizer, new SubtitleTimeline(), translator, cache);
+        await pipeline.StartSessionAsync("s1", "media-1");
+        await pipeline.SubmitAudioAsync(new AudioChunk(
+            new byte[16000 * 2 * 3],
+            TimeSpan.Zero,
+            TimeSpan.FromSeconds(3)));
+        await pipeline.PrepareTranslationsAsync(
+            SubtitleMode.Bilingual,
+            TimeSpan.Zero,
+            TimeSpan.FromSeconds(3));
+
+        var current = pipeline.GetCurrent(TimeSpan.FromSeconds(1), SubtitleMode.Bilingual);
+        Assert.NotNull(current);
+        Assert.Equal("你好", current!.ChineseText);
+        Assert.Equal("hello", current.EnglishText);
+        Assert.Equal("你好\nhello", current.GetDisplayText(SubtitleMode.Bilingual));
+        await translator.Received(2).TranslateBatchAsync(
+            Arg.Any<IReadOnlyList<TranslationRequest>>(),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task Local_translator_rejects_non_loopback_endpoint_before_network_call()
     {
         var translator = new LocalLlmTranslator(

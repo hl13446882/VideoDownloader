@@ -48,6 +48,7 @@ public static class SubtitleServiceCollectionExtensions
         services.AddSingleton(sp => new LocalLlmTranslator(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient("subtitle-local-translation"),
             sp.GetRequiredService<LocalLlmTranslatorOptions>()));
+        // Cloud remains selectable in settings, but runtime always uses the local translator.
         services.AddSingleton<ISubtitleTranslator>(sp => sp.GetRequiredService<LocalLlmTranslator>());
         services.AddSingleton<CloudTranslatorStub>();
         services.AddSingleton<TranslationRouter>();

@@ -14,7 +14,7 @@ public sealed class SubtitleOptions
     public string FontFamily { get; set; } = "Microsoft YaHei";
     public int FontSize { get; set; } = 28;
     public bool Bold { get; set; } = true;
-    public string TextColor { get; set; } = "#FFFFFF";
+    public string TextColor { get; set; } = "#FFFF00";
     public string OutlineColor { get; set; } = "#000000";
     public int OutlineSize { get; set; } = 2;
     public string BackgroundColor { get; set; } = "#000000";

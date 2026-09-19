@@ -14,6 +14,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
 {
     private static readonly TimeSpan FastWarmupWindow = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan StartSnapThreshold = TimeSpan.FromSeconds(2);
+    private const string ModelMissingHint = "请先在设置中安装字幕模型";
 
     private readonly WebViewSubtitleBridge _bridge;
     private readonly ISubtitlePipeline _pipeline;
@@ -33,6 +34,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     private string? _lastDisplayed;
     private string? _styleFingerprint;
     private bool _sessionActive;
+    private bool _modelMissingNotified;
 
     public BrowserSubtitleRuntime(
         WebViewSubtitleBridge bridge,
@@ -112,7 +114,11 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             var segment = _pipeline.GetCurrent(displayTime, _options.Mode);
             if (segment is not null)
                 RequestMissingTranslation(segment, _options.Mode, cancellationToken);
-            await SetDisplayedAsync(segment?.GetDisplayText(_options.Mode), cancellationToken).ConfigureAwait(false);
+
+            var display = segment?.GetDisplayText(_options.Mode);
+            if (string.IsNullOrWhiteSpace(display) && _modelMissingNotified)
+                display = ModelMissingHint;
+            await SetDisplayedAsync(display, cancellationToken).ConfigureAwait(false);
 
             // Local files are immediately seekable, so warm the first subtitle window even while
             // the HTML video is still paused/buffering. This keeps ASR/translation ahead of playback.
@@ -151,6 +157,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _pageUrl = null;
         _localSource = null;
         _lastPlaybackTime = null;
+        _modelMissingNotified = false;
         lock (_translationSync)
             _translationRequests.Clear();
 
@@ -167,7 +174,11 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         SubtitleMode mode,
         CancellationToken cancellationToken)
     {
-        if (mode == SubtitleMode.Original || HasTargetText(segment, mode) || IsSameLanguage(segment.SourceLanguage, mode))
+        if (mode == SubtitleMode.Original || HasTargetText(segment, mode))
+            return;
+
+        if ((mode is SubtitleMode.Chinese or SubtitleMode.English) &&
+            IsSameLanguage(segment.SourceLanguage, mode))
             return;
 
         var key = segment.Id + ":" + mode;
@@ -212,6 +223,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _workCts = null;
         _workTask = null;
         _lastPlaybackTime = null;
+        _modelMissingNotified = false;
         _mediaKey = mediaKey;
         _pageUrl = pageUrl;
         _localSource = await _localSourceResolver.ResolveAsync(pageUrl, cancellationToken).ConfigureAwait(false);
@@ -266,6 +278,13 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             if (_workTask is { IsCompleted: false })
                 return;
 
+            if (!IsWhisperModelInstalled())
+            {
+                _modelMissingNotified = true;
+                await SetDisplayedAsync(ModelMissingHint, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
             var coveredUntil = _pipeline.GetCoveredUntil(currentTime);
             var start = coveredUntil ?? (currentTime <= StartSnapThreshold ? TimeSpan.Zero : currentTime);
             var desiredWindow = coveredUntil is null && windowSize > FastWarmupWindow
@@ -303,10 +322,23 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                     await _pipeline.SubmitAudioAsync(audio, token).ConfigureAwait(false);
                     await _pipeline.PrepareTranslationsAsync(mode, audio.MediaStart, audio.MediaEnd, token)
                         .ConfigureAwait(false);
+                    _modelMissingNotified = false;
                 }
                 catch (OperationCanceledException)
                 {
                     // Expected on seek/media/session change.
+                }
+                catch (FileNotFoundException)
+                {
+                    _modelMissingNotified = true;
+                    try
+                    {
+                        await SetDisplayedAsync(ModelMissingHint, token).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // Overlay update is best-effort.
+                    }
                 }
                 catch
                 {
@@ -317,6 +349,19 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         finally
         {
             _scheduleGate.Release();
+        }
+    }
+
+    private bool IsWhisperModelInstalled()
+    {
+        try
+        {
+            var path = PathExpander.Expand(_options.WhisperModelPath);
+            return !string.IsNullOrWhiteSpace(path) && File.Exists(path);
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -360,14 +405,23 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         BackgroundColor = _options.BackgroundColor,
         BackgroundOpacity = _options.BackgroundOpacity,
         BottomOffsetPx = _options.BottomOffsetPx,
-        MaxLines = _options.MaxLines,
+        MaxLines = Math.Max(_options.MaxLines, _options.Mode == SubtitleMode.Bilingual ? 2 : 1),
         MaxWidthPercent = _options.MaxWidthPercent
     };
 
-    private static bool HasTargetText(SubtitleSegment segment, SubtitleMode mode) =>
-        mode == SubtitleMode.Chinese
-            ? !string.IsNullOrWhiteSpace(segment.ChineseText)
-            : !string.IsNullOrWhiteSpace(segment.EnglishText);
+    private static bool HasTargetText(SubtitleSegment segment, SubtitleMode mode) => mode switch
+    {
+        SubtitleMode.Chinese => !string.IsNullOrWhiteSpace(segment.ChineseText) ||
+                                IsSameLanguage(segment.SourceLanguage, SubtitleMode.Chinese),
+        SubtitleMode.English => !string.IsNullOrWhiteSpace(segment.EnglishText) ||
+                                IsSameLanguage(segment.SourceLanguage, SubtitleMode.English),
+        SubtitleMode.Bilingual =>
+            (!string.IsNullOrWhiteSpace(segment.ChineseText) ||
+             IsSameLanguage(segment.SourceLanguage, SubtitleMode.Chinese)) &&
+            (!string.IsNullOrWhiteSpace(segment.EnglishText) ||
+             IsSameLanguage(segment.SourceLanguage, SubtitleMode.English)),
+        _ => true
+    };
 
     private static bool IsSameLanguage(string source, SubtitleMode mode)
     {

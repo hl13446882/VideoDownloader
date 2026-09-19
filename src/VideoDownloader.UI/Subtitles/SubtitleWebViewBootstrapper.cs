@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using Microsoft.Extensions.DependencyInjection;
@@ -18,8 +19,10 @@ public static class SubtitleWebViewBootstrapper
 {
     private static readonly object Sync = new();
     private static readonly ConditionalWeakTable<WebView2, RuntimeHolder> Runtimes = new();
+    private static readonly ConcurrentDictionary<int, WeakReference<BrowserSubtitleRuntime>> ActiveRuntimes = new();
     private static IServiceProvider? _services;
     private static bool _registered;
+    private static int _nextRuntimeId;
 
     public static void Configure(IServiceProvider services)
     {
@@ -37,6 +40,27 @@ public static class SubtitleWebViewBootstrapper
                 FrameworkElement.UnloadedEvent,
                 new RoutedEventHandler(OnUnloaded));
             _registered = true;
+        }
+    }
+
+    public static async Task RefreshAllStylesAsync(CancellationToken cancellationToken = default)
+    {
+        foreach (var pair in ActiveRuntimes.ToArray())
+        {
+            if (!pair.Value.TryGetTarget(out var runtime))
+            {
+                ActiveRuntimes.TryRemove(pair.Key, out _);
+                continue;
+            }
+
+            try
+            {
+                await runtime.ApplyCurrentStyleAsync(cancellationToken).ConfigureAwait(true);
+            }
+            catch
+            {
+                // Style refresh is best-effort; a disposed WebView must not block settings save.
+            }
         }
     }
 
@@ -69,15 +93,18 @@ public static class SubtitleWebViewBootstrapper
             _services.GetRequiredService<IMediaAudioDecoder>(),
             _services.GetRequiredService<LocalPlaybackMediaSourceResolver>(),
             _services.GetRequiredService<SubtitleOptions>());
-        var holder = new RuntimeHolder(runtime);
+        var runtimeId = Interlocked.Increment(ref _nextRuntimeId);
+        var holder = new RuntimeHolder(runtime, runtimeId);
         try
         {
             Runtimes.Add(webView, holder);
+            ActiveRuntimes[runtimeId] = new WeakReference<BrowserSubtitleRuntime>(runtime);
             await runtime.InitializeAsync().ConfigureAwait(true);
         }
         catch
         {
             Runtimes.Remove(webView);
+            ActiveRuntimes.TryRemove(runtimeId, out _);
             await runtime.DisposeAsync();
         }
     }
@@ -90,11 +117,13 @@ public static class SubtitleWebViewBootstrapper
         if (!Runtimes.TryGetValue(webView, out var holder))
             return;
         Runtimes.Remove(webView);
+        ActiveRuntimes.TryRemove(holder.RuntimeId, out _);
         _ = holder.Runtime.DisposeAsync();
     }
 
-    private sealed class RuntimeHolder(BrowserSubtitleRuntime runtime)
+    private sealed class RuntimeHolder(BrowserSubtitleRuntime runtime, int runtimeId)
     {
         public BrowserSubtitleRuntime Runtime { get; } = runtime;
+        public int RuntimeId { get; } = runtimeId;
     }
 }

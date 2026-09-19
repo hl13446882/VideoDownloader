@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
+using System.Windows.Media;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.DependencyInjection;
@@ -14,11 +15,14 @@ using VideoDownloader.Infrastructure.Subtitles.Speech;
 using VideoDownloader.Infrastructure.Subtitles.Translation;
 using VideoDownloader.Infrastructure.Update;
 using VideoDownloader.UI.Localization;
+using VideoDownloader.UI.Subtitles;
 
 namespace VideoDownloader.UI.ViewModels;
 
 public sealed partial class SettingsViewModel : ObservableObject
 {
+    private static readonly int[] BottomOffsets = [20, 40, 60, 80, 100, 120, 140, 160];
+
     private readonly AppOptions _options;
     private readonly UserSettingsStore _store;
     private readonly AppLogService _appLog;
@@ -38,6 +42,7 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     [ObservableProperty] private bool _subtitleEnabled;
     [ObservableProperty] private SubtitleMode _subtitleMode;
+    [ObservableProperty] private string _subtitleTranslationProvider;
     [ObservableProperty] private int _subtitlePreloadAheadSeconds;
     [ObservableProperty] private string _subtitleFontFamily;
     [ObservableProperty] private int _subtitleFontSize;
@@ -56,12 +61,37 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string _subtitleLocalTranslationModel;
     [ObservableProperty] private string _subtitleModelInstallStatus = string.Empty;
     [ObservableProperty] private bool _subtitleModelInstallEnabled = true;
+    [ObservableProperty] private bool _subtitleLocalTranslationFieldsEnabled = true;
 
     public LocalizationService L => _loc;
     public string AppVersionText => "V" + AppVersionInfo.SemVer;
     public IReadOnlyList<int> ConcurrentOptions { get; } = [1, 2, 3, 4, 5];
-    public IReadOnlyList<SubtitleMode> SubtitleModeOptions { get; } =
-        [SubtitleMode.Original, SubtitleMode.Chinese, SubtitleMode.English];
+    public IReadOnlyList<int> SubtitleBottomOffsetOptions { get; } = BottomOffsets;
+
+    public IReadOnlyList<NamedValue<SubtitleMode>> SubtitleModeOptions { get; } =
+    [
+        new("原文", SubtitleMode.Original),
+        new("中文", SubtitleMode.Chinese),
+        new("英文", SubtitleMode.English),
+        new("中英对照", SubtitleMode.Bilingual)
+    ];
+
+    public IReadOnlyList<NamedValue<string>> SubtitleTranslationProviderOptions { get; } =
+    [
+        new("本地翻译", "local"),
+        new("云端大模型（暂未启用）", "cloud")
+    ];
+
+    public IReadOnlyList<NamedValue<string>> SubtitleColorOptions { get; } =
+    [
+        new("红色", "#FF0000"),
+        new("黑色", "#000000"),
+        new("蓝色", "#0000FF"),
+        new("黄色", "#FFFF00"),
+        new("绿色", "#00FF00")
+    ];
+
+    public IReadOnlyList<string> SystemFontFamilies { get; }
 
     public event EventHandler? DownloadsMigrated;
 
@@ -85,20 +115,33 @@ public sealed partial class SettingsViewModel : ObservableObject
         _loggingEnabled = options.Logging.Enabled;
         _logLevel = options.Logging.MinimumLevel;
 
+        SystemFontFamilies = Fonts.SystemFontFamilies
+            .Select(f => f.Source)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.CurrentCultureIgnoreCase)
+            .ToArray();
+
         var subtitles = options.Subtitles;
         _subtitleEnabled = subtitles.Enabled;
-        _subtitleMode = subtitles.Mode;
+        _subtitleMode = Enum.IsDefined(typeof(SubtitleMode), subtitles.Mode)
+            ? subtitles.Mode
+            : SubtitleMode.Chinese;
+        _subtitleTranslationProvider = string.Equals(subtitles.TranslationProvider, "cloud", StringComparison.OrdinalIgnoreCase)
+            ? "cloud"
+            : "local";
+        _subtitleLocalTranslationFieldsEnabled =
+            !string.Equals(_subtitleTranslationProvider, "cloud", StringComparison.OrdinalIgnoreCase);
         _subtitlePreloadAheadSeconds = subtitles.PreloadAheadSeconds;
-        _subtitleFontFamily = subtitles.FontFamily;
-        _subtitleFontSize = subtitles.FontSize;
+        _subtitleFontFamily = ResolveFontFamily(subtitles.FontFamily);
+        _subtitleFontSize = Math.Clamp(subtitles.FontSize, 12, 60);
         _subtitleBold = subtitles.Bold;
-        _subtitleTextColor = subtitles.TextColor;
+        _subtitleTextColor = ResolvePresetColor(subtitles.TextColor);
         _subtitleOutlineColor = subtitles.OutlineColor;
         _subtitleOutlineSize = subtitles.OutlineSize;
         _subtitleBackgroundColor = subtitles.BackgroundColor;
         _subtitleBackgroundOpacity = subtitles.BackgroundOpacity;
-        _subtitleBottomOffsetPx = subtitles.BottomOffsetPx;
-        _subtitleMaxLines = subtitles.MaxLines;
+        _subtitleBottomOffsetPx = SnapBottomOffset(subtitles.BottomOffsetPx);
+        _subtitleMaxLines = Math.Max(2, subtitles.MaxLines);
         _subtitleMaxWidthPercent = subtitles.MaxWidthPercent;
         _subtitleOffsetMs = subtitles.SubtitleOffsetMs;
         _subtitleWhisperModelPath = subtitles.WhisperModelPath;
@@ -123,14 +166,30 @@ public sealed partial class SettingsViewModel : ObservableObject
         };
     }
 
+    partial void OnSubtitleTranslationProviderChanged(string value)
+    {
+        SubtitleLocalTranslationFieldsEnabled =
+            !string.Equals(value, "cloud", StringComparison.OrdinalIgnoreCase);
+    }
+
     [RelayCommand]
-    private void Save()
+    private async Task SaveAsync()
     {
         if (!TryPersistSettings(out var error))
         {
             StatusMessage = error;
             return;
         }
+
+        try
+        {
+            await SubtitleWebViewBootstrapper.RefreshAllStylesAsync();
+        }
+        catch
+        {
+            // Style refresh must not block a successful settings save.
+        }
+
         StatusMessage = _loc.T("settings.saved");
     }
 
@@ -294,17 +353,20 @@ public sealed partial class SettingsViewModel : ObservableObject
         subtitles.Enabled = SubtitleEnabled;
         subtitles.Mode = SubtitleMode;
         subtitles.PreloadAheadSeconds = Math.Clamp(SubtitlePreloadAheadSeconds, 10, 90);
-        subtitles.TranslationProvider = "local";
+        // Cloud remains selectable/persisted, but runtime always uses the local translator.
+        subtitles.TranslationProvider = string.Equals(SubtitleTranslationProvider, "cloud", StringComparison.OrdinalIgnoreCase)
+            ? "cloud"
+            : "local";
         subtitles.FontFamily = string.IsNullOrWhiteSpace(SubtitleFontFamily) ? "Microsoft YaHei" : SubtitleFontFamily.Trim();
-        subtitles.FontSize = Math.Clamp(SubtitleFontSize, 10, 96);
+        subtitles.FontSize = Math.Clamp(SubtitleFontSize, 12, 60);
         subtitles.Bold = SubtitleBold;
-        subtitles.TextColor = NormalizeColor(SubtitleTextColor, "#FFFFFF");
+        subtitles.TextColor = ResolvePresetColor(SubtitleTextColor);
         subtitles.OutlineColor = NormalizeColor(SubtitleOutlineColor, "#000000");
         subtitles.OutlineSize = Math.Clamp(SubtitleOutlineSize, 0, 8);
         subtitles.BackgroundColor = NormalizeColor(SubtitleBackgroundColor, "#000000");
         subtitles.BackgroundOpacity = Math.Clamp(SubtitleBackgroundOpacity, 0, 1);
-        subtitles.BottomOffsetPx = Math.Clamp(SubtitleBottomOffsetPx, 0, 1000);
-        subtitles.MaxLines = Math.Clamp(SubtitleMaxLines, 1, 4);
+        subtitles.BottomOffsetPx = SnapBottomOffset(SubtitleBottomOffsetPx);
+        subtitles.MaxLines = Math.Clamp(Math.Max(SubtitleMaxLines, SubtitleMode == SubtitleMode.Bilingual ? 2 : 1), 1, 4);
         subtitles.MaxWidthPercent = Math.Clamp(SubtitleMaxWidthPercent, 20, 100);
         subtitles.SubtitleOffsetMs = Math.Clamp(SubtitleOffsetMs, -5000, 5000);
         subtitles.WhisperModelPath = SubtitleWhisperModelPath.Trim();
@@ -327,6 +389,46 @@ public sealed partial class SettingsViewModel : ObservableObject
         _store.Save(_options);
         _appLog.ApplyFromOptions();
         return true;
+    }
+
+    private string ResolveFontFamily(string? preferred)
+    {
+        var name = string.IsNullOrWhiteSpace(preferred) ? "Microsoft YaHei" : preferred.Trim();
+        if (SystemFontFamilies.Any(x => string.Equals(x, name, StringComparison.OrdinalIgnoreCase)))
+            return SystemFontFamilies.First(x => string.Equals(x, name, StringComparison.OrdinalIgnoreCase));
+        var yahei = SystemFontFamilies.FirstOrDefault(x =>
+            x.Contains("YaHei", StringComparison.OrdinalIgnoreCase) ||
+            x.Contains("微软雅黑", StringComparison.OrdinalIgnoreCase));
+        return yahei ?? SystemFontFamilies.FirstOrDefault() ?? "Microsoft YaHei";
+    }
+
+    private static string ResolvePresetColor(string? value)
+    {
+        var text = (value ?? string.Empty).Trim().ToUpperInvariant();
+        return text switch
+        {
+            "#FF0000" => "#FF0000",
+            "#000000" => "#000000",
+            "#0000FF" or "#0080FF" => "#0000FF",
+            "#FFFF00" => "#FFFF00",
+            "#00FF00" or "#008000" => "#00FF00",
+            _ => "#FFFF00"
+        };
+    }
+
+    private static int SnapBottomOffset(int value)
+    {
+        var best = BottomOffsets[0];
+        var bestDistance = Math.Abs(value - best);
+        foreach (var choice in BottomOffsets)
+        {
+            var distance = Math.Abs(value - choice);
+            if (distance >= bestDistance)
+                continue;
+            best = choice;
+            bestDistance = distance;
+        }
+        return best;
     }
 
     private static string NormalizeColor(string? value, string fallback)
@@ -407,3 +509,5 @@ public sealed partial class SettingsViewModel : ObservableObject
         ClientUpdateCoordinator.BeginManualCheck(_services);
     }
 }
+
+public sealed record NamedValue<T>(string Label, T Value);

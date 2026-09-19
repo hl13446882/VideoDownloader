@@ -125,73 +125,91 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
             if (!string.Equals(sessionId, ActiveSessionId, StringComparison.Ordinal))
                 return;
 
-            var target = mode == SubtitleMode.Chinese ? "zh" : "en";
-            var pending = new List<SubtitleSegment>();
-            foreach (var segment in _timeline.Snapshot().Where(x => x.End > start && x.Start < end))
+            if (mode == SubtitleMode.Bilingual)
             {
-                linked.Token.ThrowIfCancellationRequested();
-                if (IsAlreadyReady(segment, mode) || IsSameLanguage(segment.SourceLanguage, target))
-                {
-                    segment.State = SubtitleSegmentState.Ready;
-                    continue;
-                }
-
-                segment.State = SubtitleSegmentState.Translating;
-                pending.Add(segment);
-            }
-
-            if (pending.Count == 0)
+                await TranslateMissingSideAsync(sessionId, "zh", start, end, linked.Token).ConfigureAwait(false);
+                await TranslateMissingSideAsync(sessionId, "en", start, end, linked.Token).ConfigureAwait(false);
                 return;
-
-            try
-            {
-                var requests = pending
-                    .Select(segment => new TranslationRequest(
-                        segment.OriginalText,
-                        segment.SourceLanguage,
-                        target))
-                    .ToArray();
-                var results = await _translator.TranslateBatchAsync(requests, linked.Token)
-                    .ConfigureAwait(false);
-
-                if (results.Count != pending.Count)
-                    throw new InvalidOperationException("Subtitle translation batch size mismatch.");
-                if (!string.Equals(sessionId, ActiveSessionId, StringComparison.Ordinal))
-                    return;
-
-                for (var i = 0; i < pending.Count; i++)
-                {
-                    var segment = pending[i];
-                    var text = results[i].Text?.Trim();
-                    if (string.IsNullOrWhiteSpace(text))
-                    {
-                        segment.State = SubtitleSegmentState.Failed;
-                        continue;
-                    }
-
-                    if (mode == SubtitleMode.Chinese)
-                        segment.ChineseText = text;
-                    else
-                        segment.EnglishText = text;
-                    segment.State = SubtitleSegmentState.Ready;
-                }
-
-                await PersistAsync(sessionId, linked.Token).ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch
-            {
-                // Translation is optional. All failed target segments still display OriginalText.
-                foreach (var segment in pending)
-                    segment.State = SubtitleSegmentState.Failed;
-            }
+
+            var target = mode == SubtitleMode.Chinese ? "zh" : "en";
+            await TranslateMissingSideAsync(sessionId, target, start, end, linked.Token).ConfigureAwait(false);
         }
         finally
         {
             _translationGate.Release();
+        }
+    }
+
+    private async Task TranslateMissingSideAsync(
+        string sessionId,
+        string target,
+        TimeSpan start,
+        TimeSpan end,
+        CancellationToken cancellationToken)
+    {
+        var pending = new List<SubtitleSegment>();
+        foreach (var segment in _timeline.Snapshot().Where(x => x.End > start && x.Start < end))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (HasSideText(segment, target) || IsSameLanguage(segment.SourceLanguage, target))
+            {
+                if (IsSameLanguage(segment.SourceLanguage, target))
+                    segment.State = SubtitleSegmentState.Ready;
+                continue;
+            }
+
+            segment.State = SubtitleSegmentState.Translating;
+            pending.Add(segment);
+        }
+
+        if (pending.Count == 0)
+            return;
+
+        try
+        {
+            var requests = pending
+                .Select(segment => new TranslationRequest(
+                    segment.OriginalText,
+                    segment.SourceLanguage,
+                    target))
+                .ToArray();
+            var results = await _translator.TranslateBatchAsync(requests, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (results.Count != pending.Count)
+                throw new InvalidOperationException("Subtitle translation batch size mismatch.");
+            if (!string.Equals(sessionId, ActiveSessionId, StringComparison.Ordinal))
+                return;
+
+            for (var i = 0; i < pending.Count; i++)
+            {
+                var segment = pending[i];
+                var text = results[i].Text?.Trim();
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    segment.State = SubtitleSegmentState.Failed;
+                    continue;
+                }
+
+                if (target == "zh")
+                    segment.ChineseText = text;
+                else
+                    segment.EnglishText = text;
+                segment.State = SubtitleSegmentState.Ready;
+            }
+
+            await PersistAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            // Translation is optional. Failed target segments still display OriginalText.
+            foreach (var segment in pending)
+                segment.State = SubtitleSegmentState.Failed;
         }
     }
 
@@ -282,8 +300,8 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
         await _cache.SaveAsync(identity, SnapshotForCache(), cancellationToken).ConfigureAwait(false);
     }
 
-    private static bool IsAlreadyReady(SubtitleSegment segment, SubtitleMode mode) =>
-        mode == SubtitleMode.Chinese
+    private static bool HasSideText(SubtitleSegment segment, string target) =>
+        target == "zh"
             ? !string.IsNullOrWhiteSpace(segment.ChineseText)
             : !string.IsNullOrWhiteSpace(segment.EnglishText);
 

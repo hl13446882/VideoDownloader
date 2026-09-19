@@ -5,6 +5,7 @@ namespace VideoDownloader.Infrastructure.Subtitles.Translation;
 
 /// <summary>
 /// Reserved cloud translation entry point. No network request is implemented in this phase.
+/// The settings UI may select "cloud", but DI continues to inject the local translator at runtime.
 /// </summary>
 public sealed class CloudTranslatorStub : ISubtitleTranslator
 {

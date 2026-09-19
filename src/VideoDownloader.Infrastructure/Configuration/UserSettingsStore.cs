@@ -1,6 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using VideoDownloader.Infrastructure.Configuration;
+using VideoDownloader.Core.Subtitles;
 
 namespace VideoDownloader.Infrastructure.Configuration;
 
@@ -77,17 +77,51 @@ public sealed class UserSettingsStore
             options.Ui.AutoModeIdleMinutes = 5;
 
         options.Subtitles.PreloadAheadSeconds = Math.Clamp(options.Subtitles.PreloadAheadSeconds, 10, 90);
-        options.Subtitles.FontSize = Math.Clamp(options.Subtitles.FontSize, 10, 96);
+        options.Subtitles.FontSize = Math.Clamp(options.Subtitles.FontSize, 12, 60);
         options.Subtitles.OutlineSize = Math.Clamp(options.Subtitles.OutlineSize, 0, 8);
         options.Subtitles.BackgroundOpacity = Math.Clamp(options.Subtitles.BackgroundOpacity, 0, 1);
-        options.Subtitles.BottomOffsetPx = Math.Clamp(options.Subtitles.BottomOffsetPx, 0, 1000);
+        options.Subtitles.BottomOffsetPx = SnapBottomOffset(options.Subtitles.BottomOffsetPx);
         options.Subtitles.MaxLines = Math.Clamp(options.Subtitles.MaxLines, 1, 4);
         options.Subtitles.MaxWidthPercent = Math.Clamp(options.Subtitles.MaxWidthPercent, 20, 100);
         options.Subtitles.SubtitleOffsetMs = Math.Clamp(options.Subtitles.SubtitleOffsetMs, -5000, 5000);
+        options.Subtitles.TextColor = NormalizePresetColor(options.Subtitles.TextColor);
+        if (!Enum.IsDefined(typeof(SubtitleMode), options.Subtitles.Mode))
+            options.Subtitles.Mode = SubtitleMode.Chinese;
         options.Subtitles.TranslationProvider = string.Equals(
             options.Subtitles.TranslationProvider,
             "cloud",
             StringComparison.OrdinalIgnoreCase) ? "cloud" : "local";
+    }
+
+    private static readonly int[] BottomOffsetChoices = [20, 40, 60, 80, 100, 120, 140, 160];
+
+    private static int SnapBottomOffset(int value)
+    {
+        var best = BottomOffsetChoices[0];
+        var bestDistance = Math.Abs(value - best);
+        foreach (var choice in BottomOffsetChoices)
+        {
+            var distance = Math.Abs(value - choice);
+            if (distance >= bestDistance)
+                continue;
+            best = choice;
+            bestDistance = distance;
+        }
+        return best;
+    }
+
+    private static string NormalizePresetColor(string? value)
+    {
+        var text = (value ?? string.Empty).Trim().ToUpperInvariant();
+        return text switch
+        {
+            "#FF0000" or "RED" or "红" or "红色" => "#FF0000",
+            "#000000" or "BLACK" or "黑" or "黑色" => "#000000",
+            "#0000FF" or "#0080FF" or "BLUE" or "蓝" or "蓝色" => "#0000FF",
+            "#FFFF00" or "YELLOW" or "黄" or "黄色" => "#FFFF00",
+            "#00FF00" or "#008000" or "GREEN" or "绿" or "绿色" => "#00FF00",
+            _ => "#FFFF00"
+        };
     }
 
     private static AppOptions Clone(AppOptions source)
