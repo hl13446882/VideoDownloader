@@ -23,4 +23,16 @@ public sealed class PathExpanderTests
         Assert.False(string.IsNullOrWhiteSpace(dir));
         Assert.True(Directory.Exists(dir));
     }
+
+    [Fact]
+    public void ResolveInstallRoot_avoids_single_file_extract_directory()
+    {
+        var root = PathExpander.ResolveInstallRoot();
+        Assert.False(string.IsNullOrWhiteSpace(root));
+        Assert.True(Directory.Exists(root));
+
+        var normalized = root.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+        var marker = Path.DirectorySeparatorChar + ".net" + Path.DirectorySeparatorChar;
+        Assert.DoesNotContain(marker, normalized, StringComparison.OrdinalIgnoreCase);
+    }
 }

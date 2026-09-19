@@ -234,10 +234,8 @@ internal static class ClientUpdateCoordinator
     private static void ApplyAndRestart()
     {
         var installRoot = UpdateService.InstallRoot;
-        var launcher = Path.Combine(installRoot, "VideoBrowser.exe");
-        if (!File.Exists(launcher))
-            launcher = Path.Combine(installRoot, "VideoDownloader.exe");
-        if (!File.Exists(launcher))
+        var launcher = FindLauncher(installRoot);
+        if (launcher is null)
         {
             MessageBox.Show(
                 "找不到启动器，无法自动升级。请手动重启。",
@@ -252,7 +250,7 @@ internal static class ClientUpdateCoordinator
             Process.Start(new ProcessStartInfo
             {
                 FileName = launcher,
-                WorkingDirectory = installRoot,
+                WorkingDirectory = Path.GetDirectoryName(launcher) ?? installRoot,
                 Arguments = "--apply-update",
                 UseShellExecute = false
             });
@@ -268,6 +266,18 @@ internal static class ClientUpdateCoordinator
         }
 
         Application.Current.Shutdown(0);
+    }
+
+    private static string? FindLauncher(string installRoot)
+    {
+        foreach (var name in new[] { "VideoBrowser.exe", "VideoDownloader.exe" })
+        {
+            var candidate = Path.Combine(installRoot, name);
+            if (File.Exists(candidate))
+                return candidate;
+        }
+
+        return null;
     }
 
     public static void ShowPreviousFailureIfAny(LocalizationService loc)

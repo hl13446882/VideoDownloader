@@ -132,11 +132,8 @@ public partial class App : Application
     {
         try
         {
-            var appDir = Path.GetFullPath(AppContext.BaseDirectory)
-                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            var installRoot = Path.GetDirectoryName(appDir);
-            if (string.IsNullOrWhiteSpace(installRoot))
-                return;
+            var installRoot = PathExpander.ResolveInstallRoot();
+            var appDir = PathExpander.ResolveAppDirectory();
 
             CleanupDeferredSidecar(installRoot, "VideoBrowser.exe", "VideoBrowser.exe.new");
             // Legacy name from earlier builds.

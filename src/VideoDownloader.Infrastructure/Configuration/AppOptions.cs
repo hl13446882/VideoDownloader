@@ -242,4 +242,56 @@ public static class PathExpander
 
     private static string TrimDir(string directory) =>
         directory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+    /// <summary>
+    /// Package root that contains VideoBrowser.exe (parent of the app\ folder).
+    /// Must not use AppContext.BaseDirectory alone — single-file extract lives under %TEMP%\.net\.
+    /// </summary>
+    public static string ResolveInstallRoot()
+    {
+        var appDir = ResolveAppDirectory();
+        var parent = Directory.GetParent(appDir);
+        if (parent is not null && LooksLikeInstallRoot(parent.FullName))
+            return TrimDir(parent.FullName);
+
+        try
+        {
+            var processPath = Environment.ProcessPath;
+            if (!string.IsNullOrWhiteSpace(processPath))
+            {
+                var processDir = Path.GetDirectoryName(Path.GetFullPath(processPath));
+                if (!string.IsNullOrWhiteSpace(processDir))
+                {
+                    if (LooksLikeInstallRoot(processDir))
+                        return TrimDir(processDir);
+
+                    var processParent = Directory.GetParent(processDir);
+                    if (processParent is not null && LooksLikeInstallRoot(processParent.FullName))
+                        return TrimDir(processParent.FullName);
+                }
+            }
+        }
+        catch
+        {
+            // Fall through.
+        }
+
+        // Last resort: keep previous parent-of-BaseDirectory behavior when it is not a .net extract.
+        var baseDir = TrimDir(AppContext.BaseDirectory);
+        if (!IsSingleFileExtractDirectory(baseDir))
+        {
+            var baseParent = Directory.GetParent(baseDir);
+            if (baseParent is not null && LooksLikeInstallRoot(baseParent.FullName))
+                return TrimDir(baseParent.FullName);
+            if (LooksLikeInstallRoot(baseDir))
+                return baseDir;
+        }
+
+        return parent is not null ? TrimDir(parent.FullName) : appDir;
+    }
+
+    private static bool LooksLikeInstallRoot(string directory) =>
+        File.Exists(Path.Combine(directory, "VideoBrowser.exe")) ||
+        (File.Exists(Path.Combine(directory, "VideoDownloader.exe")) &&
+         !File.Exists(Path.Combine(directory, "ffmpeg", "ffmpeg.exe")));
 }

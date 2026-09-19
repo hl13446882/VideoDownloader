@@ -54,20 +54,8 @@ public sealed class UpdateService
             "VideoDownloader",
             "update-hosted-files.json");
 
-    public static string InstallRoot
-    {
-        get
-        {
-            // Main app lives in <installRoot>\app\; launcher is <installRoot>\VideoBrowser.exe.
-            var appDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            var parent = Directory.GetParent(appDir);
-            if (parent is not null &&
-                (File.Exists(Path.Combine(parent.FullName, "VideoBrowser.exe")) ||
-                 File.Exists(Path.Combine(parent.FullName, "VideoDownloader.exe"))))
-                return parent.FullName;
-            return appDir;
-        }
-    }
+    public static string InstallRoot => PathExpander.ResolveInstallRoot();
+
 
     public bool CanUpdate =>
         _options.Update.Enabled &&
