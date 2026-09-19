@@ -4,12 +4,12 @@ namespace VideoDownloader.Core.Subtitles.Contracts;
 
 public interface ISubtitleCacheStore
 {
-    Task<IReadOnlyList<SubtitleSegment>> LoadAsync(
+    Task<SubtitleCacheSnapshot> LoadAsync(
         string mediaIdentity,
         CancellationToken cancellationToken = default);
 
     Task SaveAsync(
         string mediaIdentity,
-        IReadOnlyList<SubtitleSegment> segments,
+        SubtitleCacheSnapshot snapshot,
         CancellationToken cancellationToken = default);
 }
