@@ -30,7 +30,7 @@ public static class AppServiceComposition
         var services = new ServiceCollection();
         services.AddSingleton(store);
         services.AddVideoDownloaderInfrastructure(options);
-        services.AddVideoDownloaderSubtitles();
+        services.AddVideoDownloaderSubtitles(options);
         services.AddSingleton<LocalizationService>();
         if (singletonUi)
         {
