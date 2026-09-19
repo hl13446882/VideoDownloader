@@ -7,6 +7,7 @@ namespace VideoDownloader.Infrastructure.Subtitles.Browser;
 
 /// <summary>
 /// Browser-side subtitle clock and overlay. It is intentionally independent from media detection.
+/// All CoreWebView2 calls are marshalled to the WebView dispatcher.
 /// </summary>
 public sealed class WebViewSubtitleBridge : IAsyncDisposable
 {
@@ -21,39 +22,41 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
 
     public event EventHandler<SubtitlePlaybackState>? PlaybackStateChanged;
 
-    public async Task InitializeAsync(CancellationToken cancellationToken = default)
-    {
-        if (_initialized)
-            return;
-        if (_webView.CoreWebView2 is null)
-            throw new InvalidOperationException("WebView2 must be initialized before the subtitle bridge.");
+    public Task InitializeAsync(CancellationToken cancellationToken = default) =>
+        RunOnUiAsync(async () =>
+        {
+            if (_initialized)
+                return;
+            if (_webView.CoreWebView2 is null)
+                throw new InvalidOperationException("WebView2 must be initialized before the subtitle bridge.");
 
-        _core = _webView.CoreWebView2;
-        _core.WebMessageReceived += OnWebMessageReceived;
-        await _core.AddScriptToExecuteOnDocumentCreatedAsync(InstallScript).WaitAsync(cancellationToken);
-        await _core.ExecuteScriptAsync(InstallScript).WaitAsync(cancellationToken);
-        _initialized = true;
-    }
+            _core = _webView.CoreWebView2;
+            _core.WebMessageReceived += OnWebMessageReceived;
+            await _core.AddScriptToExecuteOnDocumentCreatedAsync(InstallScript).WaitAsync(cancellationToken);
+            await _core.ExecuteScriptAsync(InstallScript).WaitAsync(cancellationToken);
+            _initialized = true;
+        });
 
-    public async Task SetSubtitleAsync(string? text, CancellationToken cancellationToken = default)
+    public Task SetSubtitleAsync(string? text, CancellationToken cancellationToken = default)
     {
-        if (_core is null)
-            return;
         var json = JsonSerializer.Serialize(text ?? string.Empty);
-        await _core.ExecuteScriptAsync(
-            $"window.__vdSubtitle&&window.__vdSubtitle.setText({json});")
-            .WaitAsync(cancellationToken);
+        return RunOnUiAsync(async () =>
+        {
+            if (_core is null)
+                return;
+            await _core.ExecuteScriptAsync(
+                $"window.__vdSubtitle&&window.__vdSubtitle.setText({json});")
+                .WaitAsync(cancellationToken);
+        });
     }
 
-    public async Task ClearSubtitleAsync(CancellationToken cancellationToken = default) =>
-        await SetSubtitleAsync(string.Empty, cancellationToken);
+    public Task ClearSubtitleAsync(CancellationToken cancellationToken = default) =>
+        SetSubtitleAsync(string.Empty, cancellationToken);
 
-    public async Task ApplyStyleAsync(
+    public Task ApplyStyleAsync(
         SubtitleStyleOptions style,
         CancellationToken cancellationToken = default)
     {
-        if (_core is null)
-            return;
         var json = JsonSerializer.Serialize(new
         {
             fontFamily = style.FontFamily,
@@ -68,9 +71,22 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
             maxLines = Math.Clamp(style.MaxLines, 1, 4),
             maxWidthPercent = Math.Clamp(style.MaxWidthPercent, 20, 100)
         });
-        await _core.ExecuteScriptAsync(
-            $"window.__vdSubtitle&&window.__vdSubtitle.setStyle({json});")
-            .WaitAsync(cancellationToken);
+
+        return RunOnUiAsync(async () =>
+        {
+            if (_core is null)
+                return;
+            await _core.ExecuteScriptAsync(
+                $"window.__vdSubtitle&&window.__vdSubtitle.setStyle({json});")
+                .WaitAsync(cancellationToken);
+        });
+    }
+
+    private Task RunOnUiAsync(Func<Task> action)
+    {
+        if (_webView.Dispatcher.CheckAccess())
+            return action();
+        return _webView.Dispatcher.InvokeAsync(action).Task.Unwrap();
     }
 
     private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
