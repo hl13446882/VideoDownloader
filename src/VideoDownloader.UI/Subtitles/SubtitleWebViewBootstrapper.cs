@@ -11,8 +11,8 @@ using VideoDownloader.Infrastructure.Subtitles.Browser;
 namespace VideoDownloader.UI.Subtitles;
 
 /// <summary>
-/// Attaches one isolated subtitle runtime to each WebView2 after the existing browser host
-/// has initialized CoreWebView2. No changes to the media-detection pipeline are required.
+/// Attaches the local-playback subtitle runtime to WebView2. The runtime itself ignores ordinary
+/// web pages and only activates for the built-in /play/{jobId} local-library player.
 /// </summary>
 public static class SubtitleWebViewBootstrapper
 {
@@ -67,7 +67,7 @@ public static class SubtitleWebViewBootstrapper
             bridge,
             _services.GetRequiredService<ISubtitlePipeline>(),
             _services.GetRequiredService<IMediaAudioDecoder>(),
-            _services.GetRequiredService<SubtitleMediaVariantRegistry>(),
+            _services.GetRequiredService<LocalPlaybackMediaSourceResolver>(),
             _services.GetRequiredService<SubtitleOptions>());
         var holder = new RuntimeHolder(runtime);
         try
