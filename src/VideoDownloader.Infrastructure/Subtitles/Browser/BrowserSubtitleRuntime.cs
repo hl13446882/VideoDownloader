@@ -1,6 +1,7 @@
 using VideoDownloader.Core.Models;
 using VideoDownloader.Core.Subtitles;
 using VideoDownloader.Core.Subtitles.Contracts;
+using VideoDownloader.Infrastructure.Configuration;
 
 namespace VideoDownloader.Infrastructure.Subtitles.Browser;
 
@@ -10,13 +11,11 @@ namespace VideoDownloader.Infrastructure.Subtitles.Browser;
 /// </summary>
 public sealed class BrowserSubtitleRuntime : IAsyncDisposable
 {
-    private static readonly TimeSpan WindowSize = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan RefillThreshold = TimeSpan.FromSeconds(12);
-
     private readonly WebViewSubtitleBridge _bridge;
     private readonly ISubtitlePipeline _pipeline;
     private readonly IMediaAudioDecoder _audioDecoder;
     private readonly SubtitleMediaVariantRegistry _variantRegistry;
+    private readonly SubtitleOptions _options;
     private readonly SemaphoreSlim _scheduleGate = new(1, 1);
     private readonly CancellationTokenSource _lifetimeCts = new();
     private CancellationTokenSource? _workCts;
@@ -25,33 +24,31 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     private string? _pageUrl;
     private MediaVariant? _variant;
     private TimeSpan _coveredUntil;
-    private SubtitleMode _mode = SubtitleMode.Chinese;
     private string? _lastDisplayed;
 
     public BrowserSubtitleRuntime(
         WebViewSubtitleBridge bridge,
         ISubtitlePipeline pipeline,
         IMediaAudioDecoder audioDecoder,
-        SubtitleMediaVariantRegistry variantRegistry)
+        SubtitleMediaVariantRegistry variantRegistry,
+        SubtitleOptions options)
     {
         _bridge = bridge;
         _pipeline = pipeline;
         _audioDecoder = audioDecoder;
         _variantRegistry = variantRegistry;
+        _options = options;
         _bridge.PlaybackStateChanged += OnPlaybackStateChanged;
-    }
-
-    public SubtitleMode Mode
-    {
-        get => _mode;
-        set => _mode = value;
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         await _bridge.InitializeAsync(cancellationToken).ConfigureAwait(false);
-        await _bridge.ApplyStyleAsync(new SubtitleStyleOptions(), cancellationToken).ConfigureAwait(false);
+        await _bridge.ApplyStyleAsync(BuildStyle(), cancellationToken).ConfigureAwait(false);
     }
+
+    public Task ApplyCurrentStyleAsync(CancellationToken cancellationToken = default) =>
+        _bridge.ApplyStyleAsync(BuildStyle(), cancellationToken);
 
     private void OnPlaybackStateChanged(object? sender, SubtitlePlaybackState state)
     {
@@ -62,6 +59,12 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     {
         try
         {
+            if (!_options.Enabled)
+            {
+                await SetDisplayedAsync(null, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
             if (string.IsNullOrWhiteSpace(state.MediaKey))
             {
                 await SetDisplayedAsync(null, cancellationToken).ConfigureAwait(false);
@@ -79,14 +82,19 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                 _variant = _variantRegistry.Resolve(state.PageUrl, state.MediaKey) ?? CreateDirectVariant(state.MediaKey);
             }
 
-            var segment = _pipeline.GetCurrent(state.CurrentTime, _mode);
-            await SetDisplayedAsync(segment?.GetDisplayText(_mode), cancellationToken).ConfigureAwait(false);
+            var displayTime = state.CurrentTime - TimeSpan.FromMilliseconds(_options.SubtitleOffsetMs);
+            if (displayTime < TimeSpan.Zero)
+                displayTime = TimeSpan.Zero;
+            var segment = _pipeline.GetCurrent(displayTime, _options.Mode);
+            await SetDisplayedAsync(segment?.GetDisplayText(_options.Mode), cancellationToken).ConfigureAwait(false);
 
             if (_variant is null || state.Paused || state.Seeking)
                 return;
 
-            if (state.CurrentTime + RefillThreshold >= _coveredUntil)
-                await EnsureWindowAsync(state.CurrentTime, state.Duration, cancellationToken).ConfigureAwait(false);
+            var windowSize = TimeSpan.FromSeconds(Math.Clamp(_options.PreloadAheadSeconds, 10, 90));
+            var refillThreshold = TimeSpan.FromSeconds(Math.Max(5, windowSize.TotalSeconds / 3));
+            if (state.CurrentTime + refillThreshold >= _coveredUntil)
+                await EnsureWindowAsync(state.CurrentTime, state.Duration, windowSize, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -123,6 +131,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     private async Task EnsureWindowAsync(
         TimeSpan currentTime,
         TimeSpan? duration,
+        TimeSpan windowSize,
         CancellationToken cancellationToken)
     {
         if (_variant is null)
@@ -135,11 +144,11 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                 return;
 
             var start = currentTime < _coveredUntil ? _coveredUntil : currentTime;
-            var remaining = duration is { } total ? total - start : WindowSize;
+            var remaining = duration is { } total ? total - start : windowSize;
             if (remaining <= TimeSpan.Zero)
                 return;
 
-            var length = remaining < WindowSize ? remaining : WindowSize;
+            var length = remaining < windowSize ? remaining : windowSize;
             if (length < TimeSpan.FromSeconds(1))
                 return;
 
@@ -148,7 +157,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             var token = _workCts.Token;
             var variant = _variant;
             var mediaKey = _mediaKey;
-            var mode = _mode;
+            var mode = _options.Mode;
 
             _workTask = Task.Run(async () =>
             {
@@ -189,6 +198,21 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _lastDisplayed = text;
         await _bridge.SetSubtitleAsync(text, cancellationToken).ConfigureAwait(false);
     }
+
+    private SubtitleStyleOptions BuildStyle() => new()
+    {
+        FontFamily = _options.FontFamily,
+        FontSize = _options.FontSize,
+        Bold = _options.Bold,
+        TextColor = _options.TextColor,
+        OutlineColor = _options.OutlineColor,
+        OutlineSize = _options.OutlineSize,
+        BackgroundColor = _options.BackgroundColor,
+        BackgroundOpacity = _options.BackgroundOpacity,
+        BottomOffsetPx = _options.BottomOffsetPx,
+        MaxLines = _options.MaxLines,
+        MaxWidthPercent = _options.MaxWidthPercent
+    };
 
     private static MediaVariant? CreateDirectVariant(string mediaKey)
     {
