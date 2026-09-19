@@ -18,11 +18,45 @@ public sealed class FfmpegMediaAudioDecoder : IMediaAudioDecoder
         _options = options.Value;
     }
 
-    public async Task<AudioChunk> DecodeAsync(
+    public Task<AudioChunk> DecodeAsync(
         MediaVariant variant,
         TimeSpan start,
         TimeSpan duration,
         CancellationToken cancellationToken = default)
+    {
+        var track = SelectTrack(variant)
+            ?? throw new InvalidOperationException("The selected media variant has no audio-capable track.");
+
+        return DecodeCoreAsync(
+            track.SourceUrl.AbsoluteUri,
+            BuildHeaders(track.RequestContext),
+            start,
+            duration,
+            cancellationToken);
+    }
+
+    public Task<AudioChunk> DecodeLocalFileAsync(
+        string filePath,
+        TimeSpan start,
+        TimeSpan duration,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(filePath))
+            throw new ArgumentException("Local media path is required.", nameof(filePath));
+
+        var fullPath = Path.GetFullPath(filePath);
+        if (!File.Exists(fullPath))
+            throw new FileNotFoundException("Local media file was not found.", fullPath);
+
+        return DecodeCoreAsync(fullPath, null, start, duration, cancellationToken);
+    }
+
+    private async Task<AudioChunk> DecodeCoreAsync(
+        string input,
+        string? headers,
+        TimeSpan start,
+        TimeSpan duration,
+        CancellationToken cancellationToken)
     {
         if (start < TimeSpan.Zero)
             start = TimeSpan.Zero;
@@ -32,9 +66,6 @@ public sealed class FfmpegMediaAudioDecoder : IMediaAudioDecoder
         // Keep each recognition request bounded. The scheduler is responsible for advancing windows.
         if (duration > TimeSpan.FromSeconds(90))
             duration = TimeSpan.FromSeconds(90);
-
-        var track = SelectTrack(variant)
-            ?? throw new InvalidOperationException("The selected media variant has no audio-capable track.");
 
         var ffmpeg = PathExpander.Expand(_options.Ffmpeg.ExecutablePath);
         if (!File.Exists(ffmpeg))
@@ -54,7 +85,6 @@ public sealed class FfmpegMediaAudioDecoder : IMediaAudioDecoder
         psi.ArgumentList.Add("-loglevel");
         psi.ArgumentList.Add("error");
 
-        var headers = BuildHeaders(track.RequestContext);
         if (!string.IsNullOrEmpty(headers))
         {
             psi.ArgumentList.Add("-headers");
@@ -64,7 +94,7 @@ public sealed class FfmpegMediaAudioDecoder : IMediaAudioDecoder
         psi.ArgumentList.Add("-ss");
         psi.ArgumentList.Add(start.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture));
         psi.ArgumentList.Add("-i");
-        psi.ArgumentList.Add(track.SourceUrl.AbsoluteUri);
+        psi.ArgumentList.Add(input);
         psi.ArgumentList.Add("-t");
         psi.ArgumentList.Add(duration.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture));
         psi.ArgumentList.Add("-vn");
@@ -99,14 +129,7 @@ public sealed class FfmpegMediaAudioDecoder : IMediaAudioDecoder
         var copyTask = process.StandardOutput.BaseStream.CopyToAsync(output, cancellationToken);
         var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
 
-        try
-        {
-            await Task.WhenAll(copyTask, process.WaitForExitAsync(cancellationToken));
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
+        await Task.WhenAll(copyTask, process.WaitForExitAsync(cancellationToken));
 
         var error = await errorTask;
         if (process.ExitCode != 0)
@@ -158,8 +181,6 @@ public sealed class FfmpegMediaAudioDecoder : IMediaAudioDecoder
         {
             if (string.IsNullOrWhiteSpace(value))
                 return;
-            // Header values are transported to FFmpeg as one CRLF-delimited argument.
-            // Strip embedded CR/LF so captured page data cannot inject additional headers.
             var safe = value.Replace("\r", string.Empty, StringComparison.Ordinal)
                             .Replace("\n", string.Empty, StringComparison.Ordinal);
             lines.Add(name + ": " + safe);
