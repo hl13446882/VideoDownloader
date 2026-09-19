@@ -176,9 +176,70 @@ public static class PathExpander
 {
     public static string Expand(string path)
     {
+        var appDir = ResolveAppDirectory();
         return path
-            .Replace("%APPDIR%", AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), StringComparison.OrdinalIgnoreCase)
+            .Replace("%APPDIR%", appDir, StringComparison.OrdinalIgnoreCase)
             .Replace("%USERPROFILE%", Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StringComparison.OrdinalIgnoreCase)
             .Replace("%LOCALAPPDATA%", Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>
+    /// Install layout is &lt;root&gt;\app\VideoDownloader.exe with tools beside it.
+    /// PublishSingleFile + IncludeAllContentForSelfExtract sets AppContext.BaseDirectory to a
+    /// temp extract folder under %TEMP%\.net\, so %APPDIR% must prefer the real process directory.
+    /// </summary>
+    public static string ResolveAppDirectory()
+    {
+        var candidates = new List<string>(2);
+
+        try
+        {
+            var processPath = Environment.ProcessPath;
+            if (!string.IsNullOrWhiteSpace(processPath))
+            {
+                var processDir = Path.GetDirectoryName(Path.GetFullPath(processPath));
+                if (!string.IsNullOrWhiteSpace(processDir))
+                    candidates.Add(processDir);
+            }
+        }
+        catch
+        {
+            // Fall through to AppContext.BaseDirectory.
+        }
+
+        var baseDir = AppContext.BaseDirectory.TrimEnd(
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar);
+        if (!string.IsNullOrWhiteSpace(baseDir))
+            candidates.Add(baseDir);
+
+        foreach (var candidate in candidates)
+        {
+            if (LooksLikeAppInstallDirectory(candidate))
+                return TrimDir(candidate);
+        }
+
+        foreach (var candidate in candidates)
+        {
+            if (!IsSingleFileExtractDirectory(candidate))
+                return TrimDir(candidate);
+        }
+
+        return candidates.Count > 0 ? TrimDir(candidates[0]) : TrimDir(AppContext.BaseDirectory);
+    }
+
+    private static bool LooksLikeAppInstallDirectory(string directory) =>
+        File.Exists(Path.Combine(directory, "ffmpeg", "ffmpeg.exe")) ||
+        File.Exists(Path.Combine(directory, "tools", "yt-dlp.exe")) ||
+        File.Exists(Path.Combine(directory, "VideoDownloader.exe"));
+
+    private static bool IsSingleFileExtractDirectory(string directory)
+    {
+        var normalized = directory.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+        var marker = Path.DirectorySeparatorChar + ".net" + Path.DirectorySeparatorChar;
+        return normalized.Contains(marker, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string TrimDir(string directory) =>
+        directory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 }
