@@ -4,6 +4,7 @@ using VideoDownloader.Infrastructure;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Subtitles;
 using VideoDownloader.UI.Localization;
+using VideoDownloader.UI.Subtitles;
 using VideoDownloader.UI.ViewModels;
 
 namespace VideoDownloader.UI;
@@ -42,6 +43,8 @@ public static class AppServiceComposition
             services.AddTransient<MainViewModel>();
         }
 
-        return services.BuildServiceProvider();
+        var provider = services.BuildServiceProvider();
+        SubtitleWebViewBootstrapper.Configure(provider);
+        return provider;
     }
 }
