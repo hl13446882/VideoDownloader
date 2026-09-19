@@ -6,7 +6,7 @@ public sealed class SubtitleOptions
 {
     public bool Enabled { get; set; } = true;
     public SubtitleMode Mode { get; set; } = SubtitleMode.Chinese;
-    public int PreloadAheadSeconds { get; set; } = 30;
+    public int PreloadAheadSeconds { get; set; } = 45;
     public string TranslationProvider { get; set; } = "local";
     public string LocalTranslationEndpoint { get; set; } = "http://127.0.0.1:1234/v1/chat/completions";
     public string LocalTranslationModel { get; set; } = "local-model";
