@@ -26,6 +26,8 @@ public sealed class ProbeMethodStatsStore : IProbeMethodStats
     private readonly ConcurrentDictionary<string, string> _lastWin = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Counter> _counters = new(StringComparer.OrdinalIgnoreCase);
     private readonly string _ledgerPath;
+    private int _persistScheduled;
+    private bool _persistDirty;
 
     public ProbeMethodStatsStore(ILogger<ProbeMethodStatsStore> logger)
     {
@@ -55,8 +57,11 @@ public sealed class ProbeMethodStatsStore : IProbeMethodStats
                 c.Successes++;
                 _lastWin[detectorId] = method;
             }
-            PersistUnlocked();
+            _persistDirty = true;
         }
+        // Disk flush is deferred: YouTube ResolveAsync may Record many times between yt-dlp
+        // attempts; blocking WriteAllText on each failure was pure wait on the hot path.
+        RequestPersist();
         _logger.LogInformation(
             "ProbeMethodStats detector={Detector} method={Method} success={Success} rate={Rate:P0} ({Ok}/{All})",
             detectorId, method, success, SuccessRate(detectorId, method), Successes(detectorId, method), Attempts(detectorId, method));
@@ -358,6 +363,53 @@ public sealed class ProbeMethodStatsStore : IProbeMethodStats
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to persist probe-method-stats ledger");
+        }
+    }
+
+    private void RequestPersist()
+    {
+        if (Interlocked.CompareExchange(ref _persistScheduled, 1, 0) != 0)
+            return;
+        _ = FlushPersistAsync();
+    }
+
+    private async Task FlushPersistAsync()
+    {
+        try
+        {
+            // Coalesce rapid Record calls (YouTube multi-client / cookie retries).
+            await Task.Delay(250).ConfigureAwait(false);
+            while (true)
+            {
+                lock (_gate)
+                {
+                    if (!_persistDirty)
+                        break;
+                    _persistDirty = false;
+                    PersistUnlocked();
+                }
+
+                // Another Record may have dirtied during WriteAllText — flush once more without
+                // another 250ms delay so we do not leave durable state behind.
+                lock (_gate)
+                {
+                    if (!_persistDirty)
+                        break;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Deferred probe-method-stats persist failed");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _persistScheduled, 0);
+            lock (_gate)
+            {
+                if (_persistDirty)
+                    RequestPersist();
+            }
         }
     }
 

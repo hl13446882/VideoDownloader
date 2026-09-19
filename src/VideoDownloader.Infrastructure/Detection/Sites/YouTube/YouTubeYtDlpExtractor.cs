@@ -13,6 +13,9 @@ namespace VideoDownloader.Infrastructure.Detection.Sites.YouTube;
 
 public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
 {
+    private static readonly System.Text.UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
+    private static int _ytDlpWarmStarted;
+
     private readonly AppOptions _options;
     private readonly ILogger<YouTubeYtDlpExtractor> _logger;
     private readonly IProbeMethodStats _probeStats;
@@ -80,6 +83,7 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
         try
         {
             var path = PathExpander.Expand(_options.ExternalResolvers.YtDlpPath);
+            EnsureYtDlpWarmed(path);
             var resolveUrl = CanonicalizePageUrl(pageUrl);
             // Use cookies already on the request context (download 403 recovery attaches live WebView cookies).
             // CaptureCookies/UseBrowserCookies only gates whether the browser auto-harvests into context.
@@ -224,7 +228,7 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
 
         psi.ArgumentList.Add(resolveUrl);
 
-        _logger.LogInformation(
+        _logger.LogDebug(
             "yt-dlp resolver probing {SiteId}: {Url} ({Args})",
             siteId,
             SanitizedLogger.SanitizeUrl(resolveUrl),
@@ -237,47 +241,37 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
             return [];
         }
 
-        Diagnostics.HangProbe.Mark("ytdlp.process.start", $"pid={process.Id} url={SanitizedLogger.SanitizeUrl(resolveUrl)}");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
         using var registration = timeout.Token.Register(() =>
         {
-            Diagnostics.HangProbe.Mark("ytdlp.kill", $"pid={process.Id}");
             try { process.Kill(entireProcessTree: true); }
             catch (InvalidOperationException) { }
             catch (System.ComponentModel.Win32Exception) { }
         });
-        var outputTask = process.StandardOutput.ReadToEndAsync();
-        var errorTask = process.StandardError.ReadToEndAsync();
-        try
-        {
-            Diagnostics.HangProbe.Mark("ytdlp.WaitForExit.begin", $"pid={process.Id}");
-            await process.WaitForExitAsync(timeout.Token);
-            Diagnostics.HangProbe.Mark("ytdlp.WaitForExit.end", $"pid={process.Id} code={process.ExitCode}");
-        }
-        catch (OperationCanceledException)
-        {
-            Diagnostics.HangProbe.Mark("ytdlp.WaitForExit.canceled", $"pid={process.Id}");
-            try { process.Kill(entireProcessTree: true); } catch { /* ignore */ }
-            LastError = "yt-dlp 单次解析超时（30 秒）";
-            return [];
-        }
-        Diagnostics.HangProbe.Mark("ytdlp.ReadToEnd.begin", $"pid={process.Id}");
+
+        // Drain pipes concurrently with WaitForExit to avoid pipe-full stalls and
+        // to finish as soon as the process ends (no serial WaitAsync after exit).
+        var outputTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
+        var errorTask = process.StandardError.ReadToEndAsync(timeout.Token);
         string output;
         string error;
         try
         {
-            output = await outputTask.WaitAsync(TimeSpan.FromSeconds(10));
-            error = await errorTask.WaitAsync(TimeSpan.FromSeconds(5));
+            await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+            var streams = await Task.WhenAll(outputTask, errorTask).ConfigureAwait(false);
+            output = streams[0];
+            error = streams[1];
         }
-        catch (TimeoutException)
+        catch (OperationCanceledException)
         {
-            Diagnostics.HangProbe.Mark("ytdlp.ReadToEnd.TIMEOUT", $"pid={process.Id}");
-            LastError = "yt-dlp 输出读取超时";
             try { process.Kill(entireProcessTree: true); } catch { /* ignore */ }
+            // Best-effort drain so we do not leave orphaned reader tasks.
+            try { await Task.WhenAny(Task.WhenAll(outputTask, errorTask), Task.Delay(200)); } catch { /* ignore */ }
+            LastError = "yt-dlp 单次解析超时（30 秒）";
             return [];
         }
-        Diagnostics.HangProbe.Mark("ytdlp.ReadToEnd.end", $"outLen={output.Length} errLen={error.Length}");
+
         ct.ThrowIfCancellationRequested();
         if (timeout.IsCancellationRequested)
         {
@@ -932,19 +926,12 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
             return null;
 
         var path = Path.Combine(Path.GetTempPath(), $"vd-yt-dlp-{Guid.NewGuid():N}.cookies.txt");
-        await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
-        // yt-dlp rejects UTF-8 BOM and malformed Netscape rows.
-        await using var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-        await writer.WriteLineAsync("# Netscape HTTP Cookie File");
-        await writer.WriteLineAsync("# This file was generated by VideoDownloader. Do not edit.");
+        var sb = new System.Text.StringBuilder(Math.Max(256, matching.Count * 96));
+        sb.AppendLine("# Netscape HTTP Cookie File");
+        sb.AppendLine("# This file was generated by VideoDownloader. Do not edit.");
         foreach (var cookie in matching)
         {
             var domain = string.IsNullOrWhiteSpace(cookie.Domain) ? pageUrl.Host : cookie.Domain.Trim();
-            if (!domain.StartsWith('.') && !domain.Equals(pageUrl.Host, StringComparison.OrdinalIgnoreCase))
-            {
-                // Host-only cookies stay as-is; domain cookies need a leading dot for subdomains.
-            }
-
             var includeSubdomains = domain.StartsWith('.') ? "TRUE" : "FALSE";
             var pathValue = string.IsNullOrWhiteSpace(cookie.Path) ? "/" : cookie.Path.Trim();
             var secure = cookie.Secure ? "TRUE" : "FALSE";
@@ -961,12 +948,17 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
             if (cookie.HttpOnly && !domain.StartsWith("#HttpOnly_", StringComparison.OrdinalIgnoreCase))
                 domain = "#HttpOnly_" + domain;
 
-            await writer.WriteLineAsync(
-                $"{domain}\t{includeSubdomains}\t{pathValue}\t{secure}\t{expires}\t{name}\t{value}".AsMemory(),
-                ct);
+            sb.Append(domain).Append('\t')
+                .Append(includeSubdomains).Append('\t')
+                .Append(pathValue).Append('\t')
+                .Append(secure).Append('\t')
+                .Append(expires).Append('\t')
+                .Append(name).Append('\t')
+                .Append(value).Append('\n');
         }
 
-        await writer.FlushAsync(ct);
+        // Single buffered write — avoids per-cookie async I/O on large Google cookie jars.
+        await File.WriteAllTextAsync(path, sb.ToString(), Utf8NoBom, ct).ConfigureAwait(false);
         return path;
     }
 
@@ -1056,7 +1048,10 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
         {
             var path = PathExpander.Expand(_options.ExternalResolvers.YtDlpPath);
             if (File.Exists(path))
+            {
+                EnsureYtDlpWarmed(path);
                 return true;
+            }
 
             if (!path.Contains('\\') && !path.Contains('/'))
             {
@@ -1078,5 +1073,41 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Touch yt-dlp once in the background so the first real -J probe does not pay cold
+    /// filesystem / AV scan latency. Does not participate in probe results.
+    /// </summary>
+    private static void EnsureYtDlpWarmed(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || Interlocked.Exchange(ref _ytDlpWarmStarted, 1) != 0)
+            return;
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                using var process = Process.Start(new ProcessStartInfo
+                {
+                    FileName = path,
+                    ArgumentList = { "--version" },
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                });
+                if (process is null)
+                    return;
+                if (!process.WaitForExit(8000))
+                {
+                    try { process.Kill(entireProcessTree: true); } catch { /* ignore */ }
+                }
+            }
+            catch
+            {
+                // Warm-up is best-effort.
+            }
+        });
     }
 }

@@ -158,7 +158,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         Diagnostics.HangProbe.Mark("youtube.ytdlp.begin", $"{resolveUrl.AbsoluteUri} cookies={enriched.Cookies.Count}");
         try
         {
-            var videos = await _ytdlp.ResolveAsync(resolveUrl, enriched, ct);
+            var videos = await _ytdlp.ResolveAsync(resolveUrl, enriched, ct).ConfigureAwait(false);
             Diagnostics.HangProbe.Mark("youtube.ytdlp.end", $"count={videos.Count}");
             lock (_gate)
             {
