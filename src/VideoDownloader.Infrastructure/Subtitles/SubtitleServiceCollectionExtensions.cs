@@ -16,10 +16,6 @@ public static class SubtitleServiceCollectionExtensions
         services.AddSingleton<ISpeechRecognizer, WhisperSpeechRecognizer>();
         services.AddSingleton<IMediaAudioDecoder, FfmpegMediaAudioDecoder>();
 
-        // Timeline/pipeline are transient: each WebView/tab owns an isolated subtitle session.
-        services.AddTransient<ISubtitleTimeline, SubtitleTimeline>();
-        services.AddTransient<ISubtitlePipeline, SubtitlePipeline>();
-
         services.AddHttpClient("subtitle-local-translation", client =>
         {
             client.Timeout = TimeSpan.FromSeconds(25);
@@ -32,8 +28,13 @@ public static class SubtitleServiceCollectionExtensions
         services.AddSingleton(sp => new LocalLlmTranslator(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient("subtitle-local-translation"),
             sp.GetRequiredService<LocalLlmTranslatorOptions>()));
+        services.AddSingleton<ISubtitleTranslator>(sp => sp.GetRequiredService<LocalLlmTranslator>());
         services.AddSingleton<CloudTranslatorStub>();
         services.AddSingleton<TranslationRouter>();
+
+        // Timeline/pipeline are transient: each WebView/tab owns an isolated subtitle session.
+        services.AddTransient<ISubtitleTimeline, SubtitleTimeline>();
+        services.AddTransient<ISubtitlePipeline, SubtitlePipeline>();
 
         return services;
     }
