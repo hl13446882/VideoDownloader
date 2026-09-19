@@ -91,12 +91,14 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
         await _translationGate.WaitAsync(linked.Token).ConfigureAwait(false);
         try
         {
+            if (!string.Equals(sessionId, ActiveSessionId, StringComparison.Ordinal))
+                return;
+
             var target = mode == SubtitleMode.Chinese ? "zh" : "en";
+            var pending = new List<SubtitleSegment>();
             foreach (var segment in _timeline.Snapshot().Where(x => x.End > start && x.Start < end))
             {
                 linked.Token.ThrowIfCancellationRequested();
-                if (!string.Equals(sessionId, ActiveSessionId, StringComparison.Ordinal))
-                    return;
                 if (IsAlreadyReady(segment, mode) || IsSameLanguage(segment.SourceLanguage, target))
                 {
                     segment.State = SubtitleSegmentState.Ready;
@@ -104,26 +106,54 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
                 }
 
                 segment.State = SubtitleSegmentState.Translating;
-                try
+                pending.Add(segment);
+            }
+
+            if (pending.Count == 0)
+                return;
+
+            try
+            {
+                var requests = pending
+                    .Select(segment => new TranslationRequest(
+                        segment.OriginalText,
+                        segment.SourceLanguage,
+                        target))
+                    .ToArray();
+                var results = await _translator.TranslateBatchAsync(requests, linked.Token)
+                    .ConfigureAwait(false);
+
+                if (results.Count != pending.Count)
+                    throw new InvalidOperationException("Subtitle translation batch size mismatch.");
+                if (!string.Equals(sessionId, ActiveSessionId, StringComparison.Ordinal))
+                    return;
+
+                for (var i = 0; i < pending.Count; i++)
                 {
-                    var result = await _translator.TranslateAsync(
-                        new TranslationRequest(segment.OriginalText, segment.SourceLanguage, target),
-                        linked.Token).ConfigureAwait(false);
+                    var segment = pending[i];
+                    var text = results[i].Text?.Trim();
+                    if (string.IsNullOrWhiteSpace(text))
+                    {
+                        segment.State = SubtitleSegmentState.Failed;
+                        continue;
+                    }
+
                     if (mode == SubtitleMode.Chinese)
-                        segment.ChineseText = result.Text;
+                        segment.ChineseText = text;
                     else
-                        segment.EnglishText = result.Text;
+                        segment.EnglishText = text;
                     segment.State = SubtitleSegmentState.Ready;
                 }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch
-                {
-                    // Translation is optional. Display falls back to original text.
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch
+            {
+                // Translation is optional. All failed target segments still display OriginalText.
+                foreach (var segment in pending)
                     segment.State = SubtitleSegmentState.Failed;
-                }
             }
         }
         finally
