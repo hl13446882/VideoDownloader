@@ -6,6 +6,7 @@ using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.DependencyInjection;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Core.Subtitles;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Logging;
 using VideoDownloader.Infrastructure.Security;
@@ -22,41 +23,41 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly LocalizationService _loc;
     private readonly IServiceProvider _services;
 
-    [ObservableProperty]
-    private string _savePath;
+    [ObservableProperty] private string _savePath;
+    [ObservableProperty] private int _maxConcurrent;
+    [ObservableProperty] private string _retryCountText;
+    [ObservableProperty] private string _failedRetryIntervalText;
+    [ObservableProperty] private bool _autoRecover;
+    [ObservableProperty] private bool _loggingEnabled;
+    [ObservableProperty] private string _logLevel;
+    [ObservableProperty] private string _statusMessage = string.Empty;
+    [ObservableProperty] private bool _checkUpdateEnabled = true;
+    [ObservableProperty] private bool _migrateEnabled = true;
 
-    [ObservableProperty]
-    private int _maxConcurrent;
-
-    [ObservableProperty]
-    private string _retryCountText;
-
-    [ObservableProperty]
-    private string _failedRetryIntervalText;
-
-    [ObservableProperty]
-    private bool _autoRecover;
-
-    [ObservableProperty]
-    private bool _loggingEnabled;
-
-    [ObservableProperty]
-    private string _logLevel;
-
-    [ObservableProperty]
-    private string _statusMessage = string.Empty;
-
-    [ObservableProperty]
-    private bool _checkUpdateEnabled = true;
-
-    [ObservableProperty]
-    private bool _migrateEnabled = true;
+    [ObservableProperty] private bool _subtitleEnabled;
+    [ObservableProperty] private SubtitleMode _subtitleMode;
+    [ObservableProperty] private int _subtitlePreloadAheadSeconds;
+    [ObservableProperty] private string _subtitleFontFamily;
+    [ObservableProperty] private int _subtitleFontSize;
+    [ObservableProperty] private bool _subtitleBold;
+    [ObservableProperty] private string _subtitleTextColor;
+    [ObservableProperty] private string _subtitleOutlineColor;
+    [ObservableProperty] private int _subtitleOutlineSize;
+    [ObservableProperty] private string _subtitleBackgroundColor;
+    [ObservableProperty] private double _subtitleBackgroundOpacity;
+    [ObservableProperty] private int _subtitleBottomOffsetPx;
+    [ObservableProperty] private int _subtitleMaxLines;
+    [ObservableProperty] private int _subtitleMaxWidthPercent;
+    [ObservableProperty] private int _subtitleOffsetMs;
+    [ObservableProperty] private string _subtitleWhisperModelPath;
+    [ObservableProperty] private string _subtitleLocalTranslationEndpoint;
+    [ObservableProperty] private string _subtitleLocalTranslationModel;
 
     public LocalizationService L => _loc;
-
     public string AppVersionText => "V" + AppVersionInfo.SemVer;
-
     public IReadOnlyList<int> ConcurrentOptions { get; } = [1, 2, 3, 4, 5];
+    public IReadOnlyList<SubtitleMode> SubtitleModeOptions { get; } =
+        [SubtitleMode.Original, SubtitleMode.Chinese, SubtitleMode.English];
 
     /// <summary>Raised after a successful migrate so the main window can refresh the queue.</summary>
     public event EventHandler? DownloadsMigrated;
@@ -80,6 +81,27 @@ public sealed partial class SettingsViewModel : ObservableObject
         _autoRecover = options.Download.AutoRecoverDownloads;
         _loggingEnabled = options.Logging.Enabled;
         _logLevel = options.Logging.MinimumLevel;
+
+        var subtitles = options.Subtitles;
+        _subtitleEnabled = subtitles.Enabled;
+        _subtitleMode = subtitles.Mode;
+        _subtitlePreloadAheadSeconds = subtitles.PreloadAheadSeconds;
+        _subtitleFontFamily = subtitles.FontFamily;
+        _subtitleFontSize = subtitles.FontSize;
+        _subtitleBold = subtitles.Bold;
+        _subtitleTextColor = subtitles.TextColor;
+        _subtitleOutlineColor = subtitles.OutlineColor;
+        _subtitleOutlineSize = subtitles.OutlineSize;
+        _subtitleBackgroundColor = subtitles.BackgroundColor;
+        _subtitleBackgroundOpacity = subtitles.BackgroundOpacity;
+        _subtitleBottomOffsetPx = subtitles.BottomOffsetPx;
+        _subtitleMaxLines = subtitles.MaxLines;
+        _subtitleMaxWidthPercent = subtitles.MaxWidthPercent;
+        _subtitleOffsetMs = subtitles.SubtitleOffsetMs;
+        _subtitleWhisperModelPath = subtitles.WhisperModelPath;
+        _subtitleLocalTranslationEndpoint = subtitles.LocalTranslationEndpoint;
+        _subtitleLocalTranslationModel = subtitles.LocalTranslationModel;
+
         _loc.LanguageChanged += (_, _) =>
         {
             OnPropertyChanged(nameof(L));
@@ -95,7 +117,6 @@ public sealed partial class SettingsViewModel : ObservableObject
             StatusMessage = error;
             return;
         }
-
         StatusMessage = _loc.T("settings.saved");
     }
 
@@ -157,11 +178,7 @@ public sealed partial class SettingsViewModel : ObservableObject
                 return;
             }
 
-            StatusMessage = _loc.Format(
-                "settings.migrateDone",
-                result.Moved,
-                result.Skipped,
-                result.Failed);
+            StatusMessage = _loc.Format("settings.migrateDone", result.Moved, result.Skipped, result.Failed);
             if (result.Moved > 0)
                 DownloadsMigrated?.Invoke(this, EventArgs.Empty);
         }
@@ -183,16 +200,20 @@ public sealed partial class SettingsViewModel : ObservableObject
             error = _loc.T("settings.invalidPath");
             return false;
         }
-
         if (!int.TryParse(RetryCountText, out var retryCount))
         {
             error = _loc.T("settings.invalidRetry");
             return false;
         }
-
         if (!int.TryParse(FailedRetryIntervalText, out var failedRetryInterval))
         {
             error = _loc.T("settings.invalidFailedRetryInterval");
+            return false;
+        }
+        if (!Uri.TryCreate(SubtitleLocalTranslationEndpoint, UriKind.Absolute, out var localEndpoint) ||
+            !localEndpoint.IsLoopback)
+        {
+            error = "本地翻译地址必须是 127.0.0.1/localhost。";
             return false;
         }
 
@@ -205,9 +226,42 @@ public sealed partial class SettingsViewModel : ObservableObject
         _options.Logging.MinimumLevel = string.IsNullOrWhiteSpace(LogLevel) ? "Information" : LogLevel.Trim();
         _options.Ui.Language = _loc.LanguageCode;
 
+        var subtitles = _options.Subtitles;
+        subtitles.Enabled = SubtitleEnabled;
+        subtitles.Mode = SubtitleMode;
+        subtitles.PreloadAheadSeconds = Math.Clamp(SubtitlePreloadAheadSeconds, 10, 90);
+        subtitles.TranslationProvider = "local"; // Cloud entry is reserved but not implemented in this phase.
+        subtitles.FontFamily = string.IsNullOrWhiteSpace(SubtitleFontFamily) ? "Microsoft YaHei" : SubtitleFontFamily.Trim();
+        subtitles.FontSize = Math.Clamp(SubtitleFontSize, 10, 96);
+        subtitles.Bold = SubtitleBold;
+        subtitles.TextColor = NormalizeColor(SubtitleTextColor, "#FFFFFF");
+        subtitles.OutlineColor = NormalizeColor(SubtitleOutlineColor, "#000000");
+        subtitles.OutlineSize = Math.Clamp(SubtitleOutlineSize, 0, 8);
+        subtitles.BackgroundColor = NormalizeColor(SubtitleBackgroundColor, "#000000");
+        subtitles.BackgroundOpacity = Math.Clamp(SubtitleBackgroundOpacity, 0, 1);
+        subtitles.BottomOffsetPx = Math.Clamp(SubtitleBottomOffsetPx, 0, 1000);
+        subtitles.MaxLines = Math.Clamp(SubtitleMaxLines, 1, 4);
+        subtitles.MaxWidthPercent = Math.Clamp(SubtitleMaxWidthPercent, 20, 100);
+        subtitles.SubtitleOffsetMs = Math.Clamp(SubtitleOffsetMs, -5000, 5000);
+        subtitles.WhisperModelPath = SubtitleWhisperModelPath.Trim();
+        subtitles.LocalTranslationEndpoint = localEndpoint.AbsoluteUri;
+        subtitles.LocalTranslationModel = string.IsNullOrWhiteSpace(SubtitleLocalTranslationModel)
+            ? "local-model"
+            : SubtitleLocalTranslationModel.Trim();
+
         _store.Save(_options);
         _appLog.ApplyFromOptions();
         return true;
+    }
+
+    private static string NormalizeColor(string? value, string fallback)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return fallback;
+        var text = value.Trim();
+        if (text.Length == 7 && text[0] == '#' && text.Skip(1).All(Uri.IsHexDigit))
+            return text.ToUpperInvariant();
+        return fallback;
     }
 
     private static bool IsUnderRoot(string filePath, string fullRoot)
@@ -276,6 +330,5 @@ public sealed partial class SettingsViewModel : ObservableObject
         CheckUpdateEnabled = false;
         StatusMessage = _loc.T("update.checking");
         ClientUpdateCoordinator.BeginManualCheck(_services);
-        // Progress continues on the main window even if this Settings dialog closes.
     }
 }
