@@ -5,9 +5,12 @@ using Whisper.net;
 
 namespace VideoDownloader.Infrastructure.Subtitles.Speech;
 
-public sealed class WhisperSpeechRecognizer : ISpeechRecognizer
+public sealed class WhisperSpeechRecognizer : ISpeechRecognizer, IDisposable
 {
     private readonly WhisperSpeechRecognizerOptions _options;
+    private readonly SemaphoreSlim _gate = new(1, 1);
+    private WhisperFactory? _factory;
+    private string? _loadedModelPath;
 
     public WhisperSpeechRecognizer(WhisperSpeechRecognizerOptions options)
     {
@@ -24,47 +27,66 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer
         if (audio.Pcm16Mono16Khz.IsEmpty)
             return Array.Empty<SubtitleSegment>();
 
-        var modelPath = PathExpander.Expand(_options.ModelPath);
-        if (!File.Exists(modelPath))
-            throw new FileNotFoundException(
-                "Whisper model is not installed. Configure or install the local speech model first.",
-                modelPath);
-
-        var samples = ConvertPcm16ToFloat(audio.Pcm16Mono16Khz.Span);
-        using var factory = WhisperFactory.FromPath(modelPath);
-        using var processor = factory.CreateBuilder()
-            .WithLanguage(string.IsNullOrWhiteSpace(_options.Language) ? "auto" : _options.Language)
-            .Build();
-
-        var detectedLanguage = !string.IsNullOrWhiteSpace(context.LanguageHint) &&
-                               !string.Equals(context.LanguageHint, "auto", StringComparison.OrdinalIgnoreCase)
-            ? context.LanguageHint!
-            : processor.DetectLanguage(samples);
-        if (string.IsNullOrWhiteSpace(detectedLanguage))
-            detectedLanguage = "auto";
-
-        var segments = new List<SubtitleSegment>();
-        await foreach (var result in processor.ProcessAsync(samples, cancellationToken))
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            var text = result.Text?.Trim();
-            if (string.IsNullOrWhiteSpace(text))
-                continue;
+            var modelPath = PathExpander.Expand(_options.ModelPath);
+            if (!File.Exists(modelPath))
+                throw new FileNotFoundException(
+                    "Whisper model is not installed. Configure or install the local speech model first.",
+                    modelPath);
 
-            var absoluteStart = audio.MediaStart + result.Start;
-            var absoluteEnd = audio.MediaStart + result.End;
-            segments.Add(new SubtitleSegment
+            EnsureFactory(modelPath);
+            var samples = ConvertPcm16ToFloat(audio.Pcm16Mono16Khz.Span);
+            using var processor = _factory!.CreateBuilder()
+                .WithLanguage(string.IsNullOrWhiteSpace(_options.Language) ? "auto" : _options.Language)
+                .Build();
+
+            var detectedLanguage = !string.IsNullOrWhiteSpace(context.LanguageHint) &&
+                                   !string.Equals(context.LanguageHint, "auto", StringComparison.OrdinalIgnoreCase)
+                ? context.LanguageHint!
+                : processor.DetectLanguage(samples);
+            if (string.IsNullOrWhiteSpace(detectedLanguage))
+                detectedLanguage = "auto";
+
+            var segments = new List<SubtitleSegment>();
+            await foreach (var result in processor.ProcessAsync(samples, cancellationToken))
             {
-                // Stable across windows and re-recognition of the same absolute segment start.
-                Id = absoluteStart.Ticks,
-                Start = absoluteStart,
-                End = absoluteEnd,
-                SourceLanguage = detectedLanguage,
-                OriginalText = text,
-                State = SubtitleSegmentState.Recognized
-            });
-        }
+                var text = result.Text?.Trim();
+                if (string.IsNullOrWhiteSpace(text))
+                    continue;
 
-        return segments;
+                var absoluteStart = audio.MediaStart + result.Start;
+                var absoluteEnd = audio.MediaStart + result.End;
+                segments.Add(new SubtitleSegment
+                {
+                    // Stable across windows and re-recognition of the same absolute segment start.
+                    Id = absoluteStart.Ticks,
+                    Start = absoluteStart,
+                    End = absoluteEnd,
+                    SourceLanguage = detectedLanguage,
+                    OriginalText = text,
+                    State = SubtitleSegmentState.Recognized
+                });
+            }
+
+            return segments;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private void EnsureFactory(string modelPath)
+    {
+        if (_factory is not null &&
+            string.Equals(_loadedModelPath, modelPath, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        _factory?.Dispose();
+        _factory = WhisperFactory.FromPath(modelPath);
+        _loadedModelPath = modelPath;
     }
 
     private static float[] ConvertPcm16ToFloat(ReadOnlySpan<byte> pcm)
@@ -79,5 +101,13 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer
             samples[i] = value / 32768f;
         }
         return samples;
+    }
+
+    public void Dispose()
+    {
+        _factory?.Dispose();
+        _factory = null;
+        _loadedModelPath = null;
+        _gate.Dispose();
     }
 }
