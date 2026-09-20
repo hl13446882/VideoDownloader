@@ -11,11 +11,8 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer, IDisposable
     private readonly WhisperSpeechRecognizerOptions _options;
     private readonly ILogger<WhisperSpeechRecognizer> _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private readonly object _langSync = new();
     private WhisperFactory? _factory;
     private string? _loadedModelPath;
-    private string? _languageCacheSessionId;
-    private string? _cachedLanguage;
 
     public WhisperSpeechRecognizer(
         WhisperSpeechRecognizerOptions options,
@@ -49,26 +46,16 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer, IDisposable
 
             EnsureFactory(modelPath);
 
-            var configured = string.IsNullOrWhiteSpace(_options.Language) ||
-                             string.Equals(_options.Language, "auto", StringComparison.OrdinalIgnoreCase)
-                ? null
-                : _options.Language.Trim();
-            var hint = !string.IsNullOrWhiteSpace(context.LanguageHint) &&
-                       !string.Equals(context.LanguageHint, "auto", StringComparison.OrdinalIgnoreCase)
+            // Prefer an explicit language only when configured / hinted. Otherwise detect per window
+            // so mixed-language media is not stuck on the first window's language.
+            var language = !string.IsNullOrWhiteSpace(context.LanguageHint) &&
+                           !string.Equals(context.LanguageHint, "auto", StringComparison.OrdinalIgnoreCase)
                 ? context.LanguageHint!.Trim()
                 : null;
-
-            string? language;
-            lock (_langSync)
-            {
-                if (!string.Equals(_languageCacheSessionId, context.SessionId, StringComparison.Ordinal))
-                {
-                    _languageCacheSessionId = context.SessionId;
-                    _cachedLanguage = null;
-                }
-
-                language = configured ?? hint ?? _cachedLanguage;
-            }
+            if (language is null &&
+                !string.IsNullOrWhiteSpace(_options.Language) &&
+                !string.Equals(_options.Language, "auto", StringComparison.OrdinalIgnoreCase))
+                language = _options.Language.Trim();
 
             var samples = ConvertPcm16ToFloat(audio.Pcm16Mono16Khz.Span);
             var builder = _factory!.CreateBuilder()
@@ -76,7 +63,6 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer, IDisposable
                 .WithNoSpeechThreshold(0.35f)
                 .WithProbabilities();
 
-            // Pin language after the first window — auto-detect every chunk nearly doubles cost.
             if (string.IsNullOrWhiteSpace(language))
                 builder.WithLanguageDetection();
             else
@@ -96,17 +82,8 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer, IDisposable
                 if (text is "." or "。" or "?" or "？" or "!" or "！")
                     continue;
 
-                if (string.IsNullOrWhiteSpace(language) &&
-                    !string.IsNullOrWhiteSpace(result.Language))
-                {
+                if (!string.IsNullOrWhiteSpace(result.Language))
                     detectedLanguage = result.Language.Trim();
-                    lock (_langSync)
-                    {
-                        if (string.Equals(_languageCacheSessionId, context.SessionId, StringComparison.Ordinal) &&
-                            string.IsNullOrWhiteSpace(_cachedLanguage))
-                            _cachedLanguage = detectedLanguage;
-                    }
-                }
 
                 var absoluteStart = audio.MediaStart + result.Start;
                 var absoluteEnd = audio.MediaStart + result.End;
@@ -123,14 +100,6 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer, IDisposable
                     OriginalText = text,
                     State = SubtitleSegmentState.Recognized
                 });
-            }
-
-            if (string.IsNullOrWhiteSpace(language) &&
-                string.Equals(detectedLanguage, "auto", StringComparison.OrdinalIgnoreCase) &&
-                segments.Count > 0)
-            {
-                // Language stayed unknown; still cache "auto" avoidance by keeping detection only once
-                // if the processor did not expose a language code.
             }
 
             _logger.LogInformation(
