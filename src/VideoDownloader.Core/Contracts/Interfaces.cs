@@ -103,6 +103,16 @@ public interface IDownloadEngine
         string? videoKind = null,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// Persists whether sequential subtitle recognition finished for a completed library job.
+    /// Optionally refreshes <see cref="DownloadJob.DurationSec"/> when probed.
+    /// </summary>
+    Task SetSubtitleRecognizedAsync(
+        Guid jobId,
+        bool recognized,
+        double? durationSec = null,
+        CancellationToken ct = default);
+
     Task RecoverOnStartupAsync(CancellationToken ct = default);
 
     /// <summary>

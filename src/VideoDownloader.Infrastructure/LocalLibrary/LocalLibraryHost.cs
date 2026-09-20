@@ -531,7 +531,8 @@ public sealed class LocalLibraryHost : IAsyncDisposable
                 $"/api/thumb/{job.Id:N}",
                 $"/api/stream/{job.Id:N}",
                 $"/play/{job.Id:N}",
-                audioOnly));
+                audioOnly,
+                job.SubtitleRecognized));
         }
 
         return list;
@@ -631,7 +632,8 @@ public sealed class LocalLibraryHost : IAsyncDisposable
         string ThumbUrl,
         string StreamUrl,
         string PlayUrl,
-        bool IsAudioOnly)
+        bool IsAudioOnly,
+        bool SubtitleRecognized)
     {
         public string DownloadedAtText =>
             DownloadedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);

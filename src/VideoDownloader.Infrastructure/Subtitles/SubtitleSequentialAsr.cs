@@ -6,13 +6,14 @@ namespace VideoDownloader.Infrastructure.Subtitles;
 
 /// <summary>
 /// Front-to-back Whisper windows shared by live playback and idle prewarm.
+/// Returns true when recognition reached the end of the media (or EOF).
 /// </summary>
 internal static class SubtitleSequentialAsr
 {
     public static readonly TimeSpan FastWarmupWindow = TimeSpan.FromSeconds(8);
     public static readonly TimeSpan WindowOverlap = TimeSpan.FromSeconds(1.5);
 
-    public static async Task RunAsync(
+    public static async Task<bool> RunAsync(
         string filePath,
         ISubtitlePipeline pipeline,
         IMediaAudioDecoder audioDecoder,
@@ -30,7 +31,7 @@ internal static class SubtitleSequentialAsr
         while (!cancellationToken.IsCancellationRequested)
         {
             if (shouldContinue is not null && !shouldContinue())
-                return;
+                return false;
 
             var total = liveDuration?.Invoke() ?? duration;
             var progress = pipeline.GetSequentialCoveredUntil();
@@ -40,7 +41,7 @@ internal static class SubtitleSequentialAsr
                     "Subtitle sequential ASR complete label={Label} covered={Covered:g}",
                     logLabel,
                     progress);
-                return;
+                return true;
             }
 
             var start = progress;
@@ -52,11 +53,11 @@ internal static class SubtitleSequentialAsr
                 : windowSize;
             var remaining = total is { } t ? t - start : desiredWindow;
             if (remaining <= TimeSpan.Zero)
-                return;
+                return true;
 
             var length = remaining < desiredWindow ? remaining : desiredWindow;
             if (length < TimeSpan.FromSeconds(1))
-                return;
+                return true;
 
             logger.LogInformation(
                 "Subtitle window label={Label} start={Start:g} length={Length:g} progress={Progress:g}",
@@ -72,7 +73,7 @@ internal static class SubtitleSequentialAsr
                 cancellationToken).ConfigureAwait(false);
 
             if (shouldContinue is not null && !shouldContinue())
-                return;
+                return false;
 
             await pipeline.SubmitAudioAsync(audio, cancellationToken).ConfigureAwait(false);
             await pipeline.PrepareTranslationsAsync(mode, audio.MediaStart, audio.MediaEnd, cancellationToken)
@@ -85,8 +86,10 @@ internal static class SubtitleSequentialAsr
                     "Subtitle sequential ASR reached EOF label={Label} covered={Covered:g}",
                     logLabel,
                     pipeline.GetSequentialCoveredUntil());
-                return;
+                return true;
             }
         }
+
+        return false;
     }
 }

@@ -47,5 +47,8 @@ public sealed class DownloadJob
     /// <summary>Last library/queue rename or metadata edit; does not affect download-time sort.</summary>
     public DateTimeOffset? EditedAt { get; set; }
 
+    /// <summary>True when sequential subtitle recognition has finished for this completed file.</summary>
+    public bool SubtitleRecognized { get; set; }
+
     public DateTimeOffset CreatedAt { get; init; }
 }

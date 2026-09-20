@@ -35,6 +35,8 @@ internal static class LocalLibraryPages
   .row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
   .time { color:var(--muted); font-size:12px; line-height:1.2; }
   .author { color:#64748b; font-size:11px; }
+  .author-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .sub-ready { color:#4ade80; font-size:11px; font-weight:600; }
   button.edit { background:transparent; border:0; color:var(--accent); font-size:12px; line-height:1.2; padding:0; cursor:pointer; }
   button.edit:hover { text-decoration:underline; }
   select.kind { background:#0b1220; color:var(--fg); border:1px solid #475569; border-radius:4px; font-size:12px; line-height:1.2; padding:1px 4px; max-width:7.5em; }
@@ -184,7 +186,10 @@ function card(item){
         <button type="button" class="edit" data-edit="${esc(item.id)}">编辑</button>
         <select class="kind" data-kind="${esc(item.id)}" title="视频类型">${kindOptions(item.videoKind)}</select>
       </div>
-      <div class="author">${esc(item.authorDisplay || '作者：未知')}</div>
+      <div class="author-row">
+        <span class="author">${esc(item.authorDisplay || '作者：未知')}</span>
+        ${item.subtitleRecognized ? '<span class="sub-ready">已识别</span>' : ''}
+      </div>
       <div class="name">${esc(item.titleHead)}<span class="meta-sfx">${esc(meta)}${esc(ext)}</span></div>
       <div class="caption">${esc(item.caption)}</div>
     </div>

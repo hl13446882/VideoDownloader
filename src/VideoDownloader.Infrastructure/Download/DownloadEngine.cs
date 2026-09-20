@@ -542,6 +542,41 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         }
     }
 
+    public async Task SetSubtitleRecognizedAsync(
+        Guid jobId,
+        bool recognized,
+        double? durationSec = null,
+        CancellationToken ct = default)
+    {
+        if (!_jobs.TryGetValue(jobId, out var job))
+        {
+            job = await _repository.GetByIdAsync(jobId, ct).ConfigureAwait(false);
+            if (job is null)
+                return;
+            _jobs[jobId] = job;
+        }
+
+        var dirty = false;
+        if (job.SubtitleRecognized != recognized)
+        {
+            job.SubtitleRecognized = recognized;
+            dirty = true;
+        }
+
+        if (durationSec is > 0 &&
+            (job.DurationSec is null || Math.Abs(job.DurationSec.Value - durationSec.Value) > 0.25))
+        {
+            job.DurationSec = durationSec;
+            dirty = true;
+        }
+
+        if (dirty)
+        {
+            job.UpdatedAt = DateTimeOffset.UtcNow;
+            await _repository.SaveAsync(job, ct).ConfigureAwait(false);
+        }
+    }
+
     private static void TryMoveFile(string source, string destination)
     {
         if (string.Equals(source, destination, StringComparison.Ordinal))

@@ -54,6 +54,7 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
         await TryAddColumnAsync(conn, "completed_at", "TEXT NULL");
         await TryAddColumnAsync(conn, "edited_at", "TEXT NULL");
         await TryAddColumnAsync(conn, "author", "TEXT NULL");
+        await TryAddColumnAsync(conn, "subtitle_recognized", "INTEGER NOT NULL DEFAULT 0");
         // One-time backfill: treat updated_at as completion time for already-finished rows.
         await conn.ExecuteAsync("""
             UPDATE download_jobs
@@ -89,14 +90,14 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
                 downloaded_bytes, total_bytes, etag, last_modified, context_version,
                 request_context_meta_json, request_context_secret, page_url, last_error_code,
                 caption, duration_sec, expected_total_bytes, content_prefix_hash,
-                video_kind, completed_at, edited_at, author,
+                video_kind, completed_at, edited_at, author, subtitle_recognized,
                 created_at, updated_at)
             VALUES (
                 @Id, @DisplayName, @SourceUrl, @TargetPath, @MediaFamily, @Status,
                 @DownloadedBytes, @TotalBytes, @ETag, @LastModified, @ContextVersion,
                 @MetaJson, @Secret, @PageUrl, @LastErrorCode,
                 @Caption, @DurationSec, @ExpectedTotalBytes, @ContentPrefixHash,
-                @VideoKind, @CompletedAt, @EditedAt, @Author,
+                @VideoKind, @CompletedAt, @EditedAt, @Author, @SubtitleRecognized,
                 @CreatedAt, @UpdatedAt)
             ON CONFLICT(id) DO UPDATE SET
                 display_name = excluded.display_name,
@@ -121,6 +122,7 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
                 completed_at = excluded.completed_at,
                 edited_at = excluded.edited_at,
                 author = COALESCE(excluded.author, download_jobs.author),
+                subtitle_recognized = excluded.subtitle_recognized,
                 updated_at = excluded.updated_at;
             """;
 
@@ -149,6 +151,7 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
             CompletedAt = job.CompletedAt?.ToString("O"),
             EditedAt = job.EditedAt?.ToString("O"),
             Author = job.Author,
+            SubtitleRecognized = job.SubtitleRecognized ? 1 : 0,
             CreatedAt = job.CreatedAt.ToString("O"),
             UpdatedAt = job.UpdatedAt.ToString("O")
         });
@@ -214,7 +217,8 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
             CreatedAt = DateTimeOffset.Parse(row.created_at),
             UpdatedAt = DateTimeOffset.Parse(row.updated_at),
             CompletedAt = ParseOptionalOffset(row.completed_at),
-            EditedAt = ParseOptionalOffset(row.edited_at)
+            EditedAt = ParseOptionalOffset(row.edited_at),
+            SubtitleRecognized = row.subtitle_recognized != 0
         };
     }
 
@@ -256,6 +260,7 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
         public string? completed_at { get; set; }
         public string? edited_at { get; set; }
         public string? author { get; set; }
+        public int subtitle_recognized { get; set; }
         public string created_at { get; set; } = string.Empty;
         public string updated_at { get; set; } = string.Empty;
     }

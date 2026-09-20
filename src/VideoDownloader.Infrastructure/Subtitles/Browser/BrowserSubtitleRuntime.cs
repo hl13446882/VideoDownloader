@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Subtitles;
 using VideoDownloader.Core.Subtitles.Contracts;
 using VideoDownloader.Infrastructure.Configuration;
@@ -22,6 +23,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     private readonly ISubtitlePipeline _pipeline;
     private readonly IMediaAudioDecoder _audioDecoder;
     private readonly LocalPlaybackMediaSourceResolver _localSourceResolver;
+    private readonly IDownloadEngine _downloadEngine;
     private readonly SubtitleOptions _options;
     private readonly SubtitleAsrActivity _activity;
     private readonly ILogger _logger;
@@ -49,6 +51,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         ISubtitlePipeline pipeline,
         IMediaAudioDecoder audioDecoder,
         LocalPlaybackMediaSourceResolver localSourceResolver,
+        IDownloadEngine downloadEngine,
         SubtitleOptions options,
         SubtitleAsrActivity activity,
         ILogger? logger = null)
@@ -57,6 +60,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _pipeline = pipeline;
         _audioDecoder = audioDecoder;
         _localSourceResolver = localSourceResolver;
+        _downloadEngine = downloadEngine;
         _options = options;
         _activity = activity;
         _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
@@ -136,6 +140,10 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                 _translationRequests.Clear();
 
             await _pipeline.ClearRecognizedAsync(cancellationToken).ConfigureAwait(false);
+            await _downloadEngine.SetSubtitleRecognizedAsync(
+                _localSource.JobId,
+                recognized: false,
+                ct: cancellationToken).ConfigureAwait(false);
             await SetDisplayedAsync(null, cancellationToken).ConfigureAwait(false);
             _logger.LogInformation(
                 "Subtitle clear requested; restarting sequential ASR job={JobId}",
@@ -625,7 +633,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             {
                 try
                 {
-                    await SubtitleSequentialAsr.RunAsync(
+                    var finished = await SubtitleSequentialAsr.RunAsync(
                         filePath,
                         _pipeline,
                         _audioDecoder,
@@ -640,6 +648,21 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                         "play:" + jobId.ToString("N"),
                         token).ConfigureAwait(false);
                     _modelMissingNotified = false;
+                    if (finished)
+                    {
+                        try
+                        {
+                            await _downloadEngine.SetSubtitleRecognizedAsync(
+                                jobId,
+                                recognized: true,
+                                durationSec: (_lastKnownDuration ?? duration)?.TotalSeconds,
+                                token).ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogDebug(ex, "Subtitle recognized flag persist skipped");
+                        }
+                    }
                 }
                 catch (OperationCanceledException)
                 {

@@ -22,6 +22,7 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IDownloadRepository _repository;
+    private readonly IDownloadEngine _engine;
     private readonly ISubtitleCacheStore _cache;
     private readonly IMediaAudioDecoder _audioDecoder;
     private readonly SubtitleOptions _options;
@@ -34,6 +35,7 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
     public SubtitleIdlePrewarmService(
         IServiceScopeFactory scopeFactory,
         IDownloadRepository repository,
+        IDownloadEngine engine,
         ISubtitleCacheStore cache,
         IMediaAudioDecoder audioDecoder,
         SubtitleOptions options,
@@ -42,6 +44,7 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
     {
         _scopeFactory = scopeFactory;
         _repository = repository;
+        _engine = engine;
         _cache = cache;
         _audioDecoder = audioDecoder;
         _options = options;
@@ -156,6 +159,7 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
         var all = await _repository.GetAllAsync(cancellationToken).ConfigureAwait(false);
         return all
             .Where(j => j.Status == DownloadStatus.Completed &&
+                        !j.SubtitleRecognized &&
                         !string.IsNullOrWhiteSpace(j.TargetPath) &&
                         File.Exists(j.TargetPath))
             .OrderByDescending(j => j.CompletedAt ?? j.UpdatedAt)
@@ -170,10 +174,17 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
 
         var snapshot = await _cache.LoadAsync(source.CacheIdentity, cancellationToken).ConfigureAwait(false);
         var covered = GetSequentialCoveredUntil(snapshot.Coverage);
-        var duration = await MediaDurationProbe.ProbeAsync(source.FilePath, cancellationToken)
-            .ConfigureAwait(false);
+        var duration = job.DurationSec is > 0
+            ? TimeSpan.FromSeconds(job.DurationSec.Value)
+            : await MediaDurationProbe.ProbeAsync(source.FilePath, cancellationToken).ConfigureAwait(false);
+
         if (duration is { } total && covered + CoverageCompleteSlack >= total)
         {
+            await _engine.SetSubtitleRecognizedAsync(
+                job.Id,
+                recognized: true,
+                durationSec: total.TotalSeconds,
+                cancellationToken).ConfigureAwait(false);
             _logger.LogDebug(
                 "Subtitle idle prewarm already complete job={JobId} covered={Covered:g}/{Duration:g}",
                 job.Id,
@@ -196,6 +207,11 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
         covered = pipeline.GetSequentialCoveredUntil();
         if (duration is { } total2 && covered + CoverageCompleteSlack >= total2)
         {
+            await _engine.SetSubtitleRecognizedAsync(
+                job.Id,
+                recognized: true,
+                durationSec: total2.TotalSeconds,
+                cancellationToken).ConfigureAwait(false);
             await pipeline.StopSessionAsync(cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -220,7 +236,7 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
                 return;
 
             var windowSize = TimeSpan.FromSeconds(Math.Clamp(_options.PreloadAheadSeconds, 10, 90));
-            await SubtitleSequentialAsr.RunAsync(
+            var finished = await SubtitleSequentialAsr.RunAsync(
                 source.FilePath,
                 pipeline,
                 _audioDecoder,
@@ -233,10 +249,20 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
                 "idle:" + job.Id.ToString("N"),
                 linked.Token).ConfigureAwait(false);
 
+            if (finished)
+            {
+                await _engine.SetSubtitleRecognizedAsync(
+                    job.Id,
+                    recognized: true,
+                    durationSec: duration?.TotalSeconds,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
             _logger.LogInformation(
-                "Subtitle idle prewarm end job={JobId} covered={Covered:g}",
+                "Subtitle idle prewarm end job={JobId} covered={Covered:g} finished={Finished}",
                 job.Id,
-                pipeline.GetSequentialCoveredUntil());
+                pipeline.GetSequentialCoveredUntil(),
+                finished);
         }
         finally
         {

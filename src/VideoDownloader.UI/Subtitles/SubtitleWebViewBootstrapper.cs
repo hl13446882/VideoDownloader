@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
+using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Subtitles.Contracts;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Subtitles;
@@ -95,6 +96,7 @@ public static class SubtitleWebViewBootstrapper
             _services.GetRequiredService<ISubtitlePipeline>(),
             _services.GetRequiredService<IMediaAudioDecoder>(),
             _services.GetRequiredService<LocalPlaybackMediaSourceResolver>(),
+            _services.GetRequiredService<IDownloadEngine>(),
             _services.GetRequiredService<SubtitleOptions>(),
             _services.GetRequiredService<SubtitleAsrActivity>(),
             _services.GetRequiredService<ILoggerFactory>().CreateLogger("BrowserSubtitle"));
