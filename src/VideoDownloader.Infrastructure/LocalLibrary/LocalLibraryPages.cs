@@ -28,6 +28,9 @@ internal static class LocalLibraryPages
   .card { background:var(--card); border-radius:12px; overflow:hidden; border:1px solid #334155; display:flex; flex-direction:column; }
   .cover { display:block; aspect-ratio:16/10; background:#0b1220; cursor:pointer; position:relative; overflow:hidden; }
   .cover img { width:100%; height:100%; object-fit:cover; object-position:center; display:block; }
+  .cover.cover-audio { display:flex; align-items:center; justify-content:center; text-decoration:none;
+    background:linear-gradient(165deg,#1e293b 0%,#0f172a 100%); border-bottom:1px solid #334155; }
+  .cover.cover-audio .audio-label { color:#e2e8f0; font-size:28px; font-weight:700; letter-spacing:.18em; user-select:none; }
   .meta { padding:10px 12px 12px; display:flex; flex-direction:column; gap:4px; min-height:96px; }
   .row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
   .time { color:var(--muted); font-size:12px; line-height:1.2; }
@@ -166,9 +169,14 @@ function kindOptions(selected){
 function card(item){
   const meta = item.metaSuffix || '';
   const ext = item.extension || '';
+  const audio = !!item.isAudioOnly;
+  const coverClass = audio ? 'cover cover-audio' : 'cover';
+  const coverBody = audio
+    ? `<span class="audio-label">音频</span>`
+    : `<img src="${esc(item.thumbUrl)}" alt="" loading="lazy" decoding="async" onerror="this.style.opacity=.25"/>`;
   return `<article class="card" data-id="${esc(item.id)}">
-    <a class="cover" href="${esc(playHref(item))}" title="播放">
-      <img src="${esc(item.thumbUrl)}" alt="" loading="lazy" decoding="async" onerror="this.style.opacity=.25"/>
+    <a class="${coverClass}" href="${esc(playHref(item))}" title="播放">
+      ${coverBody}
     </a>
     <div class="meta">
       <div class="row">

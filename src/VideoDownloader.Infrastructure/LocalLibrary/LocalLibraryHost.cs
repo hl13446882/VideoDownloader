@@ -389,6 +389,12 @@ public sealed class LocalLibraryHost : IAsyncDisposable
             return;
         }
 
+        if (IsAudioOnlyJob(job))
+        {
+            await WriteAudioPlaceholderThumbAsync(ctx);
+            return;
+        }
+
         var thumb = _thumbs.GetPath(id);
         if (!_thumbs.Exists(id))
         {
@@ -407,6 +413,23 @@ public sealed class LocalLibraryHost : IAsyncDisposable
         await using var fs = File.OpenRead(thumb);
         ctx.Response.ContentLength64 = fs.Length;
         await fs.CopyToAsync(ctx.Response.OutputStream);
+    }
+
+    private static async Task WriteAudioPlaceholderThumbAsync(HttpListenerContext ctx)
+    {
+        ctx.Response.Headers["Cache-Control"] = "public, max-age=86400";
+        ctx.Response.ContentType = "image/svg+xml; charset=utf-8";
+        var svg = Encoding.UTF8.GetBytes(
+            "<svg xmlns='http://www.w3.org/2000/svg' width='640' height='400' viewBox='0 0 640 400'>" +
+            "<defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'>" +
+            "<stop offset='0%' stop-color='#1e293b'/><stop offset='100%' stop-color='#0f172a'/>" +
+            "</linearGradient></defs>" +
+            "<rect fill='url(#g)' width='100%' height='100%'/>" +
+            "<text x='50%' y='50%' fill='#e2e8f0' font-size='56' font-weight='700' " +
+            "font-family='Microsoft YaHei,Segoe UI,sans-serif' text-anchor='middle' dy='.35em' " +
+            "letter-spacing='0.18em'>音频</text></svg>");
+        ctx.Response.ContentLength64 = svg.Length;
+        await ctx.Response.OutputStream.WriteAsync(svg);
     }
 
     private async Task WriteStreamAsync(HttpListenerContext ctx, Guid id)
@@ -482,7 +505,9 @@ public sealed class LocalLibraryHost : IAsyncDisposable
             if (string.IsNullOrWhiteSpace(job.TargetPath) || !File.Exists(job.TargetPath))
                 continue;
 
-            _thumbs.EnsureAsyncFireAndForget(job.Id, job.TargetPath);
+            var audioOnly = IsAudioOnlyJob(job);
+            if (!audioOnly)
+                _thumbs.EnsureAsyncFireAndForget(job.Id, job.TargetPath);
             var fileName = Path.GetFileName(job.TargetPath);
             var stem = Path.GetFileNameWithoutExtension(job.TargetPath);
             DownloadFileNameBuilder.TrySplitMetaSuffix(stem, out var titleHead, out var metaSuffix);
@@ -505,10 +530,39 @@ public sealed class LocalLibraryHost : IAsyncDisposable
                 DownloadSiteFolder.Resolve(job.PageUrl),
                 $"/api/thumb/{job.Id:N}",
                 $"/api/stream/{job.Id:N}",
-                $"/play/{job.Id:N}"));
+                $"/play/{job.Id:N}",
+                audioOnly));
         }
 
         return list;
+    }
+
+    private static bool IsAudioOnlyJob(DownloadJob job)
+    {
+        var tracks = job.Variant?.Tracks;
+        if (tracks is { Count: > 0 })
+        {
+            var hasVideo = tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined);
+            if (hasVideo)
+                return false;
+            if (tracks.Any(t => t.Kind == MediaTrackKind.Audio))
+                return true;
+        }
+
+        return IsAudioExtension(job.TargetPath);
+    }
+
+    private static bool IsAudioExtension(string? path)
+    {
+        var ext = Path.GetExtension(path ?? string.Empty);
+        return ext.Equals(".mp3", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".m4a", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".aac", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".flac", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".wav", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".ogg", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".opus", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".wma", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string GuessContentType(string path) =>
@@ -576,7 +630,8 @@ public sealed class LocalLibraryHost : IAsyncDisposable
         string SiteGroup,
         string ThumbUrl,
         string StreamUrl,
-        string PlayUrl)
+        string PlayUrl,
+        bool IsAudioOnly)
     {
         public string DownloadedAtText =>
             DownloadedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
