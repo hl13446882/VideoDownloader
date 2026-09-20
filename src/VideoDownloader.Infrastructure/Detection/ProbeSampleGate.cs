@@ -291,8 +291,8 @@ internal static class ProbeSampleGate
 
         var hint = availability switch
         {
-            MediaAvailabilityKind.VideoDenied => "仅音轨可用（视频访问被拒绝）",
-            MediaAvailabilityKind.AudioOnly => "仅音轨可用",
+            MediaAvailabilityKind.VideoDenied => "仅音轨可用（视频访问被拒绝） / Audio-only (video access denied)",
+            MediaAvailabilityKind.AudioOnly => "仅音轨可用 / Audio-only available",
             _ => video.StatusHint
         };
 

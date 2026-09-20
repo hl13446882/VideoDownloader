@@ -53,7 +53,7 @@ public sealed class SiteAdapterRouter : ISiteAdapterRouter
                     .Select(v => v with
                     {
                         ProbeSource = ProbeSource.GenericFallback,
-                        StatusHint = $"站点适配未命中，已使用通用探测 ({siteResult.SiteId})"
+                        StatusHint = $"站点适配未命中，已使用通用探测 ({siteResult.SiteId}) / Site adapter missed; using generic probe ({siteResult.SiteId})"
                     })
                     .ToList();
             }

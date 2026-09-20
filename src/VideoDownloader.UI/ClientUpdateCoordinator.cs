@@ -159,15 +159,15 @@ internal static class ClientUpdateCoordinator
                 string.IsNullOrWhiteSpace(progress.FilePath) ? "?" : progress.FilePath),
             _ => loc.T("update.checking")
         };
-        ReportStatus(services, text);
+        ReportStatus(services, text, sticky: true);
     }
 
-    private static void ReportStatus(IServiceProvider services, string message)
+    private static void ReportStatus(IServiceProvider services, string message, bool sticky = false)
     {
         void Apply()
         {
             if (Application.Current?.MainWindow?.DataContext is MainViewModel main)
-                main.SetStatus(message);
+                main.SetStatus(message, sticky);
 
             // Mirror onto the settings VM owned by the main window when still open.
             if (Application.Current?.Windows is not null)
@@ -175,7 +175,7 @@ internal static class ClientUpdateCoordinator
                 foreach (Window window in Application.Current.Windows)
                 {
                     if (window is SettingsWindow { DataContext: SettingsViewModel settings })
-                        settings.StatusMessage = message;
+                        settings.SetStatusMessage(message, sticky);
                 }
             }
         }
@@ -232,19 +232,19 @@ internal static class ClientUpdateCoordinator
             return false;
         }
 
-        ApplyAndRestart();
+        ApplyAndRestart(loc);
         return true;
     }
 
-    private static void ApplyAndRestart()
+    private static void ApplyAndRestart(LocalizationService loc)
     {
         var installRoot = UpdateService.InstallRoot;
         var launcher = FindLauncher(installRoot);
         if (launcher is null)
         {
             MessageBox.Show(
-                "找不到启动器，无法自动升级。请手动重启。",
-                "Video Downloader",
+                loc.T("update.launcherMissing"),
+                loc.T("update.promptTitle"),
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
             return;
@@ -285,8 +285,8 @@ internal static class ClientUpdateCoordinator
         catch (Exception ex)
         {
             MessageBox.Show(
-                "无法启动升级程序：" + ex.Message,
-                "Video Downloader",
+                loc.Format("update.launcherStartFailed", ex.Message),
+                loc.T("update.promptTitle"),
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
             return;

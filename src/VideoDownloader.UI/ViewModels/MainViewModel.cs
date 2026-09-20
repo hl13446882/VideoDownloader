@@ -403,6 +403,26 @@ public sealed partial class MainViewModel : ObservableObject
     private bool _forceReplaceResults;
     private string? _statusKey;
     private object[]? _statusArgs;
+    private CancellationTokenSource? _statusDismissCts;
+    private int _statusGeneration;
+
+    private static readonly HashSet<string> StickyStatusKeys = new(StringComparer.Ordinal)
+    {
+        "status.probeWaiting",
+        "status.probeRunning",
+        "status.probeManual",
+        "status.probeFound",
+        "status.autoRunning",
+        "status.autoWaitingSlot",
+        "status.autoDelayDownload",
+        "status.autoDelaySwitch",
+        "status.autoNoAddress",
+        "update.checking",
+        "update.foundVersion",
+        "update.downloadingFile",
+        "update.restarting",
+    };
+
     /// <summary>Douyin feed→detail boost already attempted for this aweme id (avoid loops).</summary>
     private string? _douyinDetailBoostId;
 
@@ -483,26 +503,69 @@ public sealed partial class MainViewModel : ObservableObject
 
     partial void OnStatusMessageChanged(string value) => OnPropertyChanged(nameof(HasStatusMessage));
 
-    public void SetStatus(string message)
+    public void SetStatus(string message, bool sticky = false)
     {
+        CancelStatusDismiss();
         _statusKey = null;
         _statusArgs = null;
-        StatusMessage = message;
+        StatusMessage = message ?? string.Empty;
+        if (!sticky && !string.IsNullOrWhiteSpace(StatusMessage))
+            ScheduleStatusDismiss();
     }
 
     public void SetStatusKey(string key, params object[] args)
     {
+        CancelStatusDismiss();
         _statusKey = key;
         _statusArgs = args;
         StatusMessage = args.Length == 0 ? _loc.T(key) : _loc.Format(key, args);
+        if (!StickyStatusKeys.Contains(key))
+            ScheduleStatusDismiss();
     }
 
     public void ClearStatus()
     {
+        CancelStatusDismiss();
         _statusKey = null;
         _statusArgs = null;
         if (!string.IsNullOrWhiteSpace(StatusMessage))
             StatusMessage = string.Empty;
+    }
+
+    private void ScheduleStatusDismiss()
+    {
+        var generation = Interlocked.Increment(ref _statusGeneration);
+        var cts = new CancellationTokenSource();
+        _statusDismissCts = cts;
+        _ = DismissStatusAfterAsync(generation, cts.Token);
+    }
+
+    private async Task DismissStatusAfterAsync(int generation, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false);
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher is null)
+                return;
+            await dispatcher.InvokeAsync(() =>
+            {
+                if (generation != _statusGeneration)
+                    return;
+                ClearStatus();
+            });
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private void CancelStatusDismiss()
+    {
+        try { _statusDismissCts?.Cancel(); } catch { /* ignore */ }
+        try { _statusDismissCts?.Dispose(); } catch { /* ignore */ }
+        _statusDismissCts = null;
+        Interlocked.Increment(ref _statusGeneration);
     }
 
     public ObservableCollection<BrowserTabViewModel> Tabs { get; } = new();

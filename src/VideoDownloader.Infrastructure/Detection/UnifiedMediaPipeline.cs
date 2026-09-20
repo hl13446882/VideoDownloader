@@ -1197,7 +1197,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         LastExternalError = null;
         if (!_options.ExternalResolvers.Enabled)
         {
-            LastExternalError = "外置解析已关闭";
+            LastExternalError = "外置解析已关闭 / External resolver disabled";
             RecordDecision(new("external", "page", null, "skipped", "external_disabled", pageUrl.Host));
             return;
         }
@@ -1290,7 +1290,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 if (videos.Count == 0)
                 {
                     if (LastExternalError is null)
-                        LastExternalError = "外置解析未返回可用媒体";
+                        LastExternalError = "外置解析未返回可用媒体 / External resolver returned no usable media";
                     RecordDecision(new("external", "page", MediaOwnership.ForPage(pageUrl, _observedIdentity),
                         "rejected", "no_usable_variants", target.Host, LastExternalError));
                     continue;
@@ -1339,7 +1339,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
 
                 if (!acceptedVideo)
                 {
-                    LastExternalError ??= "外置解析候选未通过可下载性或视频归属校验";
+                    LastExternalError ??= "外置解析候选未通过可下载性或视频归属校验 / External candidates failed downloadability or ownership checks";
                     continue;
                 }
 
@@ -1952,7 +1952,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
     {
         if (!variants.Any(v => v.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)))
             return external ?? local;
-        return "已合并通用探测与外置解析";
+        return "已合并通用探测与外置解析 / Merged generic probe with external resolver";
     }
 
     private static MediaAvailabilityKind ComputeAvailability(

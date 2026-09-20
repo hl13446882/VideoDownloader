@@ -75,7 +75,8 @@ public partial class App : Application
         if (!TryAcquireInstanceMutex())
         {
             MessageBox.Show(
-                "客户端已在运行。请关闭已打开的窗口后再试，不要重复启动（会抢占同一份续传文件）。",
+                "客户端已在运行。请关闭已打开的窗口后再试，不要重复启动（会抢占同一份续传文件）。\n\n" +
+                "The client is already running. Close the open window and try again — a second instance can corrupt resumable downloads.",
                 "Video Downloader",
                 MessageBoxButton.OK,
                 MessageBoxImage.Information);

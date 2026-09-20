@@ -170,7 +170,9 @@
                         <TextBlock Grid.Row="5" Grid.Column="0" Text="{Binding L.SettingsSubtitleFont}" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,10"/>
                         <ComboBox Grid.Row="5" Grid.Column="1"
                                   ItemsSource="{Binding SystemFontFamilies}"
-                                  SelectedItem="{Binding SubtitleFontFamily}"
+                                  SelectedValue="{Binding SubtitleFontFamily}"
+                                  SelectedValuePath="FamilyName"
+                                  DisplayMemberPath="DisplayName"
                                   IsEditable="False"
                                   Margin="0,0,0,10"/>
 

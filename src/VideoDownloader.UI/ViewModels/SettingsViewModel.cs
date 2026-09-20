@@ -2,7 +2,6 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
-using System.Windows.Media;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.DependencyInjection;
@@ -93,12 +92,14 @@ public sealed partial class SettingsViewModel : ObservableObject
         new(string.Empty, "#00FF00")
     ];
 
-    public IReadOnlyList<string> SystemFontFamilies { get; }
+    public IReadOnlyList<FontFamilyOption> SystemFontFamilies { get; }
 
     public event EventHandler? DownloadsMigrated;
 
     private string? _subtitleStatusKey;
     private object[] _subtitleStatusArgs = [];
+    private CancellationTokenSource? _statusDismissCts;
+    private int _statusGeneration;
 
     public SettingsViewModel(
         AppOptions options,
@@ -121,11 +122,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         _loggingEnabled = options.Logging.Enabled;
         _logLevel = options.Logging.MinimumLevel;
 
-        SystemFontFamilies = Fonts.SystemFontFamilies
-            .Select(f => f.Source)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(x => x, StringComparer.CurrentCultureIgnoreCase)
-            .ToArray();
+        SystemFontFamilies = FontFamilyCatalog.Build();
 
         var subtitles = options.Subtitles;
         _subtitleEnabled = subtitles.Enabled;
@@ -217,7 +214,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (!TryPersistSettings(out var error))
         {
-            StatusMessage = error;
+            SetStatusMessage(error);
             return;
         }
 
@@ -230,7 +227,7 @@ public sealed partial class SettingsViewModel : ObservableObject
             // Style refresh must not block a successful settings save.
         }
 
-        StatusMessage = _loc.T("settings.saved");
+        SetStatusMessage(_loc.T("settings.saved"));
     }
 
     [RelayCommand]
@@ -288,7 +285,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (!TryPersistSettings(out var error))
         {
-            StatusMessage = error;
+            SetStatusMessage(error);
             return;
         }
 
@@ -301,7 +298,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         }
         catch
         {
-            StatusMessage = _loc.T("settings.migrateInvalidPath");
+            SetStatusMessage(_loc.T("settings.migrateInvalidPath"));
             return;
         }
 
@@ -313,7 +310,7 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         if (candidateCount == 0)
         {
-            StatusMessage = _loc.T("settings.migrateNone");
+            SetStatusMessage(_loc.T("settings.migrateNone"));
             return;
         }
 
@@ -331,23 +328,23 @@ public sealed partial class SettingsViewModel : ObservableObject
             var result = await engine.MigrateCompletedToSaveRootAsync(rootFull);
             if (result.BlockReason is "in-flight")
             {
-                StatusMessage = _loc.T("settings.migrateBlocked");
+                SetStatusMessage(_loc.T("settings.migrateBlocked"));
                 return;
             }
 
             if (result.BlockReason is "invalid-root" or "empty-root")
             {
-                StatusMessage = _loc.T("settings.migrateInvalidPath");
+                SetStatusMessage(_loc.T("settings.migrateInvalidPath"));
                 return;
             }
 
-            StatusMessage = _loc.Format("settings.migrateDone", result.Moved, result.Skipped, result.Failed);
+            SetStatusMessage(_loc.Format("settings.migrateDone", result.Moved, result.Skipped, result.Failed));
             if (result.Moved > 0)
                 DownloadsMigrated?.Invoke(this, EventArgs.Empty);
         }
         catch (Exception ex)
         {
-            StatusMessage = _loc.Format("settings.migrateFailed", ex.Message);
+            SetStatusMessage(_loc.Format("settings.migrateFailed", ex.Message));
         }
         finally
         {
@@ -435,12 +432,60 @@ public sealed partial class SettingsViewModel : ObservableObject
     private string ResolveFontFamily(string? preferred)
     {
         var name = string.IsNullOrWhiteSpace(preferred) ? "Microsoft YaHei" : preferred.Trim();
-        if (SystemFontFamilies.Any(x => string.Equals(x, name, StringComparison.OrdinalIgnoreCase)))
-            return SystemFontFamilies.First(x => string.Equals(x, name, StringComparison.OrdinalIgnoreCase));
+        var exact = SystemFontFamilies.FirstOrDefault(x =>
+            string.Equals(x.FamilyName, name, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(x.DisplayName, name, StringComparison.OrdinalIgnoreCase));
+        if (exact is not null)
+            return exact.FamilyName;
+
         var yahei = SystemFontFamilies.FirstOrDefault(x =>
-            x.Contains("YaHei", StringComparison.OrdinalIgnoreCase) ||
-            x.Contains("微软雅黑", StringComparison.OrdinalIgnoreCase));
-        return yahei ?? SystemFontFamilies.FirstOrDefault() ?? "Microsoft YaHei";
+            x.FamilyName.Contains("YaHei", StringComparison.OrdinalIgnoreCase) ||
+            x.DisplayName.Contains("微软雅黑", StringComparison.OrdinalIgnoreCase));
+        return yahei?.FamilyName ?? SystemFontFamilies.FirstOrDefault()?.FamilyName ?? "Microsoft YaHei";
+    }
+
+    /// <summary>One-shot tips auto-clear after 10s. Sticky messages (e.g. update progress) stay until replaced.</summary>
+    public void SetStatusMessage(string message, bool sticky = false)
+    {
+        CancelStatusDismiss();
+        StatusMessage = message ?? string.Empty;
+        if (!sticky && !string.IsNullOrWhiteSpace(StatusMessage))
+            ScheduleStatusDismiss();
+    }
+
+    private void ScheduleStatusDismiss()
+    {
+        var generation = Interlocked.Increment(ref _statusGeneration);
+        var cts = new CancellationTokenSource();
+        _statusDismissCts = cts;
+        _ = DismissStatusAfterAsync(generation, cts.Token);
+    }
+
+    private async Task DismissStatusAfterAsync(int generation, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false);
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher is null)
+                return;
+            await dispatcher.InvokeAsync(() =>
+            {
+                if (generation == _statusGeneration)
+                    StatusMessage = string.Empty;
+            });
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private void CancelStatusDismiss()
+    {
+        try { _statusDismissCts?.Cancel(); } catch { /* ignore */ }
+        try { _statusDismissCts?.Dispose(); } catch { /* ignore */ }
+        _statusDismissCts = null;
+        Interlocked.Increment(ref _statusGeneration);
     }
 
     private static string ResolvePresetColor(string? value)
@@ -511,9 +556,9 @@ public sealed partial class SettingsViewModel : ObservableObject
             return;
 
         var (deleted, failed) = _appLog.ClearAllLogs();
-        StatusMessage = failed == 0
+        SetStatusMessage(failed == 0
             ? _loc.Format("settings.clearLogsDone", deleted)
-            : _loc.Format("settings.clearLogsPartial", deleted, failed);
+            : _loc.Format("settings.clearLogsPartial", deleted, failed));
     }
 
     [RelayCommand]
@@ -528,11 +573,11 @@ public sealed partial class SettingsViewModel : ObservableObject
                 FileName = dir,
                 UseShellExecute = true
             });
-            StatusMessage = _loc.Format("settings.openLogsFolderDone", dir);
+            SetStatusMessage(_loc.Format("settings.openLogsFolderDone", dir));
         }
         catch (Exception ex)
         {
-            StatusMessage = _loc.Format("settings.openLogsFolderFailed", ex.Message);
+            SetStatusMessage(_loc.Format("settings.openLogsFolderFailed", ex.Message));
         }
     }
 
@@ -541,12 +586,12 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (ClientUpdateCoordinator.IsBusy)
         {
-            StatusMessage = _loc.T("update.alreadyRunning");
+            SetStatusMessage(_loc.T("update.alreadyRunning"));
             return;
         }
 
         CheckUpdateEnabled = false;
-        StatusMessage = _loc.T("update.checking");
+        SetStatusMessage(_loc.T("update.checking"), sticky: true);
         ClientUpdateCoordinator.BeginManualCheck(_services);
     }
 }
