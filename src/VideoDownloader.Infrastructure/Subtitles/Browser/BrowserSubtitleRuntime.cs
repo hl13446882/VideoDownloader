@@ -42,6 +42,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     private bool _sessionActive;
     private bool _modelMissingNotified;
     private bool _sourceMissingNotified;
+    private int _playbackEpoch;
 
     public BrowserSubtitleRuntime(
         WebViewSubtitleBridge bridge,
@@ -288,6 +289,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
 
     private async Task HandlePlaybackAsync(SubtitlePlaybackState state, CancellationToken cancellationToken)
     {
+        var epoch = Interlocked.Increment(ref _playbackEpoch);
         try
         {
             if (!IsLocalPlayback(state.PageUrl))
@@ -303,6 +305,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                 _options.Enabled);
 
             await ApplyStyleIfChangedAsync(cancellationToken).ConfigureAwait(false);
+            if (epoch != Volatile.Read(ref _playbackEpoch))
+                return;
 
             if (!_options.Enabled)
             {
@@ -322,6 +326,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                 !string.Equals(_pageUrl, state.PageUrl, StringComparison.Ordinal))
             {
                 await SwitchMediaAsync(state.MediaKey, state.PageUrl, cancellationToken).ConfigureAwait(false);
+                if (epoch != Volatile.Read(ref _playbackEpoch))
+                    return;
             }
 
             if (_localSource is null)
@@ -357,11 +363,13 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             var display = segment?.GetDisplayText(_options.Mode);
             if (string.IsNullOrWhiteSpace(display) && _modelMissingNotified)
                 display = ModelMissingHint;
+            if (epoch != Volatile.Read(ref _playbackEpoch))
+                return;
             await SetDisplayedAsync(display, cancellationToken).ConfigureAwait(false);
 
             // Local files are immediately seekable, so warm the first subtitle window even while
             // the HTML video is still paused/buffering. This keeps ASR/translation ahead of playback.
-            if (state.Seeking)
+            if (state.Seeking || epoch != Volatile.Read(ref _playbackEpoch))
                 return;
 
             var windowSize = TimeSpan.FromSeconds(Math.Clamp(_options.PreloadAheadSeconds, 10, 90));

@@ -719,7 +719,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
   const mediaKey = (m) => String(m.currentSrc || m.src || location.href || '');
   const tick = (now) => {
     layoutOverlay();
-    if (now - lastSent >= 150) {
+    if (now - lastSent >= 50) {
       lastSent = now;
       const m = chooseMedia();
       if (m) {

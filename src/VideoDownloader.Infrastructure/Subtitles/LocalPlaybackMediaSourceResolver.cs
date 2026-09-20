@@ -55,7 +55,8 @@ public sealed class LocalPlaybackMediaSourceResolver
             return null;
 
         var info = new FileInfo(fullPath);
-        var identity = $"local:{jobId:N}:{info.Length}:{info.LastWriteTimeUtc.Ticks}";
+        // asr2: FFmpeg coarse+fine seek for Whisper timestamps (invalidates prior keyframe-seek caches).
+        var identity = $"local:{jobId:N}:{info.Length}:{info.LastWriteTimeUtc.Ticks}:asr2";
         return new LocalPlaybackMediaSource(jobId, fullPath, identity);
     }
 }

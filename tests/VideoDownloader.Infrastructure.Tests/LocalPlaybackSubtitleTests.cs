@@ -39,6 +39,7 @@ public sealed class LocalPlaybackSubtitleTests : IDisposable
         Assert.Equal(jobId, first!.JobId);
         Assert.Equal(Path.GetFullPath(path), first.FilePath);
         Assert.StartsWith($"local:{jobId:N}:4:", first.CacheIdentity, StringComparison.Ordinal);
+        Assert.EndsWith(":asr2", first.CacheIdentity, StringComparison.Ordinal);
 
         await File.AppendAllTextAsync(path, "changed");
         File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddSeconds(2));

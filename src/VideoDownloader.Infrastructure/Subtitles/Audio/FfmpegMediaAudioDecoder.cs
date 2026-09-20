@@ -77,16 +77,32 @@ public sealed class FfmpegMediaAudioDecoder : IMediaAudioDecoder
             CreateNoWindow = true
         };
 
+        // Accurate audio cut for ASR timestamps:
+        // Input -ss alone can land on a prior keyframe and leave Whisper timestamps
+        // shifted vs HTML5 video.currentTime. Use a coarse input seek + fine output -ss.
+        var pad = start <= TimeSpan.Zero
+            ? TimeSpan.Zero
+            : TimeSpan.FromSeconds(Math.Min(3, start.TotalSeconds));
+        var inputSeek = start - pad;
+
         psi.ArgumentList.Add("-nostdin");
         psi.ArgumentList.Add("-hide_banner");
         psi.ArgumentList.Add("-loglevel");
         psi.ArgumentList.Add("error");
-        psi.ArgumentList.Add("-ss");
-        psi.ArgumentList.Add(start.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture));
+        if (inputSeek > TimeSpan.Zero)
+        {
+            psi.ArgumentList.Add("-ss");
+            psi.ArgumentList.Add(FormatSeconds(inputSeek));
+        }
         psi.ArgumentList.Add("-i");
         psi.ArgumentList.Add(fullPath);
+        if (pad > TimeSpan.Zero)
+        {
+            psi.ArgumentList.Add("-ss");
+            psi.ArgumentList.Add(FormatSeconds(pad));
+        }
         psi.ArgumentList.Add("-t");
-        psi.ArgumentList.Add(duration.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture));
+        psi.ArgumentList.Add(FormatSeconds(duration));
         psi.ArgumentList.Add("-vn");
         psi.ArgumentList.Add("-ac");
         psi.ArgumentList.Add("1");
@@ -142,4 +158,7 @@ public sealed class FfmpegMediaAudioDecoder : IMediaAudioDecoder
             actualDuration);
         return new AudioChunk(bytes, start, start + actualDuration);
     }
+
+    private static string FormatSeconds(TimeSpan value) =>
+        value.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture);
 }

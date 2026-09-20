@@ -384,10 +384,29 @@ load();
   .arrow.prev { left:10px; }
   .arrow.next { right:10px; }
   .meta { margin-top:12px; display:flex; flex-direction:column; gap:6px; }
-  .time { color:var(--muted); font-size:13px; }
+  .row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+  .time { color:var(--muted); font-size:13px; line-height:1.2; }
+  button.edit { background:transparent; border:0; color:var(--accent); font-size:13px; line-height:1.2; padding:0; cursor:pointer; }
+  button.edit:hover { text-decoration:underline; }
+  select.kind { background:#0b1220; color:var(--fg); border:1px solid #475569; border-radius:4px; font-size:12px; line-height:1.2; padding:1px 4px; max-width:7.5em; }
   .name { font-weight:600; word-break:break-all; }
+  .name .meta-sfx { color:var(--muted); font-weight:500; }
   .caption { color:#cbd5e1; white-space:pre-wrap; }
   .pos { color:var(--muted); font-size:12px; margin-top:4px; }
+  dialog { border:1px solid #475569; border-radius:12px; background:#1e293b; color:var(--fg); padding:0; width:min(440px,92vw); }
+  dialog::backdrop { background:rgba(2,6,23,.65); }
+  .dlg { padding:16px 18px 18px; display:flex; flex-direction:column; gap:10px; }
+  .dlg h2 { margin:0; font-size:16px; }
+  .dlg label { font-size:12px; color:var(--muted); display:flex; flex-direction:column; gap:4px; }
+  .dlg input, .dlg textarea { background:#0b1220; color:var(--fg); border:1px solid #475569; border-radius:8px; padding:8px 10px; font:inherit; }
+  .dlg textarea { min-height:72px; resize:vertical; }
+  .fname-row { display:flex; align-items:center; gap:4px; flex-wrap:wrap; }
+  .fname-row input { flex:1; min-width:120px; }
+  .fname-row .locked { color:var(--muted); font-size:12px; word-break:break-all; }
+  .dlg-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:4px; }
+  .dlg-actions button { background:#334155; color:var(--fg); border:0; border-radius:8px; padding:8px 12px; cursor:pointer; }
+  .dlg-actions button.primary { background:var(--accent); color:#0f172a; font-weight:600; }
+  .err { color:#fca5a5; font-size:12px; min-height:1em; }
   /* Host window is borderless fullscreen — fill the entire WebView. */
   body.host-fs { overflow:hidden; background:#000; }
   body.host-fs header { display:none; }
@@ -420,21 +439,66 @@ load();
     <button type="button" class="arrow next" id="btnNext" title="下一条" aria-label="下一条">›</button>
   </div>
   <div class="meta">
-    <div class="time" id="time"></div>
+    <div class="row">
+      <span class="time" id="time"></span>
+      <button type="button" class="edit" id="btnEdit" hidden>编辑</button>
+      <select class="kind" id="kindSelect" title="视频类型" hidden></select>
+    </div>
     <div class="name" id="name"></div>
     <div class="caption" id="caption"></div>
     <div class="pos" id="pos"></div>
   </div>
 </div>
+<dialog id="editDlg">
+  <form class="dlg" method="dialog" id="editForm">
+    <h2>编辑卡片</h2>
+    <label>文件名
+      <div class="fname-row">
+        <input id="editTitle" name="titleHead" autocomplete="off" required/>
+        <span class="locked" id="editMeta"></span>
+      </div>
+    </label>
+    <label>文案
+      <textarea id="editCaption" name="caption"></textarea>
+    </label>
+    <div class="err" id="editErr"></div>
+    <div class="dlg-actions">
+      <button type="button" id="editCancel">取消</button>
+      <button type="submit" class="primary">保存</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="kindDlg">
+  <form class="dlg" method="dialog" id="kindForm">
+    <h2>添加新分类</h2>
+    <label>分类名称
+      <input id="kindLabel" name="label" autocomplete="off" maxlength="32" required placeholder="例如：纪录片"/>
+    </label>
+    <div class="err" id="kindErr"></div>
+    <div class="dlg-actions">
+      <button type="button" id="kindCancel">取消</button>
+      <button type="submit" class="primary">添加</button>
+    </div>
+  </form>
+</dialog>
 <script>
 let playlist = [];
 let index = -1;
 let wheelLock = 0;
 let loadToken = 0;
 let hostFs = false;
+let currentItem = null;
+let editingId = null;
+let kinds = [{ value:'', label:'未分类' }];
+let kindSelectPrev = '';
+const NEW_KIND = '__new__';
 const MODE_KEY = 'vd-local-gallery-mode';
 const norm = id => String(id||'').replace(/-/g,'').toLowerCase();
 const video = document.getElementById('player');
+const dlg = document.getElementById('editDlg');
+const kindDlg = document.getElementById('kindDlg');
+const kindSelect = document.getElementById('kindSelect');
+const btnEdit = document.getElementById('btnEdit');
 
 function idFromPath(pathname){
   const last = (pathname||location.pathname).split('/').filter(Boolean).pop() || '';
@@ -540,13 +604,188 @@ function syncButtons(){
     document.getElementById('pos').textContent = '';
 }
 
-function applyMeta(item){
-  document.getElementById('title').textContent = item.fileName || '播放';
-  document.getElementById('time').textContent = item.downloadedAtText || '';
-  document.getElementById('name').textContent = item.fileName || '';
-  document.getElementById('caption').textContent = item.caption || '';
-  document.title = item.fileName || '播放';
+function esc(s){ return String(s??'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function kindOptionsHtml(selected){
+  const opts = kinds.map(k => `<option value="${esc(k.value)}"${(selected||'')===k.value?' selected':''}>${esc(k.label)}</option>`).join('');
+  return opts + `<option value="${NEW_KIND}">+ 新增分类</option>`;
 }
+
+function fillKindSelect(selected){
+  kindSelect.innerHTML = kindOptionsHtml(selected || '');
+  kindSelect.value = selected || '';
+  kindSelect.dataset.prev = kindSelect.value;
+  kindSelectPrev = kindSelect.value;
+}
+
+function displayName(item){
+  if(!item) return '';
+  if(item.titleHead){
+    return (item.titleHead || '') + (item.metaSuffix || '') + (item.extension || '');
+  }
+  return item.fileName || '';
+}
+
+function applyMeta(item){
+  currentItem = item || null;
+  const fname = displayName(item) || item?.fileName || '';
+  document.getElementById('title').textContent = fname || '播放';
+  document.getElementById('time').textContent = item?.downloadedAtText || '';
+  const nameEl = document.getElementById('name');
+  if(item?.titleHead){
+    nameEl.innerHTML = esc(item.titleHead) + '<span class="meta-sfx">' + esc(item.metaSuffix || '') + esc(item.extension || '') + '</span>';
+  } else {
+    nameEl.textContent = fname;
+  }
+  document.getElementById('caption').textContent = item?.caption || '';
+  document.title = fname || '播放';
+
+  const hasId = !!(item && item.id);
+  btnEdit.hidden = !hasId;
+  kindSelect.hidden = !hasId;
+  if(hasId){
+    btnEdit.setAttribute('data-edit', item.id);
+    fillKindSelect(item.videoKind || '');
+  }
+}
+
+function patchPlaylistItem(updated){
+  if(!updated?.id) return;
+  const id = norm(updated.id);
+  const i = playlist.findIndex(x => itemId(x) === id);
+  if(i >= 0){
+    playlist[i] = { ...playlist[i], ...updated };
+  }
+  if(currentItem && norm(currentItem.id) === id){
+    currentItem = { ...currentItem, ...updated };
+  }
+}
+
+async function fetchKinds(){
+  const res = await fetch('/api/kinds');
+  if(!res.ok) throw new Error('无法加载分类');
+  const data = await res.json();
+  return Array.isArray(data) ? data : [];
+}
+
+async function postEdit(body){
+  const res = await fetch('/api/edit', {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json' },
+    body: JSON.stringify(body)
+  });
+  if(!res.ok){
+    const t = await res.text();
+    throw new Error(t || ('HTTP '+res.status));
+  }
+  return res.json();
+}
+
+async function postKind(label){
+  const res = await fetch('/api/kinds', {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json' },
+    body: JSON.stringify({ label })
+  });
+  if(!res.ok){
+    const t = await res.text();
+    throw new Error(t || ('HTTP '+res.status));
+  }
+  return res.json();
+}
+
+async function refreshKinds(){
+  try {
+    const apiKinds = await fetchKinds();
+    kinds = [{ value:'', label:'未分类' }, ...apiKinds.filter(k => k && k.value)];
+  } catch (_) {}
+}
+
+function openKindDlg(){
+  kindSelectPrev = kindSelect.dataset.prev || '';
+  kindSelect.value = kindSelectPrev;
+  document.getElementById('kindLabel').value = '';
+  document.getElementById('kindErr').textContent = '';
+  kindDlg.showModal();
+  document.getElementById('kindLabel').focus();
+}
+
+async function openEdit(){
+  const id = currentItem?.id;
+  if(!id) return;
+  const res = await fetch('/api/item?id='+encodeURIComponent(String(id).replace(/-/g,'')));
+  if(!res.ok){ alert('无法加载条目'); return; }
+  const item = await res.json();
+  editingId = item.id;
+  document.getElementById('editTitle').value = item.titleHead || '';
+  document.getElementById('editMeta').textContent = (item.metaSuffix || '') + (item.extension || '');
+  document.getElementById('editCaption').value = item.caption || '';
+  document.getElementById('editErr').textContent = '';
+  dlg.showModal();
+  document.getElementById('editTitle').focus();
+}
+
+btnEdit.onclick = () => openEdit();
+document.getElementById('editCancel').onclick = () => dlg.close();
+document.getElementById('kindCancel').onclick = () => {
+  kindDlg.close();
+  kindSelect.value = kindSelectPrev;
+};
+
+kindSelect.onchange = async () => {
+  if(!currentItem?.id) return;
+  if(kindSelect.value === NEW_KIND){
+    openKindDlg();
+    return;
+  }
+  const prev = kindSelect.dataset.prev || '';
+  try {
+    const updated = await postEdit({ id: currentItem.id, videoKind: kindSelect.value });
+    kindSelect.dataset.prev = kindSelect.value;
+    patchPlaylistItem(updated);
+    applyMeta({ ...currentItem, ...updated });
+  } catch (e) {
+    alert(e.message || String(e));
+    kindSelect.value = prev;
+  }
+};
+
+document.getElementById('editForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const titleHead = document.getElementById('editTitle').value;
+  const caption = document.getElementById('editCaption').value;
+  const err = document.getElementById('editErr');
+  err.textContent = '';
+  try {
+    const updated = await postEdit({ id: editingId, titleHead, caption });
+    dlg.close();
+    patchPlaylistItem(updated);
+    applyMeta({ ...currentItem, ...updated });
+  } catch (ex) {
+    err.textContent = ex.message || String(ex);
+  }
+};
+
+document.getElementById('kindForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const label = document.getElementById('kindLabel').value.trim();
+  const err = document.getElementById('kindErr');
+  err.textContent = '';
+  if(!label){ err.textContent = '请输入分类名称'; return; }
+  if(!currentItem?.id){ err.textContent = '当前条目无效'; return; }
+  try {
+    const created = await postKind(label);
+    await refreshKinds();
+    if(!kinds.some(k => k.value === created.value))
+      kinds.push({ value: created.value, label: created.label });
+    kindDlg.close();
+    const updated = await postEdit({ id: currentItem.id, videoKind: created.value });
+    patchPlaylistItem(updated);
+    applyMeta({ ...currentItem, ...updated, videoKind: created.value });
+  } catch (ex) {
+    err.textContent = ex.message || String(ex);
+  }
+};
 
 async function loadById(id, { push } = { push: false }){
   const token = ++loadToken;
@@ -613,6 +852,7 @@ async function boot(){
   setMediaReady(false);
   const mode = galleryMode();
   try { localStorage.setItem(MODE_KEY, mode); } catch (_) {}
+  await refreshKinds();
   const id = idFromPath(location.pathname);
   const listRes = await fetch(videosApiUrl(mode));
   const data = listRes.ok ? await listRes.json() : [];
@@ -638,6 +878,7 @@ video.addEventListener('dblclick', e => {
 
 document.addEventListener('keydown', e => {
   if(e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT')) return;
+  if(dlg.open || kindDlg.open) return;
   if(e.key === 'ArrowLeft' || e.key === 'ArrowUp'){ e.preventDefault(); go(-1); }
   if(e.key === 'ArrowRight' || e.key === 'ArrowDown'){ e.preventDefault(); go(1); }
   if(e.key === 'f' || e.key === 'F'){ e.preventDefault(); toggleFullscreen(); }
