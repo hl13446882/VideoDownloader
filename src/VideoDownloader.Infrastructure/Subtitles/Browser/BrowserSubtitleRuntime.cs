@@ -71,6 +71,29 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _bridge.EditSubtitleNavigateRequested += OnEditSubtitleNavigateRequested;
         _bridge.EditSubtitleClearRequested += OnEditSubtitleClearRequested;
         _bridge.ScriptReady += OnScriptReady;
+        _bridge.DocumentNavigated += OnDocumentNavigated;
+    }
+
+    private void OnDocumentNavigated(object? sender, string? uri)
+    {
+        _ = HandleDocumentNavigatedAsync(uri, _lifetimeCts.Token);
+    }
+
+    private async Task HandleDocumentNavigatedAsync(string? uri, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (IsLocalPlayback(uri))
+                return;
+            await LeaveLocalPlaybackAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Subtitle leave on navigation skipped");
+        }
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
@@ -441,7 +464,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
 
     private async Task LeaveLocalPlaybackAsync(CancellationToken cancellationToken)
     {
-        if (!_sessionActive && _localSource is null && _lastDisplayed is null)
+        if (!_sessionActive && _localSource is null && _lastDisplayed is null && !_playbackActivityHeld)
             return;
 
         var leavingPage = _pageUrl;
@@ -457,6 +480,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _modelMissingNotified = false;
         _sourceMissingNotified = false;
         _sequentialComplete = false;
+        _lastDisplayed = null;
         lock (_translationSync)
             _translationRequests.Clear();
         ReleasePlaybackActivity();
@@ -467,7 +491,21 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             await _pipeline.StopSessionAsync(cancellationToken).ConfigureAwait(false);
             _sessionActive = false;
         }
-        await SetDisplayedAsync(null, cancellationToken).ConfigureAwait(false);
+        else
+        {
+            _logger.LogInformation("Subtitle leave local playback (overlay/activity) pageUrl={PageUrl}", leavingPage);
+        }
+
+        // Force-clear DOM overlay/editor. Gallery has no <video>, so playback ticks alone
+        // previously never reached leave and leftover cues / ASR hold could stick.
+        try
+        {
+            await _bridge.ClearSubtitleAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Best-effort clear on navigation teardown.
+        }
     }
 
     private void RequestMissingTranslation(
@@ -845,6 +883,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _bridge.EditSubtitleNavigateRequested -= OnEditSubtitleNavigateRequested;
         _bridge.EditSubtitleClearRequested -= OnEditSubtitleClearRequested;
         _bridge.ScriptReady -= OnScriptReady;
+        _bridge.DocumentNavigated -= OnDocumentNavigated;
         ReleasePlaybackActivity();
         _lifetimeCts.Cancel();
         CancelActiveWindow();

@@ -1,5 +1,5 @@
 #define AppName "Video Downloader"
-#define AppVersion "1.0.51"
+#define AppVersion "1.1.0"
 #define Publisher "VideoDownloader"
 #define PublishDir "..\publish"
 
@@ -12,7 +12,7 @@ DefaultDirName={autopf}\VideoDownloader
 DefaultGroupName=Video Downloader
 DisableProgramGroupPage=yes
 OutputDir=..\publish\installer
-OutputBaseFilename=VideoDownloader-1.0.51-win-x64-setup
+OutputBaseFilename=VideoDownloader-1.1.0-win-x64-setup
 Compression=lzma2
 SolidCompression=yes
 ArchitecturesAllowed=x64

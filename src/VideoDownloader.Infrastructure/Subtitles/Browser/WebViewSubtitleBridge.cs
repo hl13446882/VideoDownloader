@@ -30,6 +30,8 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     public event EventHandler<SubtitleEditNavigateEventArgs>? EditSubtitleNavigateRequested;
     public event EventHandler? EditSubtitleClearRequested;
     public event EventHandler? ScriptReady;
+    /// <summary>Fired after each successful document navigation (UI thread).</summary>
+    public event EventHandler<string?>? DocumentNavigated;
 
     public Task InitializeAsync(CancellationToken cancellationToken = default) =>
         RunOnUiAsync(async () =>
@@ -69,6 +71,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
                     .ConfigureAwait(true);
                 await _core.ExecuteScriptAsync(InstallScript).ConfigureAwait(true);
                 _logger.LogInformation("Subtitle script reinjected after navigation uri={Uri}", uri);
+                DocumentNavigated?.Invoke(this, uri);
             }
             catch (Exception ex)
             {
@@ -98,7 +101,14 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     }
 
     public Task ClearSubtitleAsync(CancellationToken cancellationToken = default) =>
-        SetSubtitleAsync(string.Empty, cancellationToken);
+        RunOnUiAsync(async () =>
+        {
+            if (_core is null)
+                return;
+            await _core.ExecuteScriptAsync(
+                    "try{if(window.__vdSubtitle){window.__vdSubtitle.closeEditor&&window.__vdSubtitle.closeEditor();window.__vdSubtitle.setText('');}}catch(e){}")
+                .WaitAsync(cancellationToken);
+        });
 
     public Task OpenSubtitleEditorAsync(
         SubtitleEditorOpenModel model,
@@ -323,7 +333,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     /// AddScriptToExecuteOnDocumentCreated handlers across app launches; an old
     /// script that only checks <c>window.__vdSubtitle</c> would permanently block upgrades.
     /// </summary>
-    private const int InstallScriptVersion = 12;
+    private const int InstallScriptVersion = 13;
 
     private static string InstallScript => $$"""
 (() => {
@@ -710,6 +720,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     },
     setStyle: applyStyle,
     openEditor,
+    closeEditor,
     seekAndPause(seconds) {
       const m = chooseMedia();
       if (!m) return;
@@ -755,20 +766,20 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     if (now - lastSent >= 50) {
       lastSent = now;
       const m = chooseMedia();
-      if (m) {
-        try {
-          chrome.webview.postMessage({
-            type: 'vd-subtitle-playback',
-            mediaKey: mediaKey(m),
-            pageUrl: String(location.href || ''),
-            currentTime: Number(m.currentTime || 0),
-            duration: Number.isFinite(m.duration) ? Number(m.duration) : null,
-            paused: !!m.paused,
-            seeking: !!m.seeking,
-            playbackRate: Number(m.playbackRate || 1)
-          });
-        } catch {}
-      }
+      // Always emit pageUrl — gallery / non-player pages have no media, but the host still
+      // needs the tick to tear down an active local-play subtitle session.
+      try {
+        chrome.webview.postMessage({
+          type: 'vd-subtitle-playback',
+          mediaKey: m ? mediaKey(m) : '',
+          pageUrl: String(location.href || ''),
+          currentTime: m ? Number(m.currentTime || 0) : 0,
+          duration: m && Number.isFinite(m.duration) ? Number(m.duration) : null,
+          paused: m ? !!m.paused : true,
+          seeking: m ? !!m.seeking : false,
+          playbackRate: m ? Number(m.playbackRate || 1) : 1
+        });
+      } catch {}
     }
   };
   window.addEventListener('resize', layoutOverlay, { passive: true });
