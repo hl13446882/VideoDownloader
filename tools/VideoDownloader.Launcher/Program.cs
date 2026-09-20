@@ -17,7 +17,8 @@ namespace VideoDownloader.Launcher;
 
 internal static class Program
 {
-    private const string AppRelativePath = @"app\VideoDownloader.exe";
+    private const string AppRelativePathMain = @"app\main\VideoDownloader.exe";
+    private const string AppRelativePathLegacy = @"app\VideoDownloader.exe";
     private const string LauncherExeName = "VideoBrowser.exe";
     private const string DeferredLauncherFileName = "VideoBrowser.exe.new";
     private const string RequiredMajor = "10";
@@ -66,6 +67,30 @@ internal static class Program
                 args = (args ?? Array.Empty<string>())
                     .Where(a => !string.Equals(a, ApplyUpdateArg, StringComparison.OrdinalIgnoreCase))
                     .ToArray();
+
+                // If this apply deferred a newer launcher, hand off to it so path logic
+                // (app\main) matches the files just written. Old field launchers skip this.
+                var deferred = Path.Combine(rootDir, DeferredLauncherFileName);
+                if (File.Exists(deferred))
+                {
+                    try
+                    {
+                        HideSplash(splash);
+                        var relayArgs = string.Join(" ", (args ?? Array.Empty<string>()).Select(QuoteArg));
+                        Process.Start(new ProcessStartInfo
+                        {
+                            FileName = deferred,
+                            WorkingDirectory = rootDir,
+                            Arguments = relayArgs,
+                            UseShellExecute = false
+                        });
+                        return 0;
+                    }
+                    catch
+                    {
+                        // Fall through and start with this process's path resolution.
+                    }
+                }
             }
 
             if (splash == null)
@@ -76,13 +101,13 @@ internal static class Program
                 Application.DoEvents();
             }
 
-            var appExe = Path.GetFullPath(Path.Combine(rootDir, AppRelativePath));
-            var appDir = Path.GetDirectoryName(appExe);
-            if (appDir is null || !File.Exists(appExe))
+            var appExe = ResolveMainAppExe(rootDir);
+            var appDir = appExe is null ? null : Path.GetDirectoryName(appExe);
+            if (appDir is null || appExe is null || !File.Exists(appExe))
             {
                 HideSplash(splash);
                 MessageBox.Show(
-                    "找不到主程序（app\\VideoDownloader.exe）。\n请重新复制完整发布包。\n\n" +
+                    "找不到主程序（app\\main\\VideoDownloader.exe）。\n请重新复制完整发布包。\n\n" +
                     "Main program not found. Please reinstall the full package.",
                     "Video Downloader",
                     MessageBoxButtons.OK,
@@ -166,6 +191,28 @@ internal static class Program
         {
             HideSplash(splash);
         }
+    }
+
+    private static string ResolveMainAppExe(string installRoot)
+    {
+        foreach (var relative in new[] { AppRelativePathMain, AppRelativePathLegacy })
+        {
+            var candidate = Path.GetFullPath(Path.Combine(installRoot, relative));
+            if (!File.Exists(candidate))
+                continue;
+
+            // Prefer real main app over the tiny app\ forwarder stub.
+            if (relative.Equals(AppRelativePathLegacy, StringComparison.OrdinalIgnoreCase))
+            {
+                var mainSibling = Path.GetFullPath(Path.Combine(installRoot, AppRelativePathMain));
+                if (File.Exists(mainSibling))
+                    return mainSibling;
+            }
+
+            return candidate;
+        }
+
+        return null;
     }
 
     private static string PendingUpdatePath()
@@ -313,12 +360,28 @@ internal static class Program
     /// <summary>
     /// Removes a leftover launcher sidecar from a previous update. Safe on every cold start:
     /// this run's deferred replace (if any) writes the file later, after this cleanup.
+    /// Skip deleting the file we are currently executing (VideoBrowser.exe.new relay).
     /// </summary>
     private static void CleanupStaleDeferredLauncher(string installRoot)
     {
+        string currentPath = null;
+        try
+        {
+            if (Process.GetCurrentProcess().MainModule != null)
+                currentPath = Path.GetFullPath(Process.GetCurrentProcess().MainModule.FileName);
+        }
+        catch
+        {
+            // ignore
+        }
+
         foreach (var name in new[] { DeferredLauncherFileName, "VideoDownloader.exe.new" })
         {
             var path = Path.Combine(installRoot, name);
+            if (currentPath != null &&
+                string.Equals(Path.GetFullPath(path), currentPath, StringComparison.OrdinalIgnoreCase))
+                continue;
+
             for (var attempt = 0; attempt < 8; attempt++)
             {
                 try

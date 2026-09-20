@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>VideoDownloader</AssemblyName>
+    <RootNamespace>VideoDownloader.AppForwarder</RootNamespace>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationIcon>..\..\src\VideoDownloader.UI\Assets\app.ico</ApplicationIcon>
+    <RuntimeIdentifier></RuntimeIdentifier>
+  </PropertyGroup>
+</Project>

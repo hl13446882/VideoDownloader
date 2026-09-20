@@ -184,13 +184,13 @@ public static class PathExpander
     }
 
     /// <summary>
-    /// Install layout is &lt;root&gt;\app\VideoDownloader.exe with tools beside it.
-    /// PublishSingleFile + IncludeAllContentForSelfExtract sets AppContext.BaseDirectory to a
-    /// temp extract folder under %TEMP%\.net\, so %APPDIR% must prefer the real process directory.
+    /// Install layout is &lt;root&gt;\app\ with tools (ffmpeg, yt-dlp) and either
+    /// legacy app\VideoDownloader.exe or app\main\VideoDownloader.exe (+ side-by-side DLLs).
+    /// Single-file extracts may still set AppContext.BaseDirectory under %TEMP%\.net\.
     /// </summary>
     public static string ResolveAppDirectory()
     {
-        var candidates = new List<string>(2);
+        var candidates = new List<string>(4);
 
         try
         {
@@ -199,7 +199,13 @@ public static class PathExpander
             {
                 var processDir = Path.GetDirectoryName(Path.GetFullPath(processPath));
                 if (!string.IsNullOrWhiteSpace(processDir))
+                {
                     candidates.Add(processDir);
+                    // app\main\*.exe → prefer parent app\ (where ffmpeg/tools live).
+                    var parent = Directory.GetParent(processDir);
+                    if (parent is not null)
+                        candidates.Add(parent.FullName);
+                }
             }
         }
         catch
@@ -211,7 +217,12 @@ public static class PathExpander
             Path.DirectorySeparatorChar,
             Path.AltDirectorySeparatorChar);
         if (!string.IsNullOrWhiteSpace(baseDir))
+        {
             candidates.Add(baseDir);
+            var baseParent = Directory.GetParent(baseDir);
+            if (baseParent is not null)
+                candidates.Add(baseParent.FullName);
+        }
 
         foreach (var candidate in candidates)
         {
@@ -228,10 +239,18 @@ public static class PathExpander
         return candidates.Count > 0 ? TrimDir(candidates[0]) : TrimDir(AppContext.BaseDirectory);
     }
 
-    private static bool LooksLikeAppInstallDirectory(string directory) =>
-        File.Exists(Path.Combine(directory, "ffmpeg", "ffmpeg.exe")) ||
-        File.Exists(Path.Combine(directory, "tools", "yt-dlp.exe")) ||
-        File.Exists(Path.Combine(directory, "VideoDownloader.exe"));
+    private static bool LooksLikeAppInstallDirectory(string directory)
+    {
+        if (File.Exists(Path.Combine(directory, "ffmpeg", "ffmpeg.exe")))
+            return true;
+        if (File.Exists(Path.Combine(directory, "tools", "yt-dlp.exe")))
+            return true;
+
+        // Legacy flat layout: VideoDownloader.exe directly under app\ (not app\main\).
+        var exeHere = Path.Combine(directory, "VideoDownloader.exe");
+        var exeInMain = Path.Combine(directory, "main", "VideoDownloader.exe");
+        return File.Exists(exeHere) && !File.Exists(exeInMain);
+    }
 
     private static bool IsSingleFileExtractDirectory(string directory)
     {
@@ -265,9 +284,13 @@ public static class PathExpander
                     if (LooksLikeInstallRoot(processDir))
                         return TrimDir(processDir);
 
-                    var processParent = Directory.GetParent(processDir);
-                    if (processParent is not null && LooksLikeInstallRoot(processParent.FullName))
-                        return TrimDir(processParent.FullName);
+                    // app\main → app → install root
+                    var walk = Directory.GetParent(processDir);
+                    for (var i = 0; i < 3 && walk is not null; i++, walk = walk.Parent)
+                    {
+                        if (LooksLikeInstallRoot(walk.FullName))
+                            return TrimDir(walk.FullName);
+                    }
                 }
             }
         }
@@ -280,9 +303,13 @@ public static class PathExpander
         var baseDir = TrimDir(AppContext.BaseDirectory);
         if (!IsSingleFileExtractDirectory(baseDir))
         {
-            var baseParent = Directory.GetParent(baseDir);
-            if (baseParent is not null && LooksLikeInstallRoot(baseParent.FullName))
-                return TrimDir(baseParent.FullName);
+            var walk = Directory.GetParent(baseDir);
+            for (var i = 0; i < 3 && walk is not null; i++, walk = walk.Parent)
+            {
+                if (LooksLikeInstallRoot(walk.FullName))
+                    return TrimDir(walk.FullName);
+            }
+
             if (LooksLikeInstallRoot(baseDir))
                 return baseDir;
         }

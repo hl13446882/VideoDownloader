@@ -3,6 +3,7 @@ using System.Net.Http;
 using System.Xml.Linq;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Licensing;
 using VideoDownloader.Core.Errors;
 
@@ -88,9 +89,10 @@ public sealed class M3u8DownloadAdapter(
                             new XElement(ns + "BaseURL", track.SourceUrl.AbsoluteUri), new XElement(ns + "SegmentBase", new XElement(ns + "Initialization")))))));
                 await File.WriteAllTextAsync(input, manifest.ToString(), stop.Token);
             }
-            var psi = new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "M3u8", "N_m3u8DL-RE.exe"))
+            var appDir = PathExpander.ResolveAppDirectory();
+            var psi = new ProcessStartInfo(Path.Combine(appDir, "M3u8", "N_m3u8DL-RE.exe"))
             { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = folder };
-            foreach (var arg in new[] { input, "--save-dir", output, "--tmp-dir", Path.Combine(folder, "segments"), "--save-name", "media", "--thread-count", "6", "--download-retry-count", "3", "--concurrent-download", "--auto-select", "--no-ansi-color", "--no-log", "--write-meta-json", "false", "--disable-update-check", "--ffmpeg-binary-path", Path.Combine(AppContext.BaseDirectory, "ffmpeg", "ffmpeg.exe") }) psi.ArgumentList.Add(arg);
+            foreach (var arg in new[] { input, "--save-dir", output, "--tmp-dir", Path.Combine(folder, "segments"), "--save-name", "media", "--thread-count", "6", "--download-retry-count", "3", "--concurrent-download", "--auto-select", "--no-ansi-color", "--no-log", "--write-meta-json", "false", "--disable-update-check", "--ffmpeg-binary-path", Path.Combine(appDir, "ffmpeg", "ffmpeg.exe") }) psi.ArgumentList.Add(arg);
             if (track.Container is not ("hls" or "dash")) psi.ArgumentList.Add("--binary-merge");
             else { psi.ArgumentList.Add("-M"); psi.ArgumentList.Add("format=mkv"); }
             if (track.TrackId.StartsWith("dash:",StringComparison.Ordinal))

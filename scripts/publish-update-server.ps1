@@ -18,7 +18,8 @@ if (-not (Test-Path -LiteralPath $PackageDir)) {
   throw "Package directory not found: $PackageDir"
 }
 if (-not $Version) {
-  $exe = Join-Path $PackageDir 'app\VideoDownloader.exe'
+  $exe = Join-Path $PackageDir 'app\main\VideoDownloader.exe'
+  if (-not (Test-Path -LiteralPath $exe)) { $exe = Join-Path $PackageDir 'app\VideoDownloader.exe' }
   if (-not (Test-Path -LiteralPath $exe)) { $exe = Join-Path $PackageDir 'VideoDownloader.exe' }
   if (Test-Path -LiteralPath $exe) {
     $Version = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($exe).ProductVersion

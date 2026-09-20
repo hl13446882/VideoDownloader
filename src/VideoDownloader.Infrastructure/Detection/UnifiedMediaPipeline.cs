@@ -1059,7 +1059,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             url.AbsolutePath.EndsWith(".mpd",StringComparison.OrdinalIgnoreCase) || mime?.Contains("dash+xml",StringComparison.OrdinalIgnoreCase)==true ? "dash" : null;
         if (resolveManifest && manifestKind is not null && _manifests is not null)
             return await InspectManifestAsync(url,page,context,manifestKind,timeout.Token);
-        var psi = new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "ffmpeg", "ffprobe.exe"))
+        var psi = new ProcessStartInfo(Path.Combine(PathExpander.ResolveAppDirectory(), "ffmpeg", "ffprobe.exe"))
         {
             UseShellExecute = false,
             CreateNoWindow = true,
