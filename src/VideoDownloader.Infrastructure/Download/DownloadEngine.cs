@@ -749,18 +749,11 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             if (!_options.Download.AutoRecoverDownloads)
                 continue;
 
-            if (recovered == DownloadStatus.Paused)
+            // Resume incomplete work: interrupted downloads become Paused; queued ones stay Pending.
+            if (recovered is DownloadStatus.Paused or DownloadStatus.Pending)
             {
-                // Startup-only auto-recover: start up to concurrency once. Excess stay Paused
+                // Startup-only auto-recover: start up to concurrency once. Excess stay as-is
                 // until the user resumes — do not keep pumping when slots free later.
-                if (IsStaleForAutoRecover(job))
-                {
-                    _logger.LogInformation(
-                        "Skipped auto-recover for job {JobId} (stale signature/age; kept Paused)",
-                        job.Id);
-                    continue;
-                }
-
                 if (autoStarted >= maxAutoStart)
                 {
                     _logger.LogInformation(
@@ -771,6 +764,10 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                 }
 
                 autoStarted++;
+                _logger.LogInformation(
+                    "Auto-recover starting job {JobId} status={Status}",
+                    job.Id,
+                    recovered);
                 _ = RunJobAsync(job);
             }
             else if (recovered == DownloadStatus.Failed && ShouldRetryBilibiliFailedOnStartup(job))
@@ -898,15 +895,15 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         }
     }
 
+    /// <summary>
+    /// Legacy helper kept for unit tests. Startup auto-recover no longer skips by age/expire;
+    /// address renewal during RunJobAsync handles fragile CDN URLs.
+    /// </summary>
     internal static bool IsStaleForAutoRecover(DownloadJob job)
     {
-        // Prefer deferring auto-start over failing. Bilibili / YouTube always attempt resume.
         if (BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl) ||
             MediaAddressRenewal.IsYouTubePlayback(job.Variant.SourceUrl))
             return false;
-
-        if (job.UpdatedAt < DateTimeOffset.UtcNow - TimeSpan.FromMinutes(30))
-            return true;
 
         var query = job.Variant.SourceUrl.Query;
         if (string.IsNullOrEmpty(query))

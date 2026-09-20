@@ -8,6 +8,7 @@ using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Infrastructure.Configuration;
+using VideoDownloader.Infrastructure.Download;
 using VideoDownloader.Infrastructure.Detection.Sites.Bilibili;
 using VideoDownloader.Infrastructure.Detection.Sites.TikTok;
 using VideoDownloader.Infrastructure.Logging;
@@ -983,7 +984,8 @@ public sealed class HttpMediaDownloader
     private async Task FinalizeDownloadAsync(DownloadJob job, string partPath, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        if (job.Variant.Container?.ToLowerInvariant() is "mp4" or "m4a" or "mov")
+        if (job.Variant.Container?.ToLowerInvariant() is "mp4" or "m4a" or "mov" &&
+            !DownloadBackendRouter.IsStreamingManifest(job.Variant.SourceUrl))
         {
             if (!Mp4StructureValidator.IsValid(partPath, ct))
             {

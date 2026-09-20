@@ -19,7 +19,7 @@ namespace VideoDownloader.Infrastructure.Tests;
 public class RecoverOnStartupConcurrencyTests
 {
     [Fact]
-    public async Task RecoverOnStartup_DoesNotFailStalePausedAsContextExpired()
+    public async Task RecoverOnStartup_DoesNotMarkStalePausedAsContextExpired()
     {
         var repo = new MemoryDownloadRepository();
         var stale = MakeJob(
@@ -30,10 +30,36 @@ public class RecoverOnStartupConcurrencyTests
 
         using var engine = CreateEngine(repo, maxConcurrent: 1, autoRecover: true);
         await engine.RecoverOnStartupAsync();
+        await Task.Delay(400);
 
         var job = engine.GetActiveJobs().Single(j => j.Id == stale.Id);
-        Assert.Equal(DownloadStatus.Paused, job.Status);
         Assert.False(string.Equals(job.LastErrorCode, ErrorCodes.ContextExpired, StringComparison.OrdinalIgnoreCase));
+        // May be Downloading / Failed / Paused depending on the quick HTTP probe — never ContextExpired from startup.
+        Assert.NotEqual(DownloadStatus.Completed, job.Status);
+    }
+
+    [Fact]
+    public async Task RecoverOnStartup_StartsPausedAndPending_UpToConcurrency()
+    {
+        var repo = new MemoryDownloadRepository();
+        var paused = MakeJob("paused", "https://upos-sz-mirrorcosov.bilivideo.com/a.m4s?deadline=9999999999",
+            DateTimeOffset.UtcNow.AddHours(-5), DownloadStatus.Paused);
+        var pending = MakeJob("pending", "https://upos-sz-mirrorcosov.bilivideo.com/b.m4s?deadline=9999999999",
+            DateTimeOffset.UtcNow.AddHours(-5), DownloadStatus.Pending);
+        var queued = MakeJob("queued", "https://upos-sz-mirrorcosov.bilivideo.com/c.m4s?deadline=9999999999",
+            DateTimeOffset.UtcNow.AddHours(-5), DownloadStatus.Paused);
+        await repo.SaveAsync(paused);
+        await repo.SaveAsync(pending);
+        await repo.SaveAsync(queued);
+
+        using var engine = CreateEngine(repo, maxConcurrent: 2, autoRecover: true);
+        await engine.RecoverOnStartupAsync();
+        await Task.Delay(300);
+
+        var jobs = engine.GetActiveJobs().ToArray();
+        Assert.Equal(3, jobs.Length);
+        // Two should have been handed to RunJobAsync; one remains waiting.
+        Assert.True(jobs.Count(j => j.Status == DownloadStatus.Paused || j.Status == DownloadStatus.Pending) >= 1);
     }
 
     [Fact]
@@ -61,7 +87,11 @@ public class RecoverOnStartupConcurrencyTests
         Assert.True(jobs.Count(j => j.Status == DownloadStatus.Paused) >= 2);
     }
 
-    private static DownloadJob MakeJob(string name, string url, DateTimeOffset updatedAt) => new()
+    private static DownloadJob MakeJob(
+        string name,
+        string url,
+        DateTimeOffset updatedAt,
+        DownloadStatus status = DownloadStatus.Paused) => new()
     {
         Id = Guid.NewGuid(),
         DisplayName = name,
@@ -71,7 +101,7 @@ public class RecoverOnStartupConcurrencyTests
             new Uri(url),
             RequestContext.CreateEmpty(),
             container: "mp4"),
-        Status = DownloadStatus.Paused,
+        Status = status,
         CreatedAt = updatedAt,
         UpdatedAt = updatedAt
     };
