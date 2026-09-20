@@ -25,4 +25,7 @@ public interface ISubtitleCacheStore
 
     /// <summary>Last write time of the transcript file, if present.</summary>
     DateTime? GetTranscriptLastWriteUtc(string mediaIdentity);
+
+    /// <summary>Deletes cached recognition JSON and transcript for this media identity.</summary>
+    Task DeleteAsync(string mediaIdentity, CancellationToken cancellationToken = default);
 }

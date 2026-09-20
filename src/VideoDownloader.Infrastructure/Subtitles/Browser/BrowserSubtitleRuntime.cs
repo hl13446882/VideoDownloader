@@ -14,7 +14,6 @@ namespace VideoDownloader.Infrastructure.Subtitles.Browser;
 public sealed class BrowserSubtitleRuntime : IAsyncDisposable
 {
     private static readonly TimeSpan FastWarmupWindow = TimeSpan.FromSeconds(12);
-    private static readonly TimeSpan StartSnapThreshold = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan WindowOverlap = TimeSpan.FromSeconds(1.5);
     private const string ModelMissingHint = "请先在设置中安装字幕模型";
     private const string NativeRuntimeHint = "字幕引擎组件缺失，请更新到最新版本";
@@ -37,6 +36,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     private string? _pageUrl;
     private LocalPlaybackMediaSource? _localSource;
     private TimeSpan? _lastPlaybackTime;
+    private TimeSpan? _lastKnownDuration;
     private string? _lastDisplayed;
     private string? _styleFingerprint;
     private bool _sessionActive;
@@ -62,6 +62,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _bridge.EditSubtitleRequested += OnEditSubtitleRequested;
         _bridge.EditSubtitleCommitted += OnEditSubtitleCommitted;
         _bridge.EditSubtitleNavigateRequested += OnEditSubtitleNavigateRequested;
+        _bridge.EditSubtitleClearRequested += OnEditSubtitleClearRequested;
         _bridge.ScriptReady += OnScriptReady;
     }
 
@@ -114,6 +115,40 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     private void OnEditSubtitleNavigateRequested(object? sender, SubtitleEditNavigateEventArgs e)
     {
         _ = HandleEditNavigateAsync(e, _lifetimeCts.Token);
+    }
+
+    private void OnEditSubtitleClearRequested(object? sender, EventArgs e)
+    {
+        _ = HandleEditClearAsync(_lifetimeCts.Token);
+    }
+
+    private async Task HandleEditClearAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!_sessionActive || _localSource is null)
+                return;
+
+            CancelActiveWindow();
+            lock (_translationSync)
+                _translationRequests.Clear();
+
+            await _pipeline.ClearRecognizedAsync(cancellationToken).ConfigureAwait(false);
+            await SetDisplayedAsync(null, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation(
+                "Subtitle clear requested; restarting sequential ASR job={JobId}",
+                _localSource.JobId);
+
+            await EnsureSequentialRecognitionAsync(_lastKnownDuration, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Subtitle clear failed");
+        }
     }
 
     private async Task HandleEditRequestAsync(
@@ -346,38 +381,39 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
 
             _sourceMissingNotified = false;
 
-            var jumped = _lastPlaybackTime is { } previous &&
-                         Math.Abs((state.CurrentTime - previous).TotalSeconds) >= 2.5;
+            if (state.Duration is { } duration && duration > TimeSpan.Zero)
+                _lastKnownDuration = duration;
             _lastPlaybackTime = state.CurrentTime;
-            if (state.Seeking || jumped)
-                CancelActiveWindow();
+            // Seek / fast-forward must not cancel or retarget sequential ASR.
 
             var displayTime = state.CurrentTime - TimeSpan.FromMilliseconds(_options.SubtitleOffsetMs);
             if (displayTime < TimeSpan.Zero)
                 displayTime = TimeSpan.Zero;
 
-            var segment = _pipeline.GetCurrent(displayTime, _options.Mode);
-            if (segment is not null)
-                RequestMissingTranslation(segment, _options.Mode, cancellationToken);
-
-            var display = segment?.GetDisplayText(_options.Mode);
-            if (string.IsNullOrWhiteSpace(display) && _modelMissingNotified)
+            var coveredUntil = _pipeline.GetSequentialCoveredUntil();
+            string? display = null;
+            if (_modelMissingNotified)
+            {
                 display = ModelMissingHint;
+            }
+            else if (displayTime <= coveredUntil)
+            {
+                // Only show cues that sequential recognition has already covered.
+                var segment = _pipeline.GetCurrent(displayTime, _options.Mode);
+                if (segment is not null)
+                    RequestMissingTranslation(segment, _options.Mode, cancellationToken);
+                display = segment?.GetDisplayText(_options.Mode);
+            }
+
             if (epoch != Volatile.Read(ref _playbackEpoch))
                 return;
             await SetDisplayedAsync(display, cancellationToken).ConfigureAwait(false);
 
-            // Local files are immediately seekable, so warm the first subtitle window even while
-            // the HTML video is still paused/buffering. This keeps ASR/translation ahead of playback.
-            if (state.Seeking || epoch != Volatile.Read(ref _playbackEpoch))
+            if (epoch != Volatile.Read(ref _playbackEpoch))
                 return;
 
-            var windowSize = TimeSpan.FromSeconds(Math.Clamp(_options.PreloadAheadSeconds, 10, 90));
-            // Stay well ahead of the playhead so slow ASR does not leave silent gaps.
-            var refillThreshold = TimeSpan.FromSeconds(Math.Clamp(windowSize.TotalSeconds / 2, 8, 30));
-            var coveredUntil = _pipeline.GetCoveredUntil(state.CurrentTime);
-            if (coveredUntil is null || state.CurrentTime + refillThreshold >= coveredUntil.Value)
-                await EnsureWindowAsync(state.CurrentTime, state.Duration, windowSize, cancellationToken).ConfigureAwait(false);
+            await EnsureSequentialRecognitionAsync(_lastKnownDuration, cancellationToken)
+                .ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -406,6 +442,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _pageUrl = null;
         _localSource = null;
         _lastPlaybackTime = null;
+        _lastKnownDuration = null;
         _modelMissingNotified = false;
         _sourceMissingNotified = false;
         lock (_translationSync)
@@ -474,6 +511,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _workCts = null;
         _workTask = null;
         _lastPlaybackTime = null;
+        _lastKnownDuration = null;
         _modelMissingNotified = false;
         _mediaKey = mediaKey;
         _pageUrl = pageUrl;
@@ -518,10 +556,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         }
     }
 
-    private async Task EnsureWindowAsync(
-        TimeSpan currentTime,
+    private async Task EnsureSequentialRecognitionAsync(
         TimeSpan? duration,
-        TimeSpan windowSize,
         CancellationToken cancellationToken)
     {
         var localSource = _localSource;
@@ -549,59 +585,95 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
 
             _modelMissingNotified = false;
 
-            var cursor = _pipeline.GetRecognitionCursor(currentTime);
-            var start = cursor ?? (currentTime <= StartSnapThreshold ? TimeSpan.Zero : currentTime);
-            // Overlap successive windows so words straddling chunk boundaries are not dropped.
-            if (cursor is not null && start > WindowOverlap)
-                start -= WindowOverlap;
-
-            var desiredWindow = cursor is null && windowSize > FastWarmupWindow
-                ? FastWarmupWindow
-                : windowSize;
-            var remaining = duration is { } total ? total - start : desiredWindow;
-            if (remaining <= TimeSpan.Zero)
-                return;
-
-            var length = remaining < desiredWindow ? remaining : desiredWindow;
-            if (length < TimeSpan.FromSeconds(1))
-                return;
-
-            _logger.LogInformation(
-                "Subtitle window scheduled job={JobId} start={Start:g} length={Length:g} cursor={Cursor}",
-                localSource.JobId,
-                start,
-                length,
-                cursor?.ToString("g") ?? "(none)");
-
+            var windowSize = TimeSpan.FromSeconds(Math.Clamp(_options.PreloadAheadSeconds, 10, 90));
             _workCts?.Dispose();
             _workCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetimeCts.Token);
             var token = _workCts.Token;
             var mediaKey = _mediaKey;
             var cacheIdentity = localSource.CacheIdentity;
             var mode = _options.Mode;
+            var jobId = localSource.JobId;
+            var filePath = localSource.FilePath;
+
+            _logger.LogInformation(
+                "Subtitle sequential ASR loop start job={JobId} covered={Covered:g} duration={Duration}",
+                jobId,
+                _pipeline.GetSequentialCoveredUntil(),
+                duration?.ToString("g") ?? "(unknown)");
 
             _workTask = Task.Run(async () =>
             {
                 try
                 {
-                    var audio = await _audioDecoder.DecodeLocalFileAsync(
-                        localSource.FilePath,
-                        start,
-                        length,
-                        token).ConfigureAwait(false);
+                    while (!token.IsCancellationRequested)
+                    {
+                        if (!string.Equals(mediaKey, _mediaKey, StringComparison.Ordinal) ||
+                            !string.Equals(cacheIdentity, _localSource?.CacheIdentity, StringComparison.Ordinal))
+                            return;
 
-                    if (!string.Equals(mediaKey, _mediaKey, StringComparison.Ordinal) ||
-                        !string.Equals(cacheIdentity, _localSource?.CacheIdentity, StringComparison.Ordinal))
-                        return;
+                        var total = _lastKnownDuration ?? duration;
+                        var progress = _pipeline.GetSequentialCoveredUntil();
+                        if (total is { } end && progress + TimeSpan.FromMilliseconds(500) >= end)
+                        {
+                            _logger.LogInformation(
+                                "Subtitle sequential ASR complete job={JobId} covered={Covered:g}",
+                                jobId,
+                                progress);
+                            return;
+                        }
 
-                    await _pipeline.SubmitAudioAsync(audio, token).ConfigureAwait(false);
-                    await _pipeline.PrepareTranslationsAsync(mode, audio.MediaStart, audio.MediaEnd, token)
-                        .ConfigureAwait(false);
-                    _modelMissingNotified = false;
+                        // Always extend from the front of the file; never jump to the playhead.
+                        var start = progress;
+                        if (start > WindowOverlap)
+                            start -= WindowOverlap;
+
+                        var desiredWindow = progress <= TimeSpan.Zero && windowSize > FastWarmupWindow
+                            ? FastWarmupWindow
+                            : windowSize;
+                        var remaining = total is { } t ? t - start : desiredWindow;
+                        if (remaining <= TimeSpan.Zero)
+                            return;
+                        var length = remaining < desiredWindow ? remaining : desiredWindow;
+                        if (length < TimeSpan.FromSeconds(1))
+                            return;
+
+                        _logger.LogInformation(
+                            "Subtitle window job={JobId} start={Start:g} length={Length:g} progress={Progress:g}",
+                            jobId,
+                            start,
+                            length,
+                            progress);
+
+                        var audio = await _audioDecoder.DecodeLocalFileAsync(
+                            filePath,
+                            start,
+                            length,
+                            token).ConfigureAwait(false);
+
+                        if (!string.Equals(mediaKey, _mediaKey, StringComparison.Ordinal) ||
+                            !string.Equals(cacheIdentity, _localSource?.CacheIdentity, StringComparison.Ordinal))
+                            return;
+
+                        await _pipeline.SubmitAudioAsync(audio, token).ConfigureAwait(false);
+                        await _pipeline.PrepareTranslationsAsync(mode, audio.MediaStart, audio.MediaEnd, token)
+                            .ConfigureAwait(false);
+                        _modelMissingNotified = false;
+
+                        // Hit EOF before HTML reported a duration: stop when the decode shortens.
+                        var produced = audio.MediaEnd - audio.MediaStart;
+                        if (total is null && produced + TimeSpan.FromMilliseconds(500) < length)
+                        {
+                            _logger.LogInformation(
+                                "Subtitle sequential ASR reached EOF job={JobId} covered={Covered:g}",
+                                jobId,
+                                _pipeline.GetSequentialCoveredUntil());
+                            return;
+                        }
+                    }
                 }
                 catch (OperationCanceledException)
                 {
-                    // Expected on seek/media/session change.
+                    // Expected on media/session change or clear.
                 }
                 catch (FileNotFoundException ex)
                 {
@@ -757,6 +829,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _bridge.EditSubtitleRequested -= OnEditSubtitleRequested;
         _bridge.EditSubtitleCommitted -= OnEditSubtitleCommitted;
         _bridge.EditSubtitleNavigateRequested -= OnEditSubtitleNavigateRequested;
+        _bridge.EditSubtitleClearRequested -= OnEditSubtitleClearRequested;
         _bridge.ScriptReady -= OnScriptReady;
         _lifetimeCts.Cancel();
         CancelActiveWindow();

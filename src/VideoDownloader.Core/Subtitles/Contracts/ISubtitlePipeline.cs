@@ -35,6 +35,12 @@ public interface ISubtitlePipeline
     /// </summary>
     TimeSpan? GetRecognitionCursor(TimeSpan mediaTime);
 
+    /// <summary>
+    /// Contiguous coverage progress from media start (00:00). Recognition always extends this
+    /// forward; playback seeks must not jump the cursor.
+    /// </summary>
+    TimeSpan GetSequentialCoveredUntil();
+
     /// <summary>Replace timeline + coverage from cache/transcript without resetting the session id.</summary>
     void ApplyCacheSnapshot(SubtitleCacheSnapshot snapshot);
 
@@ -50,6 +56,12 @@ public interface ISubtitlePipeline
         string? englishText = null,
         bool preserveExistingTranslations = false,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Wipes in-memory timeline/coverage and deletes the on-disk cache so the next recognition
+    /// pass starts from the beginning of the file.
+    /// </summary>
+    Task ClearRecognizedAsync(CancellationToken cancellationToken = default);
 
     Task StopSessionAsync(CancellationToken cancellationToken = default);
 }

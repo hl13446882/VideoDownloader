@@ -303,6 +303,24 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
         }
     }
 
+    public TimeSpan GetSequentialCoveredUntil()
+    {
+        lock (_coverageSync)
+        {
+            var progress = TimeSpan.Zero;
+            var tolerance = TimeSpan.FromMilliseconds(750);
+            foreach (var range in _coverage)
+            {
+                if (range.Start > progress + tolerance)
+                    break;
+                if (range.End > progress)
+                    progress = range.End;
+            }
+
+            return progress;
+        }
+    }
+
     public void ApplyCacheSnapshot(SubtitleCacheSnapshot snapshot)
     {
         _timeline.Clear();
@@ -359,6 +377,24 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
         AddCoverage(updated.Start, updated.End);
         await PersistAsync(sessionId, cancellationToken).ConfigureAwait(false);
         return updated;
+    }
+
+    public async Task ClearRecognizedAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var identity = _mediaIdentity;
+        _timeline.Clear();
+        lock (_coverageSync)
+            _coverage.Clear();
+
+        if (!string.IsNullOrWhiteSpace(identity))
+        {
+            await _cache.DeleteAsync(identity, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation(
+                "Subtitle recognition cleared session={SessionId} identity={Identity}",
+                ActiveSessionId,
+                identity);
+        }
     }
 
     public Task StopSessionAsync(CancellationToken cancellationToken = default)

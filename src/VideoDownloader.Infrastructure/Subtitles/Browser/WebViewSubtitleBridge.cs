@@ -28,6 +28,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     public event EventHandler<SubtitleEditRequestEventArgs>? EditSubtitleRequested;
     public event EventHandler<SubtitleEditCommitEventArgs>? EditSubtitleCommitted;
     public event EventHandler<SubtitleEditNavigateEventArgs>? EditSubtitleNavigateRequested;
+    public event EventHandler? EditSubtitleClearRequested;
     public event EventHandler? ScriptReady;
 
     public Task InitializeAsync(CancellationToken cancellationToken = default) =>
@@ -256,6 +257,12 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
             return;
         }
 
+        if (type == "vd-edit-subtitle-clear")
+        {
+            EditSubtitleClearRequested?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
         if (type != "vd-subtitle-playback")
             return;
 
@@ -316,7 +323,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     /// AddScriptToExecuteOnDocumentCreated handlers across app launches; an old
     /// script that only checks <c>window.__vdSubtitle</c> would permanently block upgrades.
     /// </summary>
-    private const int InstallScriptVersion = 10;
+    private const int InstallScriptVersion = 11;
 
     private static string InstallScript => $$"""
 (() => {
@@ -539,7 +546,20 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     const fields = document.createElement('div');
     fields.id = 'vd-subtitle-edit-fields';
     const actions = document.createElement('div');
-    Object.assign(actions.style, { display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '12px' });
+    Object.assign(actions.style, {
+      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+      gap: '8px', marginTop: '12px', flexWrap: 'wrap'
+    });
+    const clear = document.createElement('button');
+    clear.type = 'button';
+    clear.id = 'vd-subtitle-edit-clear';
+    clear.textContent = '清除';
+    Object.assign(clear.style, {
+      padding: '8px 14px', borderRadius: '6px', border: '1px solid #7f1d1d',
+      background: '#450a0a', color: '#fecaca', cursor: 'pointer'
+    });
+    const rightActions = document.createElement('div');
+    Object.assign(rightActions.style, { display: 'flex', gap: '8px', marginLeft: 'auto' });
     const cancel = document.createElement('button');
     cancel.type = 'button';
     cancel.textContent = '取消';
@@ -555,6 +575,15 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
       background: '#2563eb', color: '#fff', cursor: 'pointer'
     });
     cancel.onclick = (ev) => { ev.preventDefault(); closeEditor(); };
+    clear.onclick = (ev) => {
+      ev.preventDefault();
+      try {
+        if (!window.confirm('清除该视频全部识别字幕，并从头重新识别？'))
+          return;
+        chrome.webview.postMessage({ type: 'vd-edit-subtitle-clear' });
+      } catch {}
+      closeEditor();
+    };
     ok.onclick = (ev) => {
       ev.preventDefault();
       const multilingual = mask.dataset.multilingual === '1';
@@ -577,8 +606,10 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
       } catch {}
       closeEditor();
     };
-    actions.appendChild(cancel);
-    actions.appendChild(ok);
+    rightActions.appendChild(cancel);
+    rightActions.appendChild(ok);
+    actions.appendChild(clear);
+    actions.appendChild(rightActions);
     panel.appendChild(header);
     panel.appendChild(fields);
     panel.appendChild(actions);

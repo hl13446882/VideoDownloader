@@ -231,6 +231,53 @@ public sealed class SubtitlePipelineTests
         Assert.Null(pipeline.GetCoveredUntil(TimeSpan.FromSeconds(15)));
         Assert.Equal(TimeSpan.FromSeconds(12), pipeline.GetRecognitionCursor(TimeSpan.FromSeconds(15)));
         Assert.Equal(TimeSpan.FromSeconds(12), pipeline.GetRecognitionCursor(TimeSpan.FromSeconds(10)));
+        Assert.Equal(TimeSpan.FromSeconds(12), pipeline.GetSequentialCoveredUntil());
+    }
+
+    [Fact]
+    public async Task Clear_recognized_wipes_timeline_and_deletes_cache()
+    {
+        var recognizer = Substitute.For<ISpeechRecognizer>();
+        recognizer.RecognizeAsync(
+                Arg.Any<AudioChunk>(),
+                Arg.Any<SpeechRecognitionContext>(),
+                Arg.Any<CancellationToken>())
+            .Returns([
+                new SubtitleSegment
+                {
+                    Id = 1,
+                    Start = TimeSpan.Zero,
+                    End = TimeSpan.FromSeconds(2),
+                    OriginalText = "hello",
+                    SourceLanguage = "en"
+                }
+            ]);
+
+        var translator = Substitute.For<ISubtitleTranslator>();
+        var cache = Substitute.For<ISubtitleCacheStore>();
+        cache.LoadAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(SubtitleCacheSnapshot.Empty);
+
+        var pipeline = new SubtitlePipeline(
+            recognizer,
+            new SubtitleTimeline(),
+            translator,
+            cache,
+            NullLogger<SubtitlePipeline>.Instance);
+        await pipeline.StartSessionAsync("s-clear", "media-clear");
+        await pipeline.SubmitAudioAsync(new AudioChunk(
+            new byte[16000 * 2 * 2],
+            TimeSpan.Zero,
+            TimeSpan.FromSeconds(2)));
+
+        Assert.Equal(TimeSpan.FromSeconds(2), pipeline.GetSequentialCoveredUntil());
+        Assert.NotNull(pipeline.GetCurrent(TimeSpan.FromSeconds(1), SubtitleMode.Original));
+
+        await pipeline.ClearRecognizedAsync();
+
+        Assert.Equal(TimeSpan.Zero, pipeline.GetSequentialCoveredUntil());
+        Assert.Null(pipeline.GetCurrent(TimeSpan.FromSeconds(1), SubtitleMode.Original));
+        await cache.Received(1).DeleteAsync("media-clear", Arg.Any<CancellationToken>());
     }
 
     [Fact]

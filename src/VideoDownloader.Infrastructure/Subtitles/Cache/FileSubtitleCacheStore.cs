@@ -363,6 +363,37 @@ public sealed class FileSubtitleCacheStore : ISubtitleCacheStore
         return merged;
     }
 
+    public async Task DeleteAsync(string mediaIdentity, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(mediaIdentity))
+            return;
+
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            TryDeleteFile(GetJsonPath(mediaIdentity));
+            TryDeleteFile(GetTranscriptPath(mediaIdentity));
+            TryDeleteFile(GetJsonPath(mediaIdentity) + ".tmp");
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+        catch
+        {
+            // Cache delete is best effort.
+        }
+    }
+
     private string GetJsonPath(string mediaIdentity) =>
         Path.Combine(_root, GetCacheName(mediaIdentity) + ".json");
 
