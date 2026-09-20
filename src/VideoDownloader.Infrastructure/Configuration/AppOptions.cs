@@ -200,11 +200,21 @@ public static class PathExpander
                 var processDir = Path.GetDirectoryName(Path.GetFullPath(processPath));
                 if (!string.IsNullOrWhiteSpace(processDir))
                 {
-                    candidates.Add(processDir);
-                    // app\main\*.exe → prefer parent app\ (where ffmpeg/tools live).
+                    // Prefer parent when running from app\main\ so ffmpeg/tools win over the host folder.
                     var parent = Directory.GetParent(processDir);
-                    if (parent is not null)
+                    var leaf = Path.GetFileName(TrimDir(processDir));
+                    if (parent is not null &&
+                        leaf.Equals("main", StringComparison.OrdinalIgnoreCase))
+                    {
                         candidates.Add(parent.FullName);
+                        candidates.Add(processDir);
+                    }
+                    else
+                    {
+                        candidates.Add(processDir);
+                        if (parent is not null)
+                            candidates.Add(parent.FullName);
+                    }
                 }
             }
         }
@@ -245,6 +255,11 @@ public static class PathExpander
             return true;
         if (File.Exists(Path.Combine(directory, "tools", "yt-dlp.exe")))
             return true;
+
+        // Side-by-side host lives in app\main\; tools stay in parent app\. Never treat main\ as APPDIR.
+        var leaf = Path.GetFileName(TrimDir(directory));
+        if (leaf.Equals("main", StringComparison.OrdinalIgnoreCase))
+            return false;
 
         // Legacy flat layout: VideoDownloader.exe directly under app\ (not app\main\).
         var exeHere = Path.Combine(directory, "VideoDownloader.exe");

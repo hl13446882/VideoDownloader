@@ -35,4 +35,30 @@ public sealed class PathExpanderTests
         var marker = Path.DirectorySeparatorChar + ".net" + Path.DirectorySeparatorChar;
         Assert.DoesNotContain(marker, normalized, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public void LooksLikeAppInstallDirectory_prefers_app_folder_over_main_host()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "vd-path-" + Guid.NewGuid().ToString("N"));
+        var app = Path.Combine(root, "app");
+        var main = Path.Combine(app, "main");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(app, "ffmpeg"));
+            Directory.CreateDirectory(main);
+            File.WriteAllBytes(Path.Combine(app, "ffmpeg", "ffmpeg.exe"), [0]);
+            File.WriteAllBytes(Path.Combine(main, "VideoDownloader.exe"), [0]);
+
+            var method = typeof(PathExpander).GetMethod(
+                "LooksLikeAppInstallDirectory",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            Assert.NotNull(method);
+            Assert.False((bool)method!.Invoke(null, [main])!);
+            Assert.True((bool)method.Invoke(null, [app])!);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { /* ignore */ }
+        }
+    }
 }
