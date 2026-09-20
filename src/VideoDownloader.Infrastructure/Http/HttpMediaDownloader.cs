@@ -132,7 +132,9 @@ public sealed class HttpMediaDownloader
             }
             catch (DownloadException ex) when (
                 ex.ErrorCode == ErrorCodes.IncompleteDownload &&
-                BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl))
+                BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl) &&
+                // Structure failures must not enter the transport Range-retry loop.
+                !ex.Message.Contains("Invalid MP4", StringComparison.OrdinalIgnoreCase))
             {
                 lastError = ex;
                 if (!TryContinueBilibiliTransport(job, ex, ref lastPartBytes, ref attempt, maxAttempts))
@@ -1030,14 +1032,13 @@ public sealed class HttpMediaDownloader
     private async Task FinalizeDownloadAsync(DownloadJob job, string partPath, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        if (job.Variant.Container?.ToLowerInvariant() is "mp4" or "m4a" or "mov" &&
-            !DownloadBackendRouter.IsStreamingManifest(job.Variant.SourceUrl))
+        // Progressive MP4/MOV only. DASH .m4s pieces are fMP4 (moof/mdat, often no moov) and
+        // must not be wiped as "invalid" after a full download — that restarts forever.
+        if (ShouldValidateProgressiveMp4(job, partPath) &&
+            !Mp4StructureValidator.IsValid(partPath, ct))
         {
-            if (!Mp4StructureValidator.IsValid(partPath, ct))
-            {
-                ResetPart(job);
-                throw new DownloadException(ErrorCodes.IncompleteDownload, "Invalid MP4 structure; download will restart from zero.");
-            }
+            ResetPart(job);
+            throw new DownloadException(ErrorCodes.InvalidFormat, "Invalid MP4 structure.");
         }
         var target = job.TargetPath;
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
@@ -1045,6 +1046,32 @@ public sealed class HttpMediaDownloader
             File.Delete(target);
         File.Move(partPath, target);
         await Task.CompletedTask;
+    }
+
+    private static bool ShouldValidateProgressiveMp4(DownloadJob job, string partPath)
+    {
+        if (job.Variant.Container?.ToLowerInvariant() is not ("mp4" or "m4a" or "mov"))
+            return false;
+        if (DownloadBackendRouter.IsStreamingManifest(job.Variant.SourceUrl))
+            return false;
+        if (LooksLikeDashSegment(job.Variant.SourceUrl, partPath, job.TargetPath))
+            return false;
+        return true;
+    }
+
+    private static bool LooksLikeDashSegment(Uri sourceUrl, string partPath, string targetPath)
+    {
+        static bool LooksM4s(string? path)
+        {
+            if (string.IsNullOrEmpty(path))
+                return false;
+            return path.EndsWith(".m4s", StringComparison.OrdinalIgnoreCase) ||
+                   path.EndsWith(".m4s.part", StringComparison.OrdinalIgnoreCase) ||
+                   path.Contains(".m4s.part", StringComparison.OrdinalIgnoreCase) ||
+                   path.EndsWith(".m4s.part.tmp", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return LooksM4s(sourceUrl.AbsolutePath) || LooksM4s(partPath) || LooksM4s(targetPath);
     }
 
     private static string ReconcilePartPath(DownloadJob job, string writtenPartPath)
