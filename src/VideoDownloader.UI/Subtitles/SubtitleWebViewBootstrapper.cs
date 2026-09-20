@@ -87,7 +87,9 @@ public static class SubtitleWebViewBootstrapper
         if (_services is null || webView.CoreWebView2 is null || Runtimes.TryGetValue(webView, out _))
             return;
 
-        var bridge = new WebViewSubtitleBridge(webView);
+        var bridge = new WebViewSubtitleBridge(
+            webView,
+            _services.GetRequiredService<ILoggerFactory>().CreateLogger("SubtitleBridge"));
         var runtime = new BrowserSubtitleRuntime(
             bridge,
             _services.GetRequiredService<ISubtitlePipeline>(),

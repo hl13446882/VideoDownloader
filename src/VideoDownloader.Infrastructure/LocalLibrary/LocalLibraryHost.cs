@@ -172,6 +172,7 @@ public sealed class LocalLibraryHost : IAsyncDisposable
 
             if (path.StartsWith("/play/", StringComparison.OrdinalIgnoreCase))
             {
+                _logger.LogInformation("Local library play page requested path={Path}", path);
                 await WriteHtmlAsync(ctx, LocalLibraryPages.PlayerHtml);
                 return;
             }

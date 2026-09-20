@@ -206,6 +206,12 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                 return;
             }
 
+            _logger.LogDebug(
+                "Subtitle local playback pageUrl={PageUrl} t={Time:g} enabled={Enabled}",
+                state.PageUrl,
+                state.CurrentTime,
+                _options.Enabled);
+
             await ApplyStyleIfChangedAsync(cancellationToken).ConfigureAwait(false);
 
             if (!_options.Enabled)

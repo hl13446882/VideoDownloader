@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 using VideoDownloader.Core.Subtitles;
@@ -12,12 +13,15 @@ namespace VideoDownloader.Infrastructure.Subtitles.Browser;
 public sealed class WebViewSubtitleBridge : IAsyncDisposable
 {
     private readonly WebView2 _webView;
+    private readonly ILogger _logger;
     private CoreWebView2? _core;
     private bool _initialized;
+    private DateTimeOffset _lastPlaybackLog = DateTimeOffset.MinValue;
 
-    public WebViewSubtitleBridge(WebView2 webView)
+    public WebViewSubtitleBridge(WebView2 webView, ILogger? logger = null)
     {
         _webView = webView;
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
     }
 
     public event EventHandler<SubtitlePlaybackState>? PlaybackStateChanged;
@@ -34,10 +38,39 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
 
             _core = _webView.CoreWebView2;
             _core.WebMessageReceived += OnWebMessageReceived;
+            _core.NavigationCompleted += OnNavigationCompleted;
             await _core.AddScriptToExecuteOnDocumentCreatedAsync(InstallScript).WaitAsync(cancellationToken);
-            await _core.ExecuteScriptAsync(InstallScript).WaitAsync(cancellationToken);
+            await InjectScriptAsync(cancellationToken).ConfigureAwait(false);
             _initialized = true;
+            _logger.LogInformation("Subtitle bridge initialized (script ver={Version})", InstallScriptVersion);
         });
+
+    private void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
+    {
+        if (!e.IsSuccess)
+            return;
+        _ = RunOnUiAsync(async () =>
+        {
+            try
+            {
+                await InjectScriptAsync(CancellationToken.None).ConfigureAwait(false);
+                _logger.LogInformation(
+                    "Subtitle script reinjected after navigation uri={Uri}",
+                    _core?.Source ?? "(null)");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Subtitle script reinject failed");
+            }
+        });
+    }
+
+    private async Task InjectScriptAsync(CancellationToken cancellationToken)
+    {
+        if (_core is null)
+            return;
+        await _core.ExecuteScriptAsync(InstallScript).WaitAsync(cancellationToken);
+    }
 
     public Task SetSubtitleAsync(string? text, CancellationToken cancellationToken = default)
     {
@@ -130,9 +163,9 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
             }
             HandleMessage(root);
         }
-        catch
+        catch (Exception ex)
         {
-            // Other WebView features also use WebMessageReceived; ignore unrelated payloads.
+            _logger.LogDebug(ex, "Subtitle WebMessage parse skipped");
         }
     }
 
@@ -141,6 +174,14 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
         if (!root.TryGetProperty("type", out var typeEl))
             return;
         var type = typeEl.GetString();
+        if (type == "vd-subtitle-boot")
+        {
+            var ver = root.TryGetProperty("ver", out var verEl) && verEl.TryGetInt32(out var v) ? v : -1;
+            var href = root.TryGetProperty("href", out var hrefEl) ? hrefEl.GetString() : null;
+            _logger.LogInformation("Subtitle script boot ver={Ver} href={Href}", ver, href);
+            return;
+        }
+
         if (type == "vd-edit-subtitle-request")
         {
             var t = GetFiniteDouble(root, "currentTime") ?? 0;
@@ -177,6 +218,18 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
         var mediaKey = root.TryGetProperty("mediaKey", out var keyEl) ? keyEl.GetString() : null;
         var pageUrl = root.TryGetProperty("pageUrl", out var pageEl) ? pageEl.GetString() : null;
 
+        var now = DateTimeOffset.UtcNow;
+        if (now - _lastPlaybackLog >= TimeSpan.FromSeconds(2))
+        {
+            _lastPlaybackLog = now;
+            _logger.LogInformation(
+                "Subtitle playback tick pageUrl={PageUrl} t={Time:0.0}s paused={Paused} mediaKey={MediaKey}",
+                pageUrl,
+                current,
+                paused,
+                string.IsNullOrWhiteSpace(mediaKey) ? "(empty)" : (mediaKey.Length > 80 ? mediaKey[..80] + "…" : mediaKey));
+        }
+
         PlaybackStateChanged?.Invoke(this, new SubtitlePlaybackState(
             mediaKey,
             pageUrl,
@@ -200,7 +253,10 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     public ValueTask DisposeAsync()
     {
         if (_core is not null)
+        {
             _core.WebMessageReceived -= OnWebMessageReceived;
+            _core.NavigationCompleted -= OnNavigationCompleted;
+        }
         _core = null;
         _initialized = false;
         return ValueTask.CompletedTask;
@@ -211,7 +267,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     /// AddScriptToExecuteOnDocumentCreated handlers across app launches; an old
     /// script that only checks <c>window.__vdSubtitle</c> would permanently block upgrades.
     /// </summary>
-    private const int InstallScriptVersion = 4;
+    private const int InstallScriptVersion = 5;
 
     private static string InstallScript => $$"""
 (() => {
@@ -548,6 +604,13 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
   };
   window.__vdSubtitleAlive = VER;
   requestAnimationFrame(pump);
+  try {
+    chrome.webview.postMessage({
+      type: 'vd-subtitle-boot',
+      ver: VER,
+      href: String(location.href || '')
+    });
+  } catch {}
 })();
 """;
 }
