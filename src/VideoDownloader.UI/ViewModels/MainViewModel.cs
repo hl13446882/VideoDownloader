@@ -414,7 +414,10 @@ public sealed partial class MainViewModel : ObservableObject
         "status.probeManual",
         "status.probeFound",
         "status.autoRunning",
+        "status.autoRunningCount",
+        "status.autoRunningUnlimited",
         "status.autoWaitingSlot",
+        "status.autoWaitingSlotCount",
         "status.autoDelayDownload",
         "status.autoDelaySwitch",
         "status.autoNoAddress",
@@ -430,7 +433,9 @@ public sealed partial class MainViewModel : ObservableObject
 
     private CancellationTokenSource? _autoCts;
     private int _autoIdleMinutes = 5;
-    /// <summary>Fixed end of the current auto-mode session (start + duration). Not refreshed per item.</summary>
+    private int _autoMaxVideos;
+    private int _autoProcessedCount;
+    /// <summary>Fixed end of the current auto-mode session (start + duration). MaxValue when unlimited.</summary>
     private DateTime _autoSessionEndUtc;
     private string? _autoSwitchFromIdentity;
 
@@ -2109,8 +2114,9 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
-        var initial = _options.Ui.AutoModeIdleMinutes > 0 ? _options.Ui.AutoModeIdleMinutes : 5;
-        var dlg = new AutoModeDelayWindow(_loc, initial)
+        var initialMinutes = _options.Ui.AutoModeIdleMinutes >= 0 ? _options.Ui.AutoModeIdleMinutes : 5;
+        var initialCount = _options.Ui.AutoModeMaxVideos >= 0 ? _options.Ui.AutoModeMaxVideos : 0;
+        var dlg = new AutoModeDelayWindow(_loc, initialMinutes, initialCount)
         {
             Owner = Application.Current.MainWindow
         };
@@ -2118,7 +2124,10 @@ public sealed partial class MainViewModel : ObservableObject
             return;
 
         _autoIdleMinutes = dlg.AcceptedMinutes;
+        _autoMaxVideos = dlg.AcceptedCount;
+        _autoProcessedCount = 0;
         _options.Ui.AutoModeIdleMinutes = _autoIdleMinutes;
+        _options.Ui.AutoModeMaxVideos = _autoMaxVideos;
         try { _settingsStore.Save(_options); }
         catch { /* ignore persist errors */ }
 
@@ -2126,10 +2135,51 @@ public sealed partial class MainViewModel : ObservableObject
         _autoCts?.Cancel();
         _autoCts?.Dispose();
         _autoCts = cts;
-        _autoSessionEndUtc = DateTime.UtcNow.AddMinutes(_autoIdleMinutes);
+        _autoSessionEndUtc = _autoIdleMinutes > 0
+            ? DateTime.UtcNow.AddMinutes(_autoIdleMinutes)
+            : DateTime.MaxValue;
         IsAutoMode = true;
-        SetStatusKey("status.autoStarted", _autoIdleMinutes);
+        SetStatusKey("status.autoStarted", FormatAutoStartedLimits());
         _ = RunAutoModeLoopAsync(cts.Token);
+    }
+
+    private string FormatAutoStartedLimits()
+    {
+        if (_autoIdleMinutes > 0 && _autoMaxVideos > 0)
+            return _loc.Format("status.autoStartedLimits", _autoIdleMinutes, _autoMaxVideos);
+        if (_autoIdleMinutes > 0)
+            return _loc.Format("status.autoStartedTimeOnly", _autoIdleMinutes);
+        if (_autoMaxVideos > 0)
+            return _loc.Format("status.autoStartedCountOnly", _autoMaxVideos);
+        return _loc.T("status.autoStartedUnlimited");
+    }
+
+    private bool IsAutoTimeExpired() =>
+        _autoIdleMinutes > 0 && DateTime.UtcNow >= _autoSessionEndUtc;
+
+    private bool IsAutoCountReached() =>
+        _autoMaxVideos > 0 && _autoProcessedCount >= _autoMaxVideos;
+
+    private bool IsAutoLimitReached() => IsAutoTimeExpired() || IsAutoCountReached();
+
+    private void RefreshAutoRunningStatus()
+    {
+        if (_autoIdleMinutes > 0)
+            SetStatusKey("status.autoRunning", RemainingSessionMinutes(_autoSessionEndUtc), _autoProcessedCount);
+        else if (_autoMaxVideos > 0)
+            SetStatusKey("status.autoRunningCount", _autoProcessedCount, _autoMaxVideos);
+        else
+            SetStatusKey("status.autoRunningUnlimited", _autoProcessedCount);
+    }
+
+    private void RefreshAutoWaitingSlotStatus()
+    {
+        if (_autoIdleMinutes > 0)
+            SetStatusKey("status.autoWaitingSlot", RemainingSessionMinutes(_autoSessionEndUtc), _autoProcessedCount);
+        else if (_autoMaxVideos > 0)
+            SetStatusKey("status.autoWaitingSlotCount", _autoProcessedCount, _autoMaxVideos);
+        else
+            SetStatusKey("status.autoRunningUnlimited", _autoProcessedCount);
     }
 
     public void StopAutoMode(bool announce)
@@ -2143,6 +2193,7 @@ public sealed partial class MainViewModel : ObservableObject
         _autoCts = null;
         IsAutoMode = false;
         _autoSwitchFromIdentity = null;
+        _autoProcessedCount = 0;
         if (announce)
             SetStatusKey("status.autoStopped");
     }
@@ -2167,7 +2218,7 @@ public sealed partial class MainViewModel : ObservableObject
         var sessionEnd = _autoSessionEndUtc;
         try
         {
-            while (!token.IsCancellationRequested && IsAutoMode && DateTime.UtcNow < sessionEnd)
+            while (!token.IsCancellationRequested && IsAutoMode && !IsAutoLimitReached())
             {
                 // Live playback: skip immediately via the same feed shortcuts (↓ / Shift+N / ]).
                 if (await IsCurrentPlaybackLiveAsync(token))
@@ -2176,7 +2227,7 @@ public sealed partial class MainViewModel : ObservableObject
                         SetStatusKey("status.autoSkipLive"));
                     if (!await AdvanceFeedAsync(sessionEnd, token))
                     {
-                        await EndAutoModeTimeoutAsync();
+                        await EndAutoModeByLimitAsync();
                         break;
                     }
 
@@ -2186,7 +2237,7 @@ public sealed partial class MainViewModel : ObservableObject
                 var probe = await TryAutoEnqueueUntilAsync(sessionEnd, token);
                 if (token.IsCancellationRequested || !IsAutoMode)
                     break;
-                if (DateTime.UtcNow >= sessionEnd)
+                if (IsAutoTimeExpired())
                 {
                     await EndAutoModeTimeoutAsync();
                     break;
@@ -2202,7 +2253,7 @@ public sealed partial class MainViewModel : ObservableObject
 
                     if (!await AdvanceFeedAsync(sessionEnd, token))
                     {
-                        await EndAutoModeTimeoutAsync();
+                        await EndAutoModeByLimitAsync();
                         break;
                     }
 
@@ -2211,7 +2262,7 @@ public sealed partial class MainViewModel : ObservableObject
 
                 if (probe.JobId is null)
                 {
-                    await EndAutoModeTimeoutAsync();
+                    await EndAutoModeByLimitAsync();
                     break;
                 }
 
@@ -2220,7 +2271,15 @@ public sealed partial class MainViewModel : ObservableObject
                     break;
                 if (!started)
                 {
-                    await EndAutoModeTimeoutAsync();
+                    await EndAutoModeByLimitAsync();
+                    break;
+                }
+
+                _autoProcessedCount++;
+                await Application.Current.Dispatcher.InvokeAsync(RefreshAutoRunningStatus);
+                if (IsAutoCountReached())
+                {
+                    await EndAutoModeCountAsync();
                     break;
                 }
 
@@ -2234,19 +2293,19 @@ public sealed partial class MainViewModel : ObservableObject
                 {
                     if (token.IsCancellationRequested || !IsAutoMode)
                         break;
-                    await EndAutoModeTimeoutAsync();
+                    await EndAutoModeByLimitAsync();
                     break;
                 }
 
                 if (!await AdvanceFeedAsync(sessionEnd, token))
                 {
-                    await EndAutoModeTimeoutAsync();
+                    await EndAutoModeByLimitAsync();
                     break;
                 }
             }
 
-            if (IsAutoMode && !token.IsCancellationRequested && DateTime.UtcNow >= sessionEnd)
-                await EndAutoModeTimeoutAsync();
+            if (IsAutoMode && !token.IsCancellationRequested && IsAutoLimitReached())
+                await EndAutoModeByLimitAsync();
         }
         catch (OperationCanceledException)
         {
@@ -2317,16 +2376,29 @@ public sealed partial class MainViewModel : ObservableObject
     }
 
     private Task EndAutoModeTimeoutAsync() =>
+        EndAutoModeWithStatusAsync("status.autoStoppedTimeout");
+
+    private Task EndAutoModeCountAsync() =>
+        EndAutoModeWithStatusAsync("status.autoStoppedCount");
+
+    private Task EndAutoModeByLimitAsync() =>
+        IsAutoCountReached() ? EndAutoModeCountAsync() : EndAutoModeTimeoutAsync();
+
+    private Task EndAutoModeWithStatusAsync(string statusKey) =>
         Application.Current.Dispatcher.InvokeAsync(() =>
         {
             IsAutoMode = false;
             _autoCts?.Dispose();
             _autoCts = null;
-            SetStatusKey("status.autoStoppedTimeout");
+            SetStatusKey(statusKey);
         }).Task;
 
-    private static int RemainingSessionMinutes(DateTime sessionEndUtc) =>
-        Math.Max(0, (int)Math.Ceiling((sessionEndUtc - DateTime.UtcNow).TotalMinutes));
+    private static int RemainingSessionMinutes(DateTime sessionEndUtc)
+    {
+        if (sessionEndUtc >= DateTime.MaxValue - TimeSpan.FromDays(1))
+            return 0;
+        return Math.Max(0, (int)Math.Ceiling((sessionEndUtc - DateTime.UtcNow).TotalMinutes));
+    }
 
     /// <summary>
     /// Waits for the first detected card from the normal detection pipeline (nav/SPA/session),
@@ -2374,9 +2446,7 @@ public sealed partial class MainViewModel : ObservableObject
                     if (await IsCurrentPlaybackLiveAsync(token))
                         return new AutoProbeResult(null, SkipLive: true);
 
-                    var remainingMin = RemainingSessionMinutes(sessionEndUtc);
-                    await Application.Current.Dispatcher.InvokeAsync(() =>
-                        SetStatusKey("status.autoWaitingSlot", remainingMin));
+                    await Application.Current.Dispatcher.InvokeAsync(RefreshAutoWaitingSlotStatus);
                     await Task.Delay(400, token);
                 }
 
@@ -2481,9 +2551,7 @@ public sealed partial class MainViewModel : ObservableObject
             if (job.Status is DownloadStatus.Failed or DownloadStatus.Cancelled)
                 return false;
 
-            var remainingMin = RemainingSessionMinutes(sessionEndUtc);
-            await Application.Current.Dispatcher.InvokeAsync(() =>
-                SetStatusKey("status.autoWaitingSlot", remainingMin));
+            await Application.Current.Dispatcher.InvokeAsync(RefreshAutoWaitingSlotStatus);
             await Task.Delay(200, token);
         }
 
@@ -2499,9 +2567,7 @@ public sealed partial class MainViewModel : ObservableObject
                 !string.Equals(now, beforeIdentity, StringComparison.Ordinal))
                 return true;
 
-            var remainingMin = RemainingSessionMinutes(sessionEndUtc);
-            await Application.Current.Dispatcher.InvokeAsync(() =>
-                SetStatusKey("status.autoRunning", remainingMin));
+            await Application.Current.Dispatcher.InvokeAsync(RefreshAutoRunningStatus);
             await Task.Delay(400, token);
         }
 

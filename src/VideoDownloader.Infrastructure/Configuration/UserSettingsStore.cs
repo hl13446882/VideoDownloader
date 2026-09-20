@@ -73,8 +73,12 @@ public sealed class UserSettingsStore
     {
         options.Download.MaxConcurrentDownloads =
             Math.Clamp(options.Download.MaxConcurrentDownloads, 1, 5);
-        if (options.Ui.AutoModeIdleMinutes < 1)
-            options.Ui.AutoModeIdleMinutes = 5;
+        if (options.Ui.AutoModeIdleMinutes < 0)
+            options.Ui.AutoModeIdleMinutes = 0;
+        if (options.Ui.AutoModeMaxVideos < 0)
+            options.Ui.AutoModeMaxVideos = 0;
+        if (options.Ui.AutoModeMaxVideos > 100_000)
+            options.Ui.AutoModeMaxVideos = 100_000;
 
         options.Ui.AddressBookmarks = SanitizeAddressBookmarks(options.Ui.AddressBookmarks);
 
@@ -201,9 +205,12 @@ public sealed class UserSettingsStore
             {
                 Language = source.Ui?.Language ?? "zh-CN",
                 QueueGrouped = source.Ui?.QueueGrouped ?? false,
-                AutoModeIdleMinutes = source.Ui?.AutoModeIdleMinutes > 0
+                AutoModeIdleMinutes = source.Ui?.AutoModeIdleMinutes is >= 0
                     ? source.Ui.AutoModeIdleMinutes
                     : 5,
+                AutoModeMaxVideos = source.Ui?.AutoModeMaxVideos is >= 0
+                    ? source.Ui.AutoModeMaxVideos
+                    : 0,
                 AutoCheckForUpdates = source.Ui?.AutoCheckForUpdates ?? false,
                 AddressBookmarks = CloneAddressBookmarks(source.Ui?.AddressBookmarks)
             },

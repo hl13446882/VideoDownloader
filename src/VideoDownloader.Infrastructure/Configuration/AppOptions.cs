@@ -26,8 +26,15 @@ public sealed class UiOptions
     /// <summary>When true, the download queue is grouped by site-folder domain.</summary>
     public bool QueueGrouped { get; set; }
 
-    /// <summary>Last used auto-mode session duration in minutes (positive integer). Fixed wall clock from Start.</summary>
+    /// <summary>
+    /// Last used auto-mode session duration in minutes. 0 = no time limit.
+    /// </summary>
     public int AutoModeIdleMinutes { get; set; } = 5;
+
+    /// <summary>
+    /// Last used auto-mode max videos to enqueue. 0 = no count limit.
+    /// </summary>
+    public int AutoModeMaxVideos { get; set; }
 
     /// <summary>When true, check for updates automatically on startup. Default off — user must opt in.</summary>
     public bool AutoCheckForUpdates { get; set; }
