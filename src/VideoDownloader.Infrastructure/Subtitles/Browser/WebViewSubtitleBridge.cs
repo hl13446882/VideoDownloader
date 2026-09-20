@@ -49,14 +49,23 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     {
         if (!e.IsSuccess)
             return;
+
+        // WebView2 COM must stay on the WPF UI thread for the entire inject.
+        // Do not ConfigureAwait(false) after any CoreWebView2 await.
         _ = RunOnUiAsync(async () =>
         {
             try
             {
-                await InjectScriptAsync(CancellationToken.None).ConfigureAwait(false);
-                _logger.LogInformation(
-                    "Subtitle script reinjected after navigation uri={Uri}",
-                    _core?.Source ?? "(null)");
+                if (_core is null)
+                    return;
+
+                var uri = _core.Source;
+                // Clear sticky version so a reinject always reinstalls the pump on the new document.
+                await _core.ExecuteScriptAsync(
+                        "try{window.__vdSubtitleAlive=0;window.__vdSubtitleVersion=0;window.__vdSubtitle=null;}catch(e){}")
+                    .ConfigureAwait(true);
+                await _core.ExecuteScriptAsync(InstallScript).ConfigureAwait(true);
+                _logger.LogInformation("Subtitle script reinjected after navigation uri={Uri}", uri);
             }
             catch (Exception ex)
             {
@@ -69,7 +78,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     {
         if (_core is null)
             return;
-        await _core.ExecuteScriptAsync(InstallScript).WaitAsync(cancellationToken);
+        await _core.ExecuteScriptAsync(InstallScript).WaitAsync(cancellationToken).ConfigureAwait(true);
     }
 
     public Task SetSubtitleAsync(string? text, CancellationToken cancellationToken = default)
@@ -141,9 +150,12 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
 
     private Task RunOnUiAsync(Func<Task> action)
     {
-        if (_webView.Dispatcher.CheckAccess())
+        var dispatcher = _webView.Dispatcher;
+        if (dispatcher.CheckAccess())
             return action();
-        return _webView.Dispatcher.InvokeAsync(action).Task.Unwrap();
+
+        // Prefer InvokeAsync so CoreWebView2 work always resumes on the WPF UI thread.
+        return dispatcher.InvokeAsync(action).Task.Unwrap();
     }
 
     private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
@@ -267,7 +279,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     /// AddScriptToExecuteOnDocumentCreated handlers across app launches; an old
     /// script that only checks <c>window.__vdSubtitle</c> would permanently block upgrades.
     /// </summary>
-    private const int InstallScriptVersion = 5;
+    private const int InstallScriptVersion = 6;
 
     private static string InstallScript => $$"""
 (() => {
