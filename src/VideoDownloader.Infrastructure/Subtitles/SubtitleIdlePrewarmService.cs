@@ -93,6 +93,7 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
 
                 _logger.LogInformation("Subtitle idle prewarm scan candidates={Count}", jobs.Count);
 
+                var multiFile = jobs.Count > 1;
                 foreach (var job in jobs)
                 {
                     if (cancellationToken.IsCancellationRequested)
@@ -106,7 +107,7 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
 
                     try
                     {
-                        await PrewarmOneAsync(job, cancellationToken).ConfigureAwait(false);
+                        await PrewarmOneAsync(job, multiFile, cancellationToken).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                     {
@@ -190,7 +191,7 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
         }
     }
 
-    private async Task PrewarmOneAsync(DownloadJob job, CancellationToken cancellationToken)
+    private async Task PrewarmOneAsync(DownloadJob job, bool multiFile, CancellationToken cancellationToken)
     {
         var source = LocalPlaybackMediaSourceResolver.FromCompletedJob(job);
         if (source is null)
@@ -247,7 +248,10 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
             duration?.ToString("g") ?? "(unknown)");
 
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var sliceDeadline = DateTime.UtcNow + PerFileSlice;
+        // Only rotate when other unfinished files are waiting; sole long videos run continuously.
+        var sliceDeadline = multiFile
+            ? DateTime.UtcNow + PerFileSlice
+            : DateTime.MaxValue;
         void OnPlayback(object? _, EventArgs __)
         {
             if (_activity.IsPlaybackActive)
@@ -289,7 +293,7 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
                 job.Id,
                 pipeline.GetSequentialCoveredUntil(),
                 finished,
-                !finished && DateTime.UtcNow >= sliceDeadline);
+                multiFile && !finished && DateTime.UtcNow >= sliceDeadline);
         }
         finally
         {

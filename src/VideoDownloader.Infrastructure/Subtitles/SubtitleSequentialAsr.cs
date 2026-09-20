@@ -11,7 +11,7 @@ namespace VideoDownloader.Infrastructure.Subtitles;
 internal static class SubtitleSequentialAsr
 {
     public static readonly TimeSpan FastWarmupWindow = TimeSpan.FromSeconds(8);
-    public static readonly TimeSpan WindowOverlap = TimeSpan.FromSeconds(1.5);
+    public static readonly TimeSpan WindowOverlap = TimeSpan.FromSeconds(0.75);
 
     public static async Task<bool> RunAsync(
         string filePath,
