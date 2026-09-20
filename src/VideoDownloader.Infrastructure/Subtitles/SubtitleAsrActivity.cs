@@ -1,7 +1,8 @@
 namespace VideoDownloader.Infrastructure.Subtitles;
 
 /// <summary>
-/// Tracks whether any local-player subtitle session is active so idle prewarm can yield the ASR engine.
+/// Tracks whether the local-library play page holds the ASR engine.
+/// Idle prewarm yields while any local player session is open (playing or paused).
 /// </summary>
 public sealed class SubtitleAsrActivity
 {

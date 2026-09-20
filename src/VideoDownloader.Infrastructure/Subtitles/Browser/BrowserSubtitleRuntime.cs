@@ -390,12 +390,14 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             }
 
             _sourceMissingNotified = false;
+            HoldPlaybackActivity();
 
             if (state.Duration is { } duration && duration > TimeSpan.Zero)
                 _lastKnownDuration = duration;
             _lastPlaybackTime = state.CurrentTime;
 
             // Always keep sequential ASR running — do not gate this on display epoch.
+            // Play or pause both occupy ASR so idle prewarm stays out of the way.
             await EnsureSequentialRecognitionAsync(_lastKnownDuration, cancellationToken)
                 .ConfigureAwait(false);
 
@@ -542,6 +544,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             return;
         }
 
+        // Occupy ASR for the whole play-page stay (playing or paused) so idle prewarm yields.
         HoldPlaybackActivity();
         await _pipeline.StartSessionAsync(
             "local:" + Guid.NewGuid().ToString("N"),

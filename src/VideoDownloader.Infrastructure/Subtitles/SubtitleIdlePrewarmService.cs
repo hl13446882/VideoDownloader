@@ -9,13 +9,13 @@ using VideoDownloader.Infrastructure.Configuration;
 namespace VideoDownloader.Infrastructure.Subtitles;
 
 /// <summary>
-/// When no local player is using ASR, walks completed library media and pre-builds subtitle caches
-/// so the first playback already has coverage.
+/// When the local play page is not open, walks completed library media that are not yet fully
+/// recognized and pre-builds subtitle caches. Opening /play (playing or paused) blocks idle work.
 /// </summary>
 public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
 {
     private static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(20);
-    private static readonly TimeSpan IdleBeforeWork = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan IdleBeforeWork = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan BetweenFilesDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ScanPause = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan CoverageCompleteSlack = TimeSpan.FromSeconds(1.5);
