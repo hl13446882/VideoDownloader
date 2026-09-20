@@ -206,9 +206,25 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
         return ValueTask.CompletedTask;
     }
 
-    private const string InstallScript = """
+    /// <summary>
+    /// Bump when the injected player script changes. WebView2 accumulates
+    /// AddScriptToExecuteOnDocumentCreated handlers across app launches; an old
+    /// script that only checks <c>window.__vdSubtitle</c> would permanently block upgrades.
+    /// </summary>
+    private const int InstallScriptVersion = 4;
+
+    private static string InstallScript => $$"""
 (() => {
-  if (window.__vdSubtitle) return;
+  const VER = {{InstallScriptVersion}};
+  if (window.__vdSubtitleVersion === VER && window.__vdSubtitle) return;
+
+  // Tear down a stale overlay / editor from an older injected script revision.
+  try {
+    const oldOverlay = document.getElementById('vd-subtitle-overlay');
+    if (oldOverlay) oldOverlay.remove();
+    const oldMask = document.getElementById('vd-subtitle-edit-mask');
+    if (oldMask) oldMask.remove();
+  } catch {}
 
   let style = {};
   let lastText = '';
@@ -297,8 +313,11 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     const offset = Number.isFinite(style.bottomOffsetPx) ? style.bottomOffsetPx : 60;
     const maxPct = Number.isFinite(style.maxWidthPercent) ? style.maxWidthPercent : 85;
     const maxWidth = Math.max(40, picture.width * maxPct / 100);
-    // Distance is from the bottom edge of the video picture, not the browser window.
-    const bottom = Math.max(0, window.innerHeight - picture.bottom + offset);
+    // Keep the cue inside the painted video frame (large bottomOffset must not push it off-screen).
+    const clampPad = 8;
+    const maxOffset = Math.max(0, picture.height - clampPad - 24);
+    const clampedOffset = Math.min(Math.max(0, offset), maxOffset);
+    const bottom = Math.max(0, window.innerHeight - picture.bottom + clampedOffset);
     el.style.left = (picture.left + picture.width / 2) + 'px';
     el.style.transform = 'translateX(-50%)';
     el.style.bottom = bottom + 'px';
@@ -454,6 +473,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     }
   };
 
+  window.__vdSubtitleVersion = VER;
   window.__vdSubtitle = {
     setText(text) {
       if (editing) return;
@@ -519,10 +539,15 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
         } catch {}
       }
     }
-    requestAnimationFrame(tick);
   };
   window.addEventListener('resize', layoutOverlay, { passive: true });
-  requestAnimationFrame(tick);
+  const pump = (now) => {
+    if (window.__vdSubtitleAlive !== VER) return;
+    tick(now);
+    requestAnimationFrame(pump);
+  };
+  window.__vdSubtitleAlive = VER;
+  requestAnimationFrame(pump);
 })();
 """;
 }

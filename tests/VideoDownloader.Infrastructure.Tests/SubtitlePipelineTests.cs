@@ -1,4 +1,5 @@
 using NSubstitute;
+using Microsoft.Extensions.Logging.Abstractions;
 using VideoDownloader.Core.Subtitles;
 using VideoDownloader.Core.Subtitles.Contracts;
 using VideoDownloader.Infrastructure.Subtitles;
@@ -43,7 +44,7 @@ public sealed class SubtitlePipelineTests
         cache.LoadAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(SubtitleCacheSnapshot.Empty);
 
-        var pipeline = new SubtitlePipeline(recognizer, new SubtitleTimeline(), translator, cache);
+        var pipeline = new SubtitlePipeline(recognizer, new SubtitleTimeline(), translator, cache, NullLogger<SubtitlePipeline>.Instance);
         await pipeline.StartSessionAsync("s1", "media-1");
         await pipeline.SubmitAudioAsync(new AudioChunk(
             new byte[16000 * 2 * 10],
@@ -99,7 +100,7 @@ public sealed class SubtitlePipelineTests
         cache.LoadAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(SubtitleCacheSnapshot.Empty);
 
-        var pipeline = new SubtitlePipeline(recognizer, new SubtitleTimeline(), translator, cache);
+        var pipeline = new SubtitlePipeline(recognizer, new SubtitleTimeline(), translator, cache, NullLogger<SubtitlePipeline>.Instance);
         await pipeline.StartSessionAsync("s1", "media-1");
         await pipeline.SubmitAudioAsync(new AudioChunk(
             new byte[16000 * 2 * 5],
@@ -183,7 +184,7 @@ public sealed class SubtitlePipelineTests
         cache.LoadAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(SubtitleCacheSnapshot.Empty);
 
-        var pipeline = new SubtitlePipeline(recognizer, new SubtitleTimeline(), translator, cache);
+        var pipeline = new SubtitlePipeline(recognizer, new SubtitleTimeline(), translator, cache, NullLogger<SubtitlePipeline>.Instance);
         await pipeline.StartSessionAsync("s1", "media-1");
         await pipeline.SubmitAudioAsync(new AudioChunk(
             new byte[16000 * 2 * 3],
@@ -219,7 +220,7 @@ public sealed class SubtitlePipelineTests
         cache.LoadAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(SubtitleCacheSnapshot.Empty);
 
-        var pipeline = new SubtitlePipeline(recognizer, new SubtitleTimeline(), translator, cache);
+        var pipeline = new SubtitlePipeline(recognizer, new SubtitleTimeline(), translator, cache, NullLogger<SubtitlePipeline>.Instance);
         pipeline.StartSessionAsync("s1", "media-1").GetAwaiter().GetResult();
         pipeline.SubmitAudioAsync(new AudioChunk(
             new byte[16000 * 2 * 4],
@@ -278,7 +279,7 @@ public sealed class SubtitlePipelineTests
                 Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
 
-        var pipeline = new SubtitlePipeline(recognizer, new SubtitleTimeline(), translator, cache);
+        var pipeline = new SubtitlePipeline(recognizer, new SubtitleTimeline(), translator, cache, NullLogger<SubtitlePipeline>.Instance);
         await pipeline.StartSessionAsync("s1", "media-1");
 
         var updated = await pipeline.ApplyManualEditAsync(

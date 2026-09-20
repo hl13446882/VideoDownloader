@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 using VideoDownloader.Core.Subtitles.Contracts;
@@ -92,7 +93,8 @@ public static class SubtitleWebViewBootstrapper
             _services.GetRequiredService<ISubtitlePipeline>(),
             _services.GetRequiredService<IMediaAudioDecoder>(),
             _services.GetRequiredService<LocalPlaybackMediaSourceResolver>(),
-            _services.GetRequiredService<SubtitleOptions>());
+            _services.GetRequiredService<SubtitleOptions>(),
+            _services.GetRequiredService<ILoggerFactory>().CreateLogger("BrowserSubtitle"));
         var runtimeId = Interlocked.Increment(ref _nextRuntimeId);
         var holder = new RuntimeHolder(runtime, runtimeId);
         try
@@ -100,9 +102,13 @@ public static class SubtitleWebViewBootstrapper
             Runtimes.Add(webView, holder);
             ActiveRuntimes[runtimeId] = new WeakReference<BrowserSubtitleRuntime>(runtime);
             await runtime.InitializeAsync().ConfigureAwait(true);
+            var logger = _services.GetService<ILoggerFactory>()?.CreateLogger("SubtitleWebView");
+            logger?.LogInformation("Subtitle runtime attached to WebView2 id={Id}", runtimeId);
         }
-        catch
+        catch (Exception ex)
         {
+            var logger = _services.GetService<ILoggerFactory>()?.CreateLogger("SubtitleWebView");
+            logger?.LogWarning(ex, "Failed to attach subtitle runtime to WebView2");
             Runtimes.Remove(webView);
             ActiveRuntimes.TryRemove(runtimeId, out _);
             await runtime.DisposeAsync();

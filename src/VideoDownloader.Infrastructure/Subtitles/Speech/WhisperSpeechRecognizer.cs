@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using VideoDownloader.Core.Subtitles;
 using VideoDownloader.Core.Subtitles.Contracts;
 using VideoDownloader.Infrastructure.Configuration;
@@ -8,13 +9,17 @@ namespace VideoDownloader.Infrastructure.Subtitles.Speech;
 public sealed class WhisperSpeechRecognizer : ISpeechRecognizer, IDisposable
 {
     private readonly WhisperSpeechRecognizerOptions _options;
+    private readonly ILogger<WhisperSpeechRecognizer> _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private WhisperFactory? _factory;
     private string? _loadedModelPath;
 
-    public WhisperSpeechRecognizer(WhisperSpeechRecognizerOptions options)
+    public WhisperSpeechRecognizer(
+        WhisperSpeechRecognizerOptions options,
+        ILogger<WhisperSpeechRecognizer> logger)
     {
         _options = options;
+        _logger = logger;
     }
 
     public string EngineId => "whisper.net-1.9.1";
@@ -32,9 +37,12 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer, IDisposable
         {
             var modelPath = PathExpander.Expand(_options.ModelPath);
             if (!File.Exists(modelPath))
+            {
+                _logger.LogWarning("Whisper model missing path={Path}", modelPath);
                 throw new FileNotFoundException(
                     "Whisper model is not installed. Configure or install the local speech model first.",
                     modelPath);
+            }
 
             EnsureFactory(modelPath);
             var samples = ConvertPcm16ToFloat(audio.Pcm16Mono16Khz.Span);
@@ -80,7 +88,28 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer, IDisposable
                 });
             }
 
+            _logger.LogInformation(
+                "Whisper recognize session={SessionId} lang={Lang} segments={Count} window={Start:g}-{End:g}",
+                context.SessionId,
+                detectedLanguage,
+                segments.Count,
+                audio.MediaStart,
+                audio.MediaEnd);
             return segments;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is not FileNotFoundException)
+        {
+            _logger.LogWarning(
+                ex,
+                "Whisper recognize failed session={SessionId} window={Start:g}-{End:g}",
+                context.SessionId,
+                audio.MediaStart,
+                audio.MediaEnd);
+            throw;
         }
         finally
         {
@@ -94,9 +123,11 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer, IDisposable
             string.Equals(_loadedModelPath, modelPath, StringComparison.OrdinalIgnoreCase))
             return;
 
+        _logger.LogInformation("Whisper loading model path={Path}", modelPath);
         _factory?.Dispose();
         _factory = WhisperFactory.FromPath(modelPath);
         _loadedModelPath = modelPath;
+        _logger.LogInformation("Whisper model ready path={Path}", modelPath);
     }
 
     private static float[] ConvertPcm16ToFloat(ReadOnlySpan<byte> pcm)

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using VideoDownloader.Core.Subtitles;
 using VideoDownloader.Core.Subtitles.Contracts;
 using VideoDownloader.Infrastructure.Configuration;
@@ -18,12 +19,14 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     private const string ModelMissingHint = "请先在设置中安装字幕模型";
     private const string NativeRuntimeHint = "字幕引擎组件缺失，请更新到最新版本";
     private const string FfmpegMissingHint = "未找到 FFmpeg，无法识别字幕";
+    private const string SourceMissingHint = "无法定位本地成片文件，字幕未启动";
 
     private readonly WebViewSubtitleBridge _bridge;
     private readonly ISubtitlePipeline _pipeline;
     private readonly IMediaAudioDecoder _audioDecoder;
     private readonly LocalPlaybackMediaSourceResolver _localSourceResolver;
     private readonly SubtitleOptions _options;
+    private readonly ILogger _logger;
     private readonly SemaphoreSlim _scheduleGate = new(1, 1);
     private readonly CancellationTokenSource _lifetimeCts = new();
     private readonly HashSet<string> _translationRequests = new(StringComparer.Ordinal);
@@ -38,19 +41,22 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     private string? _styleFingerprint;
     private bool _sessionActive;
     private bool _modelMissingNotified;
+    private bool _sourceMissingNotified;
 
     public BrowserSubtitleRuntime(
         WebViewSubtitleBridge bridge,
         ISubtitlePipeline pipeline,
         IMediaAudioDecoder audioDecoder,
         LocalPlaybackMediaSourceResolver localSourceResolver,
-        SubtitleOptions options)
+        SubtitleOptions options,
+        ILogger? logger = null)
     {
         _bridge = bridge;
         _pipeline = pipeline;
         _audioDecoder = audioDecoder;
         _localSourceResolver = localSourceResolver;
         _options = options;
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
         _bridge.PlaybackStateChanged += OnPlaybackStateChanged;
         _bridge.EditSubtitleRequested += OnEditSubtitleRequested;
         _bridge.EditSubtitleCommitted += OnEditSubtitleCommitted;
@@ -204,6 +210,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
 
             if (!_options.Enabled)
             {
+                if (_sessionActive || _localSource is not null || _lastDisplayed is not null)
+                    _logger.LogDebug("Subtitle disabled in settings; clearing overlay");
                 await SetDisplayedAsync(null, cancellationToken).ConfigureAwait(false);
                 return;
             }
@@ -221,7 +229,20 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             }
 
             if (_localSource is null)
+            {
+                if (!_sourceMissingNotified)
+                {
+                    _sourceMissingNotified = true;
+                    _logger.LogWarning(
+                        "Subtitle local source unresolved pageUrl={PageUrl} mediaKey={MediaKey}",
+                        state.PageUrl,
+                        state.MediaKey);
+                    await SetDisplayedAsync(SourceMissingHint, cancellationToken).ConfigureAwait(false);
+                }
                 return;
+            }
+
+            _sourceMissingNotified = false;
 
             var jumped = _lastPlaybackTime is { } previous &&
                          Math.Abs((state.CurrentTime - previous).TotalSeconds) >= 2.5;
@@ -258,9 +279,9 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         {
             // Session switch / application shutdown.
         }
-        catch
+        catch (Exception ex)
         {
-            // Subtitle failures must never interrupt local video playback.
+            _logger.LogWarning(ex, "Subtitle playback handler failed");
         }
     }
 
@@ -272,6 +293,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         if (!_sessionActive && _localSource is null && _lastDisplayed is null)
             return;
 
+        var leavingPage = _pageUrl;
         CancelActiveWindow();
         _workCts?.Dispose();
         _workCts = null;
@@ -281,11 +303,13 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _localSource = null;
         _lastPlaybackTime = null;
         _modelMissingNotified = false;
+        _sourceMissingNotified = false;
         lock (_translationSync)
             _translationRequests.Clear();
 
         if (_sessionActive)
         {
+            _logger.LogInformation("Subtitle leave local playback pageUrl={PageUrl}", leavingPage);
             await _pipeline.StopSessionAsync(cancellationToken).ConfigureAwait(false);
             _sessionActive = false;
         }
@@ -370,6 +394,11 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             _localSource.CacheIdentity,
             cancellationToken).ConfigureAwait(false);
         _sessionActive = true;
+        _logger.LogInformation(
+            "Subtitle session started job={JobId} file={File} identity={Identity}",
+            _localSource.JobId,
+            _localSource.FilePath,
+            _localSource.CacheIdentity);
     }
 
     private void CancelActiveWindow()
@@ -403,6 +432,12 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
 
             if (!IsWhisperModelInstalled())
             {
+                if (!_modelMissingNotified)
+                {
+                    _logger.LogWarning(
+                        "Subtitle Whisper model not installed path={Path}",
+                        PathExpander.Expand(_options.WhisperModelPath));
+                }
                 _modelMissingNotified = true;
                 await SetDisplayedAsync(ModelMissingHint, cancellationToken).ConfigureAwait(false);
                 return;
@@ -426,6 +461,13 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             var length = remaining < desiredWindow ? remaining : desiredWindow;
             if (length < TimeSpan.FromSeconds(1))
                 return;
+
+            _logger.LogInformation(
+                "Subtitle window scheduled job={JobId} start={Start:g} length={Length:g} cursor={Cursor}",
+                localSource.JobId,
+                start,
+                length,
+                cursor?.ToString("g") ?? "(none)");
 
             _workCts?.Dispose();
             _workCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetimeCts.Token);
@@ -461,6 +503,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                 {
                     var hint = ClassifyMissingDependency(ex);
                     _modelMissingNotified = string.Equals(hint, ModelMissingHint, StringComparison.Ordinal);
+                    _logger.LogWarning(ex, "Subtitle dependency missing hint={Hint}", hint);
                     try
                     {
                         await SetDisplayedAsync(hint, token).ConfigureAwait(false);
@@ -472,6 +515,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                 }
                 catch (Exception ex) when (IsNativeLibraryFailure(ex))
                 {
+                    _logger.LogWarning(ex, "Subtitle native runtime missing");
                     try
                     {
                         await SetDisplayedAsync(NativeRuntimeHint, token).ConfigureAwait(false);
@@ -481,9 +525,9 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                         // Overlay update is best-effort.
                     }
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Keep playback intact. Translation/ASR failures fall back to no/original subtitles.
+                    _logger.LogWarning(ex, "Subtitle ASR/translation window failed");
                 }
             }, token);
         }

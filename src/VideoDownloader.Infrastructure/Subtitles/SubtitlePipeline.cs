@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using VideoDownloader.Core.Subtitles;
 using VideoDownloader.Core.Subtitles.Contracts;
 
@@ -9,6 +10,7 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
     private readonly ISubtitleTimeline _timeline;
     private readonly ISubtitleTranslator _translator;
     private readonly ISubtitleCacheStore _cache;
+    private readonly ILogger<SubtitlePipeline> _logger;
     private readonly SemaphoreSlim _recognitionGate = new(1, 1);
     private readonly SemaphoreSlim _translationGate = new(1, 1);
     private readonly object _coverageSync = new();
@@ -20,12 +22,14 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
         ISpeechRecognizer speechRecognizer,
         ISubtitleTimeline timeline,
         ISubtitleTranslator translator,
-        ISubtitleCacheStore cache)
+        ISubtitleCacheStore cache,
+        ILogger<SubtitlePipeline> logger)
     {
         _speechRecognizer = speechRecognizer;
         _timeline = timeline;
         _translator = translator;
         _cache = cache;
+        _logger = logger;
     }
 
     public string? ActiveSessionId { get; private set; }
@@ -44,6 +48,11 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
             _coverage.Clear();
         _sessionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
+        _logger.LogInformation(
+            "Subtitle session start session={SessionId} identity={Identity}",
+            sessionId,
+            mediaIdentity ?? "(none)");
+
         if (string.IsNullOrWhiteSpace(mediaIdentity))
             return;
 
@@ -55,14 +64,19 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
 
             _timeline.AddOrUpdate(cached.Segments);
             ReplaceCoverage(cached.Coverage);
+            _logger.LogInformation(
+                "Subtitle cache loaded session={SessionId} segments={Segments} coverage={Coverage}",
+                sessionId,
+                cached.Segments.Count,
+                cached.Coverage.Count);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             // A newer subtitle session replaced this one while the cache was loading.
         }
-        catch
+        catch (Exception ex)
         {
-            // Cache corruption or IO failure must never block a fresh subtitle session.
+            _logger.LogWarning(ex, "Subtitle cache load failed session={SessionId} identity={Identity}", sessionId, mediaIdentity);
         }
     }
 
@@ -84,6 +98,13 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
             if (!string.Equals(sessionId, ActiveSessionId, StringComparison.Ordinal))
                 return;
 
+            _logger.LogInformation(
+                "Subtitle ASR submit session={SessionId} start={Start:g} end={End:g} pcmBytes={Bytes}",
+                sessionId,
+                chunk.MediaStart,
+                chunk.MediaEnd,
+                chunk.Pcm16Mono16Khz.Length);
+
             var result = await _speechRecognizer.RecognizeAsync(
                 chunk,
                 new SpeechRecognitionContext(sessionId, _mediaIdentity),
@@ -95,6 +116,21 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
             _timeline.AddOrUpdate(result);
             AddCoverage(chunk.MediaStart, chunk.MediaEnd);
             await PersistAsync(sessionId, linked.Token).ConfigureAwait(false);
+
+            _logger.LogInformation(
+                "Subtitle ASR done session={SessionId} segments={Count} sample={Sample}",
+                sessionId,
+                result.Count,
+                result.Count > 0 ? result[0].OriginalText : "(empty)");
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Subtitle ASR failed session={SessionId}", sessionId);
+            throw;
         }
         finally
         {
@@ -205,8 +241,14 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
         {
             throw;
         }
-        catch
+        catch (Exception ex)
         {
+            _logger.LogWarning(
+                ex,
+                "Subtitle translation failed session={SessionId} target={Target} pending={Count}",
+                sessionId,
+                target,
+                pending.Count);
             // Translation is optional. Failed target segments still display OriginalText.
             foreach (var segment in pending)
                 segment.State = SubtitleSegmentState.Failed;
