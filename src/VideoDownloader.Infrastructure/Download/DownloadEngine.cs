@@ -799,6 +799,22 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         return Task.CompletedTask;
     }
 
+    public async Task RegisterImportedCompletedJobAsync(DownloadJob job, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(job);
+        if (job.Status != DownloadStatus.Completed)
+            throw new InvalidOperationException("Imported jobs must already be Completed.");
+        if (string.IsNullOrWhiteSpace(job.TargetPath) || !File.Exists(job.TargetPath))
+            throw new FileNotFoundException("Imported media file is missing.", job.TargetPath);
+
+        lock (_targetPathSync)
+            _jobs[job.Id] = job;
+
+        await ApplyCompletedFileNameAsync(job, ct).ConfigureAwait(false);
+        await _repository.SaveAsync(job, ct).ConfigureAwait(false);
+        _thumbs.EnsureAsyncFireAndForget(job.Id, job.TargetPath);
+    }
+
     private async Task ApplyCompletedFileNameAsync(DownloadJob job, CancellationToken ct)
     {
         if (job.Status != DownloadStatus.Completed || !File.Exists(job.TargetPath))

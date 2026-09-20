@@ -79,6 +79,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
     public event EventHandler<string>? OpenInNewTabRequested;
     public event EventHandler<MediaSessionChangedEventArgs>? MediaSessionChanged;
     public event EventHandler<bool>? LocalPlayerFullscreenRequested;
+    public event EventHandler? LocalFolderImportRequested;
     public event EventHandler<bool>? TabAudibleChanged;
 
     public string? CurrentMediaSessionKey
@@ -97,6 +98,15 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         var flag = active ? "true" : "false";
         var script =
             "try{window.__vdSetHostFullscreen&&window.__vdSetHostFullscreen(" + flag + ");}catch(e){}";
+        return _core.ExecuteScriptAsync(script);
+    }
+
+    public Task NotifyLocalLibraryImportDoneAsync()
+    {
+        if (_core is null)
+            return Task.CompletedTask;
+        const string script =
+            "try{window.__vdImportDone&&window.__vdImportDone();}catch(e){}";
         return _core.ExecuteScriptAsync(script);
     }
 
@@ -368,6 +378,13 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             var active = root.TryGetProperty("active", out var activeEl) &&
                          activeEl.ValueKind is JsonValueKind.True;
             LocalPlayerFullscreenRequested?.Invoke(this, active);
+            return;
+        }
+
+        if (root.TryGetProperty("type", out var importType) &&
+            importType.GetString() == "vd-import-folder")
+        {
+            LocalFolderImportRequested?.Invoke(this, EventArgs.Empty);
             return;
         }
 

@@ -17,6 +17,17 @@ public static class DownloadSiteFolder
         if (string.IsNullOrEmpty(host))
             return Unknown;
 
+        // Local folder import: https://local.import/{folderName}/
+        if (string.Equals(host, "local.import", StringComparison.OrdinalIgnoreCase))
+        {
+            var path = pageUrl.AbsolutePath.Trim('/');
+            var segment = path.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(segment))
+                return SanitizeImportFolderName("导入");
+            return SanitizeImportFolderName(Uri.UnescapeDataString(segment));
+        }
+
         if (IsDouyinFamily(host))
             return "douyin.com";
         if (IsTikTokFamily(host))
@@ -33,6 +44,20 @@ public static class DownloadSiteFolder
     {
         var folder = Resolve(pageUrl);
         return Path.Combine(rootSaveDir, folder);
+    }
+
+    /// <summary>Builds the synthetic page URL used for imported local folders.</summary>
+    public static Uri CreateImportPageUrl(string folderName)
+    {
+        var safe = SanitizeImportFolderName(folderName);
+        return new Uri("https://local.import/" + Uri.EscapeDataString(safe) + "/");
+    }
+
+    /// <summary>Folder name for imports; empty/invalid falls back to 导入.</summary>
+    public static string SanitizeImportFolderName(string? name)
+    {
+        var cleaned = SanitizeFolderName(string.IsNullOrWhiteSpace(name) ? "导入" : name.Trim());
+        return string.Equals(cleaned, Unknown, StringComparison.OrdinalIgnoreCase) ? "导入" : cleaned;
     }
 
     private static string NormalizeHost(string host)

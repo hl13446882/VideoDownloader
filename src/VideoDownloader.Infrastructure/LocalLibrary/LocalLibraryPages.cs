@@ -59,6 +59,7 @@ internal static class LocalLibraryPages
 <header>
   <h1>本地视频</h1>
   <div class="tools">
+    <button id="btnImport" class="tool" type="button">导入</button>
     <button id="btnTime" class="tool active" type="button">按时间</button>
     <button id="btnSite" class="tool" type="button">按站点分组</button>
     <button id="btnKind" class="tool" type="button">按类型分组</button>
@@ -123,9 +124,17 @@ let kindSelectPrev = '';
 const root = document.getElementById('root');
 const dlg = document.getElementById('editDlg');
 const kindDlg = document.getElementById('kindDlg');
+document.getElementById('btnImport').onclick = () => {
+  try {
+    if (window.chrome && chrome.webview && chrome.webview.postMessage)
+      chrome.webview.postMessage({ type: 'vd-import-folder' });
+  } catch (_) {}
+};
 document.getElementById('btnTime').onclick = () => setMode('time');
 document.getElementById('btnSite').onclick = () => setMode('site');
 document.getElementById('btnKind').onclick = () => setMode('kind');
+window.addEventListener('vd-import-done', () => { try { load(); } catch (_) {} });
+window.__vdImportDone = () => { try { load(); } catch (_) {} };
 document.getElementById('editCancel').onclick = () => dlg.close();
 document.getElementById('kindCancel').onclick = () => {
   kindDlg.close();

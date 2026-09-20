@@ -105,6 +105,12 @@ public interface IDownloadEngine
 
     Task RecoverOnStartupAsync(CancellationToken ct = default);
 
+    /// <summary>
+    /// Registers an already-copied local file as a completed library job (import).
+    /// Applies filename meta, persists, and kicks off thumbnail generation.
+    /// </summary>
+    Task RegisterImportedCompletedJobAsync(DownloadJob job, CancellationToken ct = default);
+
     IReadOnlyList<DownloadJob> GetActiveJobs();
 }
 
@@ -223,6 +229,17 @@ public interface IFfmpegAdapter
     /// <summary>Reads duration (seconds) and video height from a local completed file.</summary>
     Task<(double? DurationSec, int? Height)> ProbeLocalFileAsync(string path, CancellationToken ct);
 
+    /// <summary>Probes duration, video height, stream kinds, and common author tags from a local file.</summary>
+    Task<LocalMediaProbeResult> ProbeLocalMediaAsync(string path, CancellationToken ct);
+
     /// <summary>Extract a JPEG poster frame for local library cards. Returns false on soft failure.</summary>
     Task<bool> TryExtractThumbnailAsync(string videoPath, string jpegPath, CancellationToken ct);
 }
+
+/// <summary>ffprobe summary for a local media file.</summary>
+public sealed record LocalMediaProbeResult(
+    double? DurationSec,
+    int? Height,
+    bool HasVideo,
+    bool HasAudio,
+    string? Author);

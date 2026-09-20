@@ -370,8 +370,14 @@ public sealed class FfmpegAdapter : IFfmpegAdapter
 
     public async Task<(double? DurationSec, int? Height)> ProbeLocalFileAsync(string path, CancellationToken ct)
     {
+        var probed = await ProbeLocalMediaAsync(path, ct).ConfigureAwait(false);
+        return (probed.DurationSec, probed.Height);
+    }
+
+    public async Task<LocalMediaProbeResult> ProbeLocalMediaAsync(string path, CancellationToken ct)
+    {
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
-            return (null, null);
+            return new LocalMediaProbeResult(null, null, false, false, null);
 
         var ffmpegPath = PathExpander.Expand(_options.Ffmpeg.ExecutablePath);
         var ffprobePath = Path.Combine(Path.GetDirectoryName(ffmpegPath) ?? string.Empty, "ffprobe.exe");
@@ -391,7 +397,7 @@ public sealed class FfmpegAdapter : IFfmpegAdapter
             psi.ArgumentList.Add("-v");
             psi.ArgumentList.Add("error");
             psi.ArgumentList.Add("-show_entries");
-            psi.ArgumentList.Add("format=duration:stream=codec_type,height");
+            psi.ArgumentList.Add("format=duration:format_tags=artist,album_artist,author,composer:stream=codec_type,height");
             psi.ArgumentList.Add("-of");
             psi.ArgumentList.Add("json");
             psi.ArgumentList.Add(path);
@@ -400,23 +406,76 @@ public sealed class FfmpegAdapter : IFfmpegAdapter
             timeout.CancelAfter(TimeSpan.FromSeconds(8));
             using var process = Process.Start(psi);
             if (process is null)
-                return (null, null);
+                return new LocalMediaProbeResult(null, null, false, false, null);
 
-            var stdout = await process.StandardOutput.ReadToEndAsync(timeout.Token);
-            await process.WaitForExitAsync(timeout.Token);
+            var stdout = await process.StandardOutput.ReadToEndAsync(timeout.Token).ConfigureAwait(false);
+            await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
             if (process.ExitCode != 0)
-                return (null, null);
+                return new LocalMediaProbeResult(null, null, false, false, null);
 
-            return ParseProbeJson(stdout);
+            return ParseLocalMediaProbeJson(stdout);
         }
         catch (OperationCanceledException)
         {
-            return (null, null);
+            return new LocalMediaProbeResult(null, null, false, false, null);
         }
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "ffprobe failed for {Path}", path);
-            return (null, null);
+            return new LocalMediaProbeResult(null, null, false, false, null);
+        }
+    }
+
+    internal static LocalMediaProbeResult ParseLocalMediaProbeJson(string json)
+    {
+        var (duration, height) = ParseProbeJson(json);
+        if (string.IsNullOrWhiteSpace(json))
+            return new LocalMediaProbeResult(duration, height, false, false, null);
+
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var hasVideo = false;
+            var hasAudio = false;
+            string? author = null;
+
+            if (root.TryGetProperty("format", out var format) &&
+                format.TryGetProperty("tags", out var tags) &&
+                tags.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var key in new[] { "artist", "album_artist", "author", "composer" })
+                {
+                    if (!tags.TryGetProperty(key, out var tagEl))
+                        continue;
+                    var text = tagEl.GetString()?.Trim();
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        author = text;
+                        break;
+                    }
+                }
+            }
+
+            if (root.TryGetProperty("streams", out var streams) && streams.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var stream in streams.EnumerateArray())
+                {
+                    if (!stream.TryGetProperty("codec_type", out var kindEl))
+                        continue;
+                    var kind = kindEl.GetString();
+                    if (string.Equals(kind, "video", StringComparison.OrdinalIgnoreCase))
+                        hasVideo = true;
+                    else if (string.Equals(kind, "audio", StringComparison.OrdinalIgnoreCase))
+                        hasAudio = true;
+                }
+            }
+
+            return new LocalMediaProbeResult(duration, height, hasVideo, hasAudio, author);
+        }
+        catch
+        {
+            return new LocalMediaProbeResult(duration, height, false, false, null);
         }
     }
 

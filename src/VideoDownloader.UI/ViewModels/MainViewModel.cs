@@ -8,6 +8,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Web.WebView2.Wpf;
+using Microsoft.Win32;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Errors;
@@ -421,6 +422,7 @@ public sealed partial class MainViewModel : ObservableObject
         "update.foundVersion",
         "update.downloadingFile",
         "update.restarting",
+        "status.importRunning",
     };
 
     /// <summary>Douyin feed→detail boost already attempted for this aweme id (avoid loops).</summary>
@@ -704,12 +706,91 @@ public sealed partial class MainViewModel : ObservableObject
             ? _localLibrary.GalleryUrl
             : $"http://127.0.0.1:{LocalLibraryHost.PreferredPort}/?group=time";
 
+    private int _importBusy;
+
     [RelayCommand]
     private async Task GoLocalLibraryAsync()
     {
         StopAutoMode(announce: false);
         AddressBar = DefaultHomeUrl;
         await NavigateAsync();
+    }
+
+    private async Task BeginLocalFolderImportAsync(BrowserTabViewModel tab)
+    {
+        if (Interlocked.CompareExchange(ref _importBusy, 1, 0) != 0)
+        {
+            SetStatusKey("status.importBusy");
+            return;
+        }
+
+        try
+        {
+            var owner = Application.Current?.MainWindow;
+            var folderDialog = new OpenFolderDialog
+            {
+                Title = _loc.T("import.pickFolderTitle")
+            };
+            if (folderDialog.ShowDialog() != true || string.IsNullOrWhiteSpace(folderDialog.FolderName))
+                return;
+
+            var nameDialog = new TextInputDialog(
+                _loc.T("import.nameTitle"),
+                _loc.T("import.namePrompt"),
+                _loc.T("import.defaultFolderName"))
+            {
+                Owner = owner
+            };
+            if (nameDialog.ShowDialog() != true)
+                return;
+
+            var folderName = string.IsNullOrWhiteSpace(nameDialog.ResultText)
+                ? _loc.T("import.defaultFolderName")
+                : nameDialog.ResultText.Trim();
+
+            var importer = _services.GetRequiredService<LocalFolderImportService>();
+            SetStatusKey("status.importRunning", 0, "?");
+
+            var progress = new Progress<LocalFolderImportProgress>(p =>
+            {
+                var done = Math.Min(p.Completed + 1, Math.Max(p.Total, 1));
+                SetStatusKey("status.importRunning", done, Math.Max(p.Total, 1));
+            });
+
+            var result = await importer
+                .ImportAsync(folderDialog.FolderName, folderName, progress)
+                .ConfigureAwait(true);
+
+            RefreshDownloadJobs();
+            try
+            {
+                await tab.Host.NotifyLocalLibraryImportDoneAsync().ConfigureAwait(true);
+            }
+            catch
+            {
+                // Gallery refresh is best-effort.
+            }
+
+            SetStatusKey("status.importDone", result.Imported, result.Failed, result.FolderName);
+            MessageBox.Show(
+                _loc.Format("import.successBody", result.Imported, result.Skipped, result.Failed, result.FolderName),
+                _loc.T("import.successTitle"),
+                MessageBoxButton.OK,
+                result.Imported > 0 ? MessageBoxImage.Information : MessageBoxImage.Warning);
+        }
+        catch (Exception ex)
+        {
+            SetStatusKey("status.importFailed", ex.Message);
+            MessageBox.Show(
+                _loc.Format("status.importFailed", ex.Message),
+                _loc.T("import.successTitle"),
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _importBusy, 0);
+        }
     }
 
     public async Task AttachWebViewAsync(BrowserTabViewModel tab, WebView2 webView)
@@ -741,6 +822,16 @@ public sealed partial class MainViewModel : ObservableObject
                     SetAppFullscreen(active);
                 else
                     dispatcher.Invoke(() => SetAppFullscreen(active));
+            };
+            tab.Host.LocalFolderImportRequested += (_, _) =>
+            {
+                if (!ReferenceEquals(SelectedTab, tab))
+                    return;
+                var dispatcher = Application.Current?.Dispatcher;
+                if (dispatcher is null || dispatcher.CheckAccess())
+                    _ = BeginLocalFolderImportAsync(tab);
+                else
+                    dispatcher.Invoke(() => _ = BeginLocalFolderImportAsync(tab));
             };
             tab.Host.TabAudibleChanged += (_, playing) =>
             {

@@ -81,6 +81,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IMediaAddressRediscoverer, BrowserMediaAddressRediscoverer>();
         services.AddSingleton<IFfmpegAdapter, FfmpegAdapter>();
         services.AddSingleton<VideoDownloader.Infrastructure.LocalLibrary.LocalVideoThumbnailStore>();
+        services.AddSingleton<VideoDownloader.Infrastructure.LocalLibrary.LocalFolderImportService>();
         services.AddSingleton<VideoDownloader.Infrastructure.LocalLibrary.LocalLibraryHost>();
         services.AddHttpClient("license", client =>
         {
