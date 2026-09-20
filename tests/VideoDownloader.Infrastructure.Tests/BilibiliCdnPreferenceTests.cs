@@ -387,6 +387,72 @@ public class BilibiliCdnPreferenceTests
     }
 
     [Fact]
+    public void WithLadder_KeepsDurableCdnAlongsideFragileForSameObject()
+    {
+        var ctx = RequestContext.CreateEmpty();
+        var akam = MediaVariant.FromCombinedTrack(
+            "1080p-akam",
+            new Uri("https://upos-hz-mirrorakam.akamaized.net/upgcxcode/a/41791391545-1-100026.m4s?os=akam"),
+            ctx,
+            height: 1080,
+            contentLength: 445_523_164);
+        var bos = MediaVariant.FromCombinedTrack(
+            "1080p-bos",
+            new Uri("https://upos-sz-mirrorbos.bilivideo.com/a/41791391545-1-100026.m4s"),
+            ctx,
+            height: 1080,
+            contentLength: 445_523_164);
+
+        var packed = MediaVariantAlternatives.WithLadder(akam, [akam, bos]);
+        Assert.Contains(packed.Alternatives, a => a.SourceUrl.Host.Contains("mirrorbos", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task TryAlternatives_LeavesFragileBilibiliCdnForDurableSibling()
+    {
+        var ctx = RequestContext.CreateEmpty();
+        var page = new Uri("https://www.bilibili.com/video/BV1test");
+        var akam = MediaVariant.FromCombinedTrack(
+            "1080p-akam",
+            new Uri("https://upos-hz-mirrorakam.akamaized.net/upgcxcode/a/41791391545-1-100026.m4s?os=akam"),
+            ctx,
+            height: 1080,
+            contentLength: 445_523_164) with
+        {
+            ContentIdentity = "id:BV1test",
+            RecoveryPageUrl = page,
+            Alternatives =
+            [
+                MediaVariant.FromCombinedTrack(
+                    "1080p-bos",
+                    new Uri("https://upos-sz-mirrorbos.bilivideo.com/a/41791391545-1-100026.m4s"),
+                    ctx,
+                    height: 1080,
+                    contentLength: 445_523_164) with
+                {
+                    ContentIdentity = "id:BV1test",
+                    RecoveryPageUrl = page
+                },
+                MediaVariant.FromCombinedTrack(
+                    "1080p-akam2",
+                    new Uri("https://upos-hz-mirrorakam.akamaized.net/upgcxcode/a/41791391545-1-100026.m4s?os=akam&x=2"),
+                    ctx,
+                    height: 1080,
+                    contentLength: 445_523_164) with
+                {
+                    ContentIdentity = "id:BV1test",
+                    RecoveryPageUrl = page
+                }
+            ]
+        };
+
+        var switched = await MediaAddressRenewal.TryAlternativesAsync(akam, validate: null, CancellationToken.None);
+        Assert.NotNull(switched);
+        Assert.Contains("mirrorbos", switched!.SourceUrl.Host, StringComparison.OrdinalIgnoreCase);
+        Assert.False(BilibiliCdnPreference.IsFragile(switched.SourceUrl));
+    }
+
+    [Fact]
     public void ParseJson_KeepsAv1_100026_WhenLargerAvcExists()
     {
         var jsonPath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "bilibili-BV1y6Y76yE4Q.json");

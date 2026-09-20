@@ -54,6 +54,18 @@ internal static class MediaAddressRenewal
                 .ThenByDescending(DurableHostScore)
                 .Take(8)
                 .ToList();
+            // When leaving a fragile Bilibili mirror, only accept a durable CDN from renew.
+            if (BilibiliCdnPreference.IsFragile(previous.SourceUrl))
+            {
+                var durable = matches.Where(v => !BilibiliCdnPreference.IsFragile(v.SourceUrl)).ToList();
+                if (durable.Count > 0)
+                    matches = durable;
+                else
+                {
+                    errors.Add("renewed:only_fragile_cdn");
+                    continue;
+                }
+            }
             if (matches.Count == 0 && videos.Count > 0)
                 errors.Add("renewed:no_quality_match");
             foreach (var match in matches)
@@ -109,7 +121,7 @@ internal static class MediaAddressRenewal
             .Where(x => x.Aligned is not null)
             .OrderByDescending(x => BilibiliCdnPreference.SameDashObjects(previous, x.Raw) ? 2
                 : BilibiliCdnPreference.SameDashSize(previous, x.Raw, sizeAnchor) ? 1 : 0)
-            .ThenByDescending(x => DurableHostScore(x.Aligned!))
+            .ThenByDescending(x => HostRecoveryScore(x.Aligned!))
             .ThenByDescending(x => SameHost(previous, x.Aligned!) ? 0 : 1)
             .ThenByDescending(x => x.Aligned!.TotalContentLength ?? x.Aligned.Bandwidth ?? 0)
             .Take(MediaVariantAlternatives.MaxStored)
@@ -120,6 +132,11 @@ internal static class MediaAddressRenewal
             var candidate = aligned!;
             if (IsKnownUndersizedVideo(candidate)) continue;
             if (IsFragileSignedHost(previous.SourceUrl) && IsFragileSignedHost(candidate.SourceUrl))
+                continue;
+            // Bilibili Akamai/overseas mirrors RST mid-body — switching to another fragile
+            // URL on the same CDN is not recovery (see job 8d97a112 loop).
+            if (BilibiliCdnPreference.IsFragile(previous.SourceUrl) &&
+                BilibiliCdnPreference.IsFragile(candidate.SourceUrl))
                 continue;
             if (string.Equals(candidate.SourceUrl.AbsoluteUri, previous.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
                 continue;
@@ -139,6 +156,12 @@ internal static class MediaAddressRenewal
 
         return null;
     }
+
+    /// <summary>Bilibili CDN rank when applicable; otherwise Douyin/TikTok durable-host score.</summary>
+    private static int HostRecoveryScore(MediaVariant variant) =>
+        BilibiliCdnPreference.IsMediaHost(variant.SourceUrl)
+            ? BilibiliCdnPreference.Score(variant.SourceUrl)
+            : DurableHostScore(variant);
 
     /// <summary>Reject watermark / preview shells whose declared size is below the dropdown crumb floor.</summary>
     internal static bool IsKnownUndersizedVideo(MediaVariant variant)

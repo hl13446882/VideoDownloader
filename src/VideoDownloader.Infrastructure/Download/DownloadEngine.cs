@@ -2008,6 +2008,10 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             if (string.Equals(job.LastErrorCode, ErrorCodes.NetTimeout, StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(job.LastErrorCode, ErrorCodes.IncompleteDownload, StringComparison.OrdinalIgnoreCase))
                 continue;
+            // HTTP_403 recovery already ran alternate/renew inside the job; auto-picking only
+            // restarts the same Akamai↔renew loop (Bilibili fragile CDN).
+            if (string.Equals(job.LastErrorCode, ErrorCodes.Http403, StringComparison.OrdinalIgnoreCase))
+                continue;
             if (now - job.UpdatedAt > TimeSpan.FromMinutes(30))
                 continue;
 

@@ -39,7 +39,13 @@ internal static class MediaVariantAlternatives
     private static string DedupKey(MediaVariant v)
     {
         if (BilibiliCdnPreference.IsMediaHost(v.SourceUrl))
-            return "obj:" + BilibiliCdnPreference.ObjectKey(v.SourceUrl);
+        {
+            // Keep both a durable and a fragile CDN for the same m4s so 403/RST recovery
+            // can leave Akamai instead of collapsing to a single host.
+            var tier = BilibiliCdnPreference.IsFragile(v.SourceUrl) ? "fragile" : "durable";
+            return "obj:" + BilibiliCdnPreference.ObjectKey(v.SourceUrl) + "|" + tier;
+        }
+
         return "url:" + string.Join('|', v.Tracks.Select(t => t.SourceUrl.AbsoluteUri));
     }
 }
