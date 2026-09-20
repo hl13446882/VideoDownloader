@@ -60,6 +60,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _bridge.PlaybackStateChanged += OnPlaybackStateChanged;
         _bridge.EditSubtitleRequested += OnEditSubtitleRequested;
         _bridge.EditSubtitleCommitted += OnEditSubtitleCommitted;
+        _bridge.EditSubtitleNavigateRequested += OnEditSubtitleNavigateRequested;
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
@@ -84,6 +85,11 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _ = HandleEditCommitAsync(e, _lifetimeCts.Token);
     }
 
+    private void OnEditSubtitleNavigateRequested(object? sender, SubtitleEditNavigateEventArgs e)
+    {
+        _ = HandleEditNavigateAsync(e, _lifetimeCts.Token);
+    }
+
     private async Task HandleEditRequestAsync(
         SubtitleEditRequestEventArgs e,
         CancellationToken cancellationToken)
@@ -104,21 +110,11 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             // System hints are not editable subtitle rows.
             if (string.Equals(segment.OriginalText, ModelMissingHint, StringComparison.Ordinal) ||
                 string.Equals(segment.OriginalText, NativeRuntimeHint, StringComparison.Ordinal) ||
-                string.Equals(segment.OriginalText, FfmpegMissingHint, StringComparison.Ordinal))
+                string.Equals(segment.OriginalText, FfmpegMissingHint, StringComparison.Ordinal) ||
+                string.Equals(segment.OriginalText, SourceMissingHint, StringComparison.Ordinal))
                 return;
 
-            var hasZh = !string.IsNullOrWhiteSpace(segment.ChineseText);
-            var hasEn = !string.IsNullOrWhiteSpace(segment.EnglishText);
-            var multilingual = hasZh || hasEn;
-
-            await _bridge.OpenSubtitleEditorAsync(new SubtitleEditorOpenModel
-            {
-                OriginalText = segment.OriginalText,
-                ChineseText = segment.ChineseText,
-                EnglishText = segment.EnglishText,
-                Multilingual = multilingual,
-                CurrentTimeSeconds = e.CurrentTime.TotalSeconds
-            }, cancellationToken).ConfigureAwait(false);
+            await OpenEditorForSegmentAsync(segment, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -127,6 +123,70 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         {
             // Edit UI is best-effort.
         }
+    }
+
+    private async Task HandleEditNavigateAsync(
+        SubtitleEditNavigateEventArgs e,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!_sessionActive || _localSource is null)
+                return;
+
+            var mediaTime = e.CurrentTime - TimeSpan.FromMilliseconds(_options.SubtitleOffsetMs);
+            if (mediaTime < TimeSpan.Zero)
+                mediaTime = TimeSpan.Zero;
+
+            var adjacent = _pipeline.GetAdjacent(mediaTime, e.Direction);
+            if (adjacent is null)
+                return;
+
+            var videoTime = adjacent.Start + TimeSpan.FromMilliseconds(_options.SubtitleOffsetMs);
+            if (videoTime < TimeSpan.Zero)
+                videoTime = TimeSpan.Zero;
+
+            await _bridge.SeekAndPauseAsync(videoTime.TotalSeconds, cancellationToken).ConfigureAwait(false);
+            _lastPlaybackTime = videoTime;
+
+            var display = adjacent.GetDisplayText(_options.Mode);
+            // Bypass editing gate: temporarily clear editing is handled inside openEditor;
+            // update lastDisplayed so overlay matches after editor closes.
+            _lastDisplayed = null;
+            await _bridge.SetSubtitleAsync(display, cancellationToken).ConfigureAwait(false);
+            _lastDisplayed = string.IsNullOrWhiteSpace(display) ? null : display.Trim();
+
+            await OpenEditorForSegmentAsync(adjacent, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Subtitle edit navigate failed");
+        }
+    }
+
+    private async Task OpenEditorForSegmentAsync(SubtitleSegment segment, CancellationToken cancellationToken)
+    {
+        var hasZh = !string.IsNullOrWhiteSpace(segment.ChineseText);
+        var hasEn = !string.IsNullOrWhiteSpace(segment.EnglishText);
+        var multilingual = hasZh || hasEn;
+        var mediaAnchor = segment.Start + TimeSpan.FromMilliseconds(1);
+        var videoTime = segment.Start + TimeSpan.FromMilliseconds(_options.SubtitleOffsetMs);
+        if (videoTime < TimeSpan.Zero)
+            videoTime = TimeSpan.Zero;
+
+        await _bridge.OpenSubtitleEditorAsync(new SubtitleEditorOpenModel
+        {
+            OriginalText = segment.OriginalText,
+            ChineseText = segment.ChineseText,
+            EnglishText = segment.EnglishText,
+            Multilingual = multilingual,
+            CurrentTimeSeconds = videoTime.TotalSeconds,
+            HasPrevious = _pipeline.GetAdjacent(mediaAnchor, -1) is not null,
+            HasNext = _pipeline.GetAdjacent(mediaAnchor, 1) is not null
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task HandleEditCommitAsync(
@@ -658,6 +718,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _bridge.PlaybackStateChanged -= OnPlaybackStateChanged;
         _bridge.EditSubtitleRequested -= OnEditSubtitleRequested;
         _bridge.EditSubtitleCommitted -= OnEditSubtitleCommitted;
+        _bridge.EditSubtitleNavigateRequested -= OnEditSubtitleNavigateRequested;
         _lifetimeCts.Cancel();
         CancelActiveWindow();
         if (_workTask is not null)

@@ -261,6 +261,9 @@ public sealed class SubtitlePipeline : ISubtitlePipeline
         return _timeline.Find(mediaTime);
     }
 
+    public SubtitleSegment? GetAdjacent(TimeSpan mediaTime, int delta) =>
+        _timeline.FindAdjacent(mediaTime, delta);
+
     public TimeSpan? GetCoveredUntil(TimeSpan mediaTime)
     {
         lock (_coverageSync)

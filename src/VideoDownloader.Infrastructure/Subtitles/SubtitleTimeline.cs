@@ -50,6 +50,49 @@ public sealed class SubtitleTimeline : ISubtitleTimeline
         }
     }
 
+    public SubtitleSegment? FindAdjacent(TimeSpan mediaTime, int delta)
+    {
+        if (delta == 0)
+            return Find(mediaTime);
+
+        lock (_sync)
+        {
+            if (_segments.Count == 0)
+                return null;
+
+            var index = -1;
+            for (var i = 0; i < _segments.Count; i++)
+            {
+                var item = _segments[i];
+                if (mediaTime >= item.Start && mediaTime < item.End)
+                {
+                    index = i;
+                    break;
+                }
+            }
+
+            if (index < 0)
+            {
+                for (var i = _segments.Count - 1; i >= 0; i--)
+                {
+                    if (_segments[i].Start <= mediaTime)
+                    {
+                        index = i;
+                        break;
+                    }
+                }
+            }
+
+            if (index < 0)
+                index = 0;
+
+            var next = index + delta;
+            if (next < 0 || next >= _segments.Count)
+                return null;
+            return _segments[next];
+        }
+    }
+
     public IReadOnlyList<SubtitleSegment> Snapshot()
     {
         lock (_sync)

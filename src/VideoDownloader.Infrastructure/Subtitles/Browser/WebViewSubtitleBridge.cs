@@ -27,6 +27,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     public event EventHandler<SubtitlePlaybackState>? PlaybackStateChanged;
     public event EventHandler<SubtitleEditRequestEventArgs>? EditSubtitleRequested;
     public event EventHandler<SubtitleEditCommitEventArgs>? EditSubtitleCommitted;
+    public event EventHandler<SubtitleEditNavigateEventArgs>? EditSubtitleNavigateRequested;
 
     public Task InitializeAsync(CancellationToken cancellationToken = default) =>
         RunOnUiAsync(async () =>
@@ -107,7 +108,9 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
             chinese = model.ChineseText ?? string.Empty,
             english = model.EnglishText ?? string.Empty,
             multilingual = model.Multilingual,
-            currentTime = model.CurrentTimeSeconds
+            currentTime = model.CurrentTimeSeconds,
+            hasPrevious = model.HasPrevious,
+            hasNext = model.HasNext
         });
         return RunOnUiAsync(async () =>
         {
@@ -115,6 +118,19 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
                 return;
             await _core.ExecuteScriptAsync(
                     $"window.__vdSubtitle&&window.__vdSubtitle.openEditor({json});")
+                .WaitAsync(cancellationToken);
+        });
+    }
+
+    public Task SeekAndPauseAsync(double seconds, CancellationToken cancellationToken = default)
+    {
+        var sec = double.IsFinite(seconds) ? Math.Max(0, seconds) : 0;
+        return RunOnUiAsync(async () =>
+        {
+            if (_core is null)
+                return;
+            await _core.ExecuteScriptAsync(
+                    $"window.__vdSubtitle&&window.__vdSubtitle.seekAndPause({sec.ToString(System.Globalization.CultureInfo.InvariantCulture)});")
                 .WaitAsync(cancellationToken);
         });
     }
@@ -202,6 +218,24 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
             return;
         }
 
+        if (type == "vd-edit-subtitle-nav")
+        {
+            var t = GetFiniteDouble(root, "currentTime") ?? 0;
+            var dirText = root.TryGetProperty("direction", out var dirEl) ? dirEl.GetString() : null;
+            var direction = string.Equals(dirText, "prev", StringComparison.OrdinalIgnoreCase) ? -1 : 1;
+            if (string.Equals(dirText, "next", StringComparison.OrdinalIgnoreCase))
+                direction = 1;
+            else if (string.Equals(dirText, "prev", StringComparison.OrdinalIgnoreCase))
+                direction = -1;
+            else if (root.TryGetProperty("delta", out var deltaEl) && deltaEl.TryGetInt32(out var delta))
+                direction = delta < 0 ? -1 : 1;
+
+            EditSubtitleNavigateRequested?.Invoke(this, new SubtitleEditNavigateEventArgs(
+                TimeSpan.FromSeconds(Math.Max(0, t)),
+                direction));
+            return;
+        }
+
         if (type == "vd-edit-subtitle-commit")
         {
             var t = GetFiniteDouble(root, "currentTime") ?? 0;
@@ -279,7 +313,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     /// AddScriptToExecuteOnDocumentCreated handlers across app launches; an old
     /// script that only checks <c>window.__vdSubtitle</c> would permanently block upgrades.
     /// </summary>
-    private const int InstallScriptVersion = 7;
+    private const int InstallScriptVersion = 9;
 
     private static string InstallScript => $$"""
 (() => {
@@ -453,10 +487,52 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
       border: '1px solid #4b5563', borderRadius: '10px', padding: '16px 16px 12px',
       boxShadow: '0 16px 48px rgba(0,0,0,.5)', fontFamily: 'Microsoft YaHei, sans-serif'
     });
+    const header = document.createElement('div');
+    header.id = 'vd-subtitle-edit-header';
+    Object.assign(header.style, {
+      display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px', flexWrap: 'wrap'
+    });
     const title = document.createElement('div');
     title.id = 'vd-subtitle-edit-title';
     title.textContent = '编辑字幕';
-    Object.assign(title.style, { fontSize: '15px', fontWeight: '600', marginBottom: '12px' });
+    Object.assign(title.style, { fontSize: '15px', fontWeight: '600', marginRight: '4px' });
+    const navBtnStyle = {
+      padding: '4px 10px', borderRadius: '6px', border: '1px solid #4b5563',
+      background: '#1f2937', color: '#e5e7eb', cursor: 'pointer', fontSize: '12px'
+    };
+    const prev = document.createElement('button');
+    prev.type = 'button';
+    prev.id = 'vd-subtitle-edit-prev';
+    prev.textContent = '上一条';
+    Object.assign(prev.style, navBtnStyle);
+    const next = document.createElement('button');
+    next.type = 'button';
+    next.id = 'vd-subtitle-edit-next';
+    next.textContent = '下一条';
+    Object.assign(next.style, navBtnStyle);
+    prev.onclick = (ev) => {
+      ev.preventDefault();
+      try {
+        chrome.webview.postMessage({
+          type: 'vd-edit-subtitle-nav',
+          direction: 'prev',
+          currentTime: editCurrentTime
+        });
+      } catch {}
+    };
+    next.onclick = (ev) => {
+      ev.preventDefault();
+      try {
+        chrome.webview.postMessage({
+          type: 'vd-edit-subtitle-nav',
+          direction: 'next',
+          currentTime: editCurrentTime
+        });
+      } catch {}
+    };
+    header.appendChild(title);
+    header.appendChild(prev);
+    header.appendChild(next);
     const fields = document.createElement('div');
     fields.id = 'vd-subtitle-edit-fields';
     const actions = document.createElement('div');
@@ -500,7 +576,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     };
     actions.appendChild(cancel);
     actions.appendChild(ok);
-    panel.appendChild(title);
+    panel.appendChild(header);
     panel.appendChild(fields);
     panel.appendChild(actions);
     mask.appendChild(panel);
@@ -538,12 +614,24 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     const mask = ensureEditor();
     const fields = document.getElementById('vd-subtitle-edit-fields');
     const title = document.getElementById('vd-subtitle-edit-title');
+    const prev = document.getElementById('vd-subtitle-edit-prev');
+    const next = document.getElementById('vd-subtitle-edit-next');
     if (!fields || !title) return;
     fields.innerHTML = '';
     const multilingual = !!payload.multilingual;
     editCurrentTime = Number(payload.currentTime) || 0;
     mask.dataset.multilingual = multilingual ? '1' : '0';
     title.textContent = multilingual ? '编辑字幕（原文 / 中文 / 英文）' : '编辑字幕';
+    if (prev) {
+      prev.disabled = payload.hasPrevious === false;
+      prev.style.opacity = prev.disabled ? '0.4' : '1';
+      prev.style.cursor = prev.disabled ? 'default' : 'pointer';
+    }
+    if (next) {
+      next.disabled = payload.hasNext === false;
+      next.style.opacity = next.disabled ? '0.4' : '1';
+      next.style.cursor = next.disabled ? 'default' : 'pointer';
+    }
     if (multilingual) {
       fields.appendChild(makeLabeledInput('vd-edit-original', '原文', payload.original || '', true));
       fields.appendChild(makeLabeledInput('vd-edit-chinese', '中文', payload.chinese || '', true));
@@ -574,7 +662,16 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
       if (value) layoutOverlay();
     },
     setStyle: applyStyle,
-    openEditor
+    openEditor,
+    seekAndPause(seconds) {
+      const m = chooseMedia();
+      if (!m) return;
+      try { m.pause(); } catch {}
+      const t = Number(seconds);
+      if (Number.isFinite(t) && t >= 0) {
+        try { m.currentTime = t; } catch {}
+      }
+    }
   };
 
   // Enable hit-testing on the subtitle so right-click can open the editor.

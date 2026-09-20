@@ -23,6 +23,9 @@ public interface ISubtitlePipeline
 
     SubtitleSegment? GetCurrent(TimeSpan mediaTime, SubtitleMode mode);
 
+    /// <summary>Previous/next cue relative to <paramref name="mediaTime"/>. delta is typically -1 or +1.</summary>
+    SubtitleSegment? GetAdjacent(TimeSpan mediaTime, int delta);
+
     TimeSpan? GetCoveredUntil(TimeSpan mediaTime);
 
     /// <summary>
