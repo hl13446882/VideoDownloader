@@ -127,7 +127,7 @@ public sealed class HttpMediaDownloader
             {
                 lastError = ex;
                 if (!TryContinueBilibiliTransport(job, ex, ref lastPartBytes, ref attempt, maxAttempts))
-                    throw;
+                    throw WrapBilibiliTransportExhausted(job, ex);
                 await DelayRetryAsync(Math.Max(1, attempt), ct);
             }
             catch (DownloadException ex) when (
@@ -136,7 +136,7 @@ public sealed class HttpMediaDownloader
             {
                 lastError = ex;
                 if (!TryContinueBilibiliTransport(job, ex, ref lastPartBytes, ref attempt, maxAttempts))
-                    throw;
+                    throw WrapBilibiliTransportExhausted(job, ex);
                 await DelayRetryAsync(Math.Max(1, attempt), ct);
             }
             catch (HttpRequestException ex) when (
@@ -147,7 +147,7 @@ public sealed class HttpMediaDownloader
                 if (BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl))
                 {
                     if (!TryContinueBilibiliTransport(job, ex, ref lastPartBytes, ref attempt, maxAttempts))
-                        throw;
+                        throw WrapBilibiliTransportExhausted(job, ex);
                     await DelayRetryAsync(Math.Max(1, attempt), ct);
                     continue;
                 }
@@ -156,7 +156,35 @@ public sealed class HttpMediaDownloader
             }
         }
 
-        throw lastError ?? new DownloadException(ErrorCodes.NetTimeout, "Download failed after retries.");
+        throw lastError is null
+            ? new DownloadException(ErrorCodes.NetTimeout, "Download failed after retries.")
+            : BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl)
+                ? WrapBilibiliTransportExhausted(job, lastError)
+                : lastError;
+    }
+
+    /// <summary>
+    /// Akamai / overseas Bilibili mirrors often RST mid-body. Surface IncompleteDownload so
+    /// <see cref="DownloadEngine"/> can switch to a domestic CDN while keeping <c>.part</c>.
+    /// </summary>
+    /// <summary>
+    /// Akamai / overseas Bilibili mirrors often RST mid-body. Prefer HTTP_403 recovery so
+    /// <c>DownloadEngine</c> can switch to a domestic CDN while keeping <c>.part</c>.
+    /// </summary>
+    private static DownloadException WrapBilibiliTransportExhausted(DownloadJob job, Exception ex)
+    {
+        var host = job.Variant.SourceUrl.Host;
+        // Fragile mirrors need a host switch; reuse the HTTP_403 recovery path.
+        if (BilibiliCdnPreference.IsFragile(job.Variant.SourceUrl))
+        {
+            return new DownloadException(
+                ErrorCodes.Http403,
+                $"Bilibili fragile CDN closed the transfer early ({host}); renewing.");
+        }
+
+        return new DownloadException(
+            ErrorCodes.IncompleteDownload,
+            $"Bilibili CDN closed the transfer early ({host}): {ex.GetType().Name}");
     }
 
     private async Task DownloadDirectCoreAsync(
@@ -381,11 +409,14 @@ public sealed class HttpMediaDownloader
 
     /// <summary>
     /// Album/BGM style objects that often break on Range. YouTube audio is excluded — it Range-resumes well.
+    /// Bilibili DASH audio (<c>302xx.m4s</c>) must Range-resume; soft-media would delete <c>.part</c>
+    /// on every attempt and loop forever on fragile Akamai mirrors.
     /// </summary>
     private static bool IsSoftMediaJob(DownloadJob job) =>
         job.Variant.Tracks.Count > 0 &&
         job.Variant.Tracks.All(t => t.Kind is MediaTrackKind.Image or MediaTrackKind.Audio) &&
-        !IsParallelRangeHost(job.Variant.SourceUrl);
+        !IsParallelRangeHost(job.Variant.SourceUrl) &&
+        !BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl);
 
     /// <summary>Splits [0, total) into up to <paramref name="connections"/> inclusive byte ranges.</summary>
     internal static (long Start, long End)[] SplitByteRanges(long totalBytes, int connections)
@@ -749,6 +780,21 @@ public sealed class HttpMediaDownloader
         }
         else if (offset > 0 && response.StatusCode == HttpStatusCode.OK)
         {
+            // Akamai Bilibili mirrors often ignore Range and return 200 for the whole object.
+            // Keep the .part prefix and let DownloadEngine renew onto a Range-capable CDN.
+            if (BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl))
+            {
+                _logger.LogWarning(
+                    "Bilibili CDN ignored Range (HTTP 200) for {JobId} at offset={Offset}; renewing host={Host}",
+                    job.Id,
+                    offset,
+                    job.Variant.SourceUrl.Host);
+                // HTTP_403 recovery switches CDN; do not wipe the .part prefix.
+                throw new DownloadException(
+                    ErrorCodes.Http403,
+                    $"Bilibili CDN ignored Range at offset {offset} ({job.Variant.SourceUrl.Host}); renewing.");
+            }
+
             // Server ignored Range (or If-Range failed) — must restart; partial bytes are not trustworthy.
             _logger.LogWarning(
                 "Server ignored Range (HTTP 200) for {JobId}; restarting from zero",

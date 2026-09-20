@@ -1,3 +1,4 @@
+using System.Net.Http;
 using NSubstitute;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Errors;
@@ -89,6 +90,15 @@ public class DownloadPolicyAcceptanceTests
         Assert.Equal(ErrorCodes.PermissionDenied,DownloadEngine.ClassifyError(new UnauthorizedAccessException()));
         Assert.Equal(ErrorCodes.InvalidFormat,DownloadEngine.ClassifyError(new InvalidDataException()));
         Assert.Equal(ErrorCodes.NetTimeout,DownloadEngine.ClassifyError(new HttpRequestException()));
+    }
+
+    [Fact]
+    public void HttpIoPrematureClose_IsIncompleteDownload_NotFileIo()
+    {
+        var httpIo = new HttpIOException(
+            HttpRequestError.ResponseEnded,
+            "The response ended prematurely, with at least 9961898 additional bytes expected. (ResponseEnded)");
+        Assert.Equal(ErrorCodes.IncompleteDownload, DownloadEngine.ClassifyError(httpIo));
     }
 
     [Fact]

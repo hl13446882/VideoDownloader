@@ -975,11 +975,16 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                     break;
                 }
                 catch (DownloadException ex) when (
-                    ex.ErrorCode == ErrorCodes.Http403 &&
+                    (ex.ErrorCode == ErrorCodes.Http403 ||
+                     (ex.ErrorCode == ErrorCodes.IncompleteDownload &&
+                      BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl))) &&
                     !(cookieRetried && gatewayRenewed && addressRenewed && browserRediscovered) &&
                     !cts.IsCancellationRequested)
                 {
-                    _logger.LogWarning("Job {JobId} media HTTP_403; starting same-content recovery", job.Id);
+                    _logger.LogWarning(
+                        "Job {JobId} media {Error}; starting same-content recovery",
+                        job.Id,
+                        ex.ErrorCode);
                     HangProbe.Mark(
                         "download.http403",
                         $"job={job.Id:N} cookies={job.Variant.RequestContext.Cookies.Count} host={job.Variant.SourceUrl.Host} id={job.Variant.ContentIdentity} recovery={job.Variant.RecoveryPageUrl}");
@@ -1358,10 +1363,31 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         UnauthorizedAccessException => ErrorCodes.PermissionDenied,
         InvalidDataException or FormatException or System.Xml.XmlException => ErrorCodes.InvalidFormat,
         IOException io when (io.HResult & 0xffff) is 112 or 39 => ErrorCodes.DiskFull,
+        // HttpIOException : IOException — CDN RST / ResponseEnded is not a disk failure.
+        IOException io when IsTransientNetworkIo(io) => ErrorCodes.IncompleteDownload,
         IOException => ErrorCodes.FileIo,
         HttpRequestException or TimeoutException or OperationCanceledException => ErrorCodes.NetTimeout,
         _ => ErrorCodes.Unexpected
     };
+
+    private static bool IsTransientNetworkIo(IOException ex)
+    {
+        for (Exception? current = ex; current is not null; current = current.InnerException)
+        {
+            if (string.Equals(current.GetType().Name, "HttpIOException", StringComparison.Ordinal))
+                return true;
+
+            var message = current.Message;
+            if (message.Contains("prematurely", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("ResponseEnded", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("forcibly closed", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("强迫关闭", StringComparison.Ordinal) ||
+                message.Contains("transport connection", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
 
     private void EnforceFinalDemoLimit(string path)
     {
