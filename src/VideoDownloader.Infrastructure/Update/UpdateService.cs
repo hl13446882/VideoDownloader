@@ -135,6 +135,23 @@ public sealed class UpdateService
             }
 
             var installRoot = InstallRoot;
+            if (!PathExpander.IsPackageInstallRoot(installRoot))
+            {
+                _logger.LogError(
+                    "Update aborted: InstallRoot is not a package root (relative layout). InstallRoot={InstallRoot}, ProcessPath={ProcessPath}",
+                    installRoot,
+                    Environment.ProcessPath);
+                return new UpdateCheckResult(
+                    UpdateCheckOutcome.Failed,
+                    Message: "install root unresolved (expected VideoBrowser.exe or app/main under package root)");
+            }
+
+            _logger.LogInformation(
+                "Update Diff: InstallRoot={InstallRoot}, local={Local}, remote={Remote}",
+                installRoot,
+                AppVersionInfo.SemVer,
+                manifest.Version);
+
             var (changed, deletes) = await DiffAsync(manifest, installRoot, ct);
             if (changed.Count == 0 && deletes.Count == 0)
             {

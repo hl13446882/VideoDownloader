@@ -174,6 +174,30 @@ public sealed class ExternalResolversOptions
 
 public static class PathExpander
 {
+    /// <summary>
+    /// Manifest / package paths are always relative to the install root, e.g.
+    /// <c>VideoBrowser.exe</c>, <c>app/main/VideoDownloader.exe</c>, <c>app/ffmpeg/ffmpeg.exe</c>.
+    /// InstallRoot and APPDIR must be derived by matching these relative anchors — never by
+    /// guessing parents of <see cref="AppContext.BaseDirectory"/> (single-file extracts live under %TEMP%\.net).
+    /// </summary>
+    public static readonly string AppDirectoryRelative = "app";
+
+    /// <summary>Longest-first host / launcher files relative to install root.</summary>
+    public static readonly string[] PackageExecutableRelativePaths =
+    [
+        "app/main/VideoDownloader.exe",
+        "app/VideoDownloader.exe",
+        "VideoBrowser.exe",
+        "VideoDownloader.exe"
+    ];
+
+    /// <summary>Directory suffixes (under install root) that may appear as ProcessDir / BaseDirectory.</summary>
+    public static readonly string[] PackageDirectoryRelativePaths =
+    [
+        "app/main",
+        "app"
+    ];
+
     public static string Expand(string path)
     {
         var appDir = ResolveAppDirectory();
@@ -184,156 +208,291 @@ public static class PathExpander
     }
 
     /// <summary>
-    /// Install layout is &lt;root&gt;\app\ with tools (ffmpeg, yt-dlp) and either
-    /// legacy app\VideoDownloader.exe or app\main\VideoDownloader.exe (+ side-by-side DLLs).
-    /// Single-file extracts may still set AppContext.BaseDirectory under %TEMP%\.net\.
+    /// <c>&lt;installRoot&gt;\app</c> — ffmpeg, yt-dlp, M3u8, and (legacy) flat host live here.
+    /// Side-by-side host DLLs live under <c>app\main\</c>; that folder is never APPDIR.
     /// </summary>
     public static string ResolveAppDirectory()
     {
-        var candidates = new List<string>(4);
+        var root = ResolveInstallRoot();
+        if (IsPackageInstallRoot(root))
+            return TrimDir(Path.Combine(root, AppDirectoryRelative));
 
+        // Unpackaged / unit-test host: tools may sit beside the content root.
+        if (LooksLikeAppInstallDirectory(root))
+            return TrimDir(root);
+
+        var app = Path.Combine(root, AppDirectoryRelative);
+        if (Directory.Exists(app))
+            return TrimDir(app);
+
+        return TrimDir(root);
+    }
+
+    /// <summary>
+    /// Package root containing <c>VideoBrowser.exe</c> and the <c>app\</c> tree.
+    /// Resolved only via relative package anchors from the real process path.
+    /// </summary>
+    public static string ResolveInstallRoot()
+    {
+        if (TryResolveInstallRootFromAbsolutePath(Environment.ProcessPath, out var fromProcess))
+            return fromProcess;
+
+        // BaseDirectory may be app\main\ (side-by-side) — still strip relative suffix.
+        // Never accept a bare %TEMP%\.net extract as the root.
+        if (TryResolveInstallRootFromAbsolutePath(AppContext.BaseDirectory, out var fromBase) &&
+            !IsSingleFileExtractDirectory(fromBase))
+            return fromBase;
+
+        // Walk ancestors of ProcessPath / BaseDirectory and accept only dirs that own relative package files.
+        foreach (var start in EnumerateProbeStarts())
+        {
+            if (TryFindInstallRootByWalkingRelativeAnchors(start, out var walked))
+                return walked;
+        }
+
+        // Last resort: still refuse .net extract; prefer parent-of-app when BaseDirectory ends with \app or \app\main.
+        if (TryStripKnownRelativeDirectory(AppContext.BaseDirectory, out var stripped) &&
+            !IsSingleFileExtractDirectory(stripped) &&
+            IsPackageInstallRoot(stripped))
+            return stripped;
+
+        // Unpackaged / unit-test host: keep Expand() working, but IsPackageInstallRoot will be false
+        // so UpdateService must refuse to Diff against this path.
+        var fallback = TrimDir(AppContext.BaseDirectory);
+        if (!IsSingleFileExtractDirectory(fallback))
+            return fallback;
+
+        throw new InvalidOperationException(
+            "Cannot resolve install root: process is under a single-file extract directory (%TEMP%\\.net) " +
+            "and no package-relative anchor (VideoBrowser.exe / app/main/VideoDownloader.exe) was found.");
+    }
+
+    /// <summary>
+    /// Test / diagnostic entry: resolve install root from an absolute exe or directory path
+    /// using only package-relative suffixes and relative layout checks.
+    /// </summary>
+    public static bool TryResolveInstallRootFromAbsolutePath(string? absolutePath, out string installRoot)
+    {
+        installRoot = string.Empty;
+        if (string.IsNullOrWhiteSpace(absolutePath))
+            return false;
+
+        string full;
         try
         {
-            var processPath = Environment.ProcessPath;
-            if (!string.IsNullOrWhiteSpace(processPath))
-            {
-                var processDir = Path.GetDirectoryName(Path.GetFullPath(processPath));
-                if (!string.IsNullOrWhiteSpace(processDir))
-                {
-                    // Prefer parent when running from app\main\ so ffmpeg/tools win over the host folder.
-                    var parent = Directory.GetParent(processDir);
-                    var leaf = Path.GetFileName(TrimDir(processDir));
-                    if (parent is not null &&
-                        leaf.Equals("main", StringComparison.OrdinalIgnoreCase))
-                    {
-                        candidates.Add(parent.FullName);
-                        candidates.Add(processDir);
-                    }
-                    else
-                    {
-                        candidates.Add(processDir);
-                        if (parent is not null)
-                            candidates.Add(parent.FullName);
-                    }
-                }
-            }
+            full = Path.GetFullPath(absolutePath);
         }
         catch
         {
-            // Fall through to AppContext.BaseDirectory.
+            return false;
         }
 
-        var baseDir = AppContext.BaseDirectory.TrimEnd(
-            Path.DirectorySeparatorChar,
-            Path.AltDirectorySeparatorChar);
-        if (!string.IsNullOrWhiteSpace(baseDir))
+        if (IsSingleFileExtractDirectory(full))
+            return false;
+
+        if (File.Exists(full))
         {
-            candidates.Add(baseDir);
-            var baseParent = Directory.GetParent(baseDir);
-            if (baseParent is not null)
-                candidates.Add(baseParent.FullName);
+            if (TryStripKnownRelativeFile(full, out var root) && IsPackageInstallRoot(root))
+            {
+                installRoot = root;
+                return true;
+            }
+
+            var dir = Path.GetDirectoryName(full);
+            if (!string.IsNullOrWhiteSpace(dir) &&
+                TryFindInstallRootByWalkingRelativeAnchors(dir, out root))
+            {
+                installRoot = root;
+                return true;
+            }
+
+            return false;
         }
 
-        foreach (var candidate in candidates)
+        if (Directory.Exists(full) || full.EndsWith(Path.DirectorySeparatorChar) ||
+            full.EndsWith(Path.AltDirectorySeparatorChar))
         {
-            if (LooksLikeAppInstallDirectory(candidate))
-                return TrimDir(candidate);
+            var dir = TrimDir(full);
+            if (TryStripKnownRelativeDirectory(dir, out var root) && IsPackageInstallRoot(root))
+            {
+                installRoot = root;
+                return true;
+            }
+
+            if (IsPackageInstallRoot(dir))
+            {
+                installRoot = TrimDir(dir);
+                return true;
+            }
+
+            if (TryFindInstallRootByWalkingRelativeAnchors(dir, out root))
+            {
+                installRoot = root;
+                return true;
+            }
         }
 
-        foreach (var candidate in candidates)
-        {
-            if (!IsSingleFileExtractDirectory(candidate))
-                return TrimDir(candidate);
-        }
-
-        return candidates.Count > 0 ? TrimDir(candidates[0]) : TrimDir(AppContext.BaseDirectory);
+        return false;
     }
 
-    private static bool LooksLikeAppInstallDirectory(string directory)
+    private static IEnumerable<string> EnumerateProbeStarts()
+    {
+        string? processPath = null;
+        try { processPath = Environment.ProcessPath; } catch { /* ignore */ }
+
+        if (!string.IsNullOrWhiteSpace(processPath))
+        {
+            string full;
+            try { full = Path.GetFullPath(processPath); }
+            catch { full = processPath; }
+
+            if (!IsSingleFileExtractDirectory(full))
+            {
+                var dir = File.Exists(full) ? Path.GetDirectoryName(full) : TrimDir(full);
+                if (!string.IsNullOrWhiteSpace(dir))
+                    yield return dir!;
+            }
+        }
+
+        var baseDir = TrimDir(AppContext.BaseDirectory);
+        if (!string.IsNullOrWhiteSpace(baseDir) && !IsSingleFileExtractDirectory(baseDir))
+            yield return baseDir;
+    }
+
+    private static bool TryStripKnownRelativeFile(string absoluteFile, out string installRoot)
+    {
+        installRoot = string.Empty;
+        var normalized = NormalizeSeparators(absoluteFile);
+        foreach (var relative in PackageExecutableRelativePaths)
+        {
+            var suffix = NormalizeSeparators(relative);
+            if (!normalized.EndsWith(Path.DirectorySeparatorChar + suffix, StringComparison.OrdinalIgnoreCase) &&
+                !normalized.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            // Require a directory separator before the relative suffix (unless path == suffix).
+            if (normalized.Length > suffix.Length)
+            {
+                var before = normalized[normalized.Length - suffix.Length - 1];
+                if (before != Path.DirectorySeparatorChar)
+                    continue;
+            }
+
+            var root = normalized[..^suffix.Length].TrimEnd(Path.DirectorySeparatorChar);
+            if (string.IsNullOrWhiteSpace(root))
+                continue;
+
+            installRoot = TrimDir(root);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryStripKnownRelativeDirectory(string absoluteDir, out string installRoot)
+    {
+        installRoot = string.Empty;
+        var normalized = TrimDir(NormalizeSeparators(absoluteDir));
+        foreach (var relative in PackageDirectoryRelativePaths)
+        {
+            var suffix = NormalizeSeparators(relative);
+            if (!normalized.EndsWith(Path.DirectorySeparatorChar + suffix, StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(normalized, suffix, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (normalized.Length > suffix.Length)
+            {
+                var before = normalized[normalized.Length - suffix.Length - 1];
+                if (before != Path.DirectorySeparatorChar)
+                    continue;
+            }
+
+            var root = normalized[..^suffix.Length].TrimEnd(Path.DirectorySeparatorChar);
+            if (string.IsNullOrWhiteSpace(root))
+                continue;
+
+            installRoot = TrimDir(root);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryFindInstallRootByWalkingRelativeAnchors(string startDirectory, out string installRoot)
+    {
+        installRoot = string.Empty;
+        DirectoryInfo? walk;
+        try { walk = new DirectoryInfo(Path.GetFullPath(startDirectory)); }
+        catch { return false; }
+
+        for (var i = 0; i < 6 && walk is not null; i++, walk = walk.Parent)
+        {
+            if (IsSingleFileExtractDirectory(walk.FullName))
+                continue;
+            if (!IsPackageInstallRoot(walk.FullName))
+                continue;
+            installRoot = TrimDir(walk.FullName);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// True when <paramref name="directory"/> owns the published relative layout
+    /// (launcher and/or <c>app\</c> tree), matching update manifest path prefixes.
+    /// </summary>
+    public static bool IsPackageInstallRoot(string directory)
+    {
+        if (string.IsNullOrWhiteSpace(directory) || IsSingleFileExtractDirectory(directory))
+            return false;
+
+        var root = TrimDir(directory);
+        if (File.Exists(CombineRelative(root, "VideoBrowser.exe")))
+            return true;
+        if (File.Exists(CombineRelative(root, "app/main/VideoDownloader.exe")))
+            return true;
+        if (File.Exists(CombineRelative(root, "app/VideoDownloader.exe")) &&
+            (File.Exists(CombineRelative(root, "app/ffmpeg/ffmpeg.exe")) ||
+             File.Exists(CombineRelative(root, "app/tools/yt-dlp.exe"))))
+            return true;
+
+        // Root-level legacy launcher only (no app\ffmpeg beside it).
+        return File.Exists(CombineRelative(root, "VideoDownloader.exe")) &&
+               !File.Exists(CombineRelative(root, "ffmpeg/ffmpeg.exe")) &&
+               Directory.Exists(CombineRelative(root, "app"));
+    }
+
+    /// <summary>True when directory is the <c>app\</c> tools folder (not <c>app\main\</c>).</summary>
+    public static bool LooksLikeAppInstallDirectory(string directory)
     {
         if (File.Exists(Path.Combine(directory, "ffmpeg", "ffmpeg.exe")))
             return true;
         if (File.Exists(Path.Combine(directory, "tools", "yt-dlp.exe")))
             return true;
 
-        // Side-by-side host lives in app\main\; tools stay in parent app\. Never treat main\ as APPDIR.
         var leaf = Path.GetFileName(TrimDir(directory));
         if (leaf.Equals("main", StringComparison.OrdinalIgnoreCase))
             return false;
 
-        // Legacy flat layout: VideoDownloader.exe directly under app\ (not app\main\).
         var exeHere = Path.Combine(directory, "VideoDownloader.exe");
         var exeInMain = Path.Combine(directory, "main", "VideoDownloader.exe");
         return File.Exists(exeHere) && !File.Exists(exeInMain);
     }
 
+    private static string CombineRelative(string root, string relative) =>
+        Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar));
+
+    private static string NormalizeSeparators(string path) =>
+        path.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+
     private static bool IsSingleFileExtractDirectory(string directory)
     {
-        var normalized = directory.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+        var normalized = NormalizeSeparators(directory);
         var marker = Path.DirectorySeparatorChar + ".net" + Path.DirectorySeparatorChar;
         return normalized.Contains(marker, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string TrimDir(string directory) =>
         directory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-
-    /// <summary>
-    /// Package root that contains VideoBrowser.exe (parent of the app\ folder).
-    /// Must not use AppContext.BaseDirectory alone — single-file extract lives under %TEMP%\.net\.
-    /// </summary>
-    public static string ResolveInstallRoot()
-    {
-        var appDir = ResolveAppDirectory();
-        var parent = Directory.GetParent(appDir);
-        if (parent is not null && LooksLikeInstallRoot(parent.FullName))
-            return TrimDir(parent.FullName);
-
-        try
-        {
-            var processPath = Environment.ProcessPath;
-            if (!string.IsNullOrWhiteSpace(processPath))
-            {
-                var processDir = Path.GetDirectoryName(Path.GetFullPath(processPath));
-                if (!string.IsNullOrWhiteSpace(processDir))
-                {
-                    if (LooksLikeInstallRoot(processDir))
-                        return TrimDir(processDir);
-
-                    // app\main → app → install root
-                    var walk = Directory.GetParent(processDir);
-                    for (var i = 0; i < 3 && walk is not null; i++, walk = walk.Parent)
-                    {
-                        if (LooksLikeInstallRoot(walk.FullName))
-                            return TrimDir(walk.FullName);
-                    }
-                }
-            }
-        }
-        catch
-        {
-            // Fall through.
-        }
-
-        // Last resort: keep previous parent-of-BaseDirectory behavior when it is not a .net extract.
-        var baseDir = TrimDir(AppContext.BaseDirectory);
-        if (!IsSingleFileExtractDirectory(baseDir))
-        {
-            var walk = Directory.GetParent(baseDir);
-            for (var i = 0; i < 3 && walk is not null; i++, walk = walk.Parent)
-            {
-                if (LooksLikeInstallRoot(walk.FullName))
-                    return TrimDir(walk.FullName);
-            }
-
-            if (LooksLikeInstallRoot(baseDir))
-                return baseDir;
-        }
-
-        return parent is not null ? TrimDir(parent.FullName) : appDir;
-    }
-
-    private static bool LooksLikeInstallRoot(string directory) =>
-        File.Exists(Path.Combine(directory, "VideoBrowser.exe")) ||
-        (File.Exists(Path.Combine(directory, "VideoDownloader.exe")) &&
-         !File.Exists(Path.Combine(directory, "ffmpeg", "ffmpeg.exe")));
 }
