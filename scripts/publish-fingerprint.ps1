@@ -60,13 +60,14 @@ function Invoke-CachedBuild {
     }
   }
 
-  Write-Host "Cache miss: $CacheName — rebuilding…"
+  Write-Host "Cache miss: $CacheName - rebuilding..."
   New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
   Get-ChildItem -LiteralPath $cacheDir -Force -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -ne 'fingerprint.txt' } |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
-  & $Build $cacheDir
+  # Keep build logs on the host stream so they do not become the function return value.
+  & $Build $cacheDir 2>&1 | ForEach-Object { Write-Host $_ }
   if (-not (Test-Path -LiteralPath $outputPath)) {
     throw "Cached build '$CacheName' did not produce $OutputFileName"
   }
