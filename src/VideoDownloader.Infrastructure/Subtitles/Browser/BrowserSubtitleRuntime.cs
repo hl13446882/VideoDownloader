@@ -44,6 +44,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     private bool _playbackActivityHeld;
     private bool _modelMissingNotified;
     private bool _sourceMissingNotified;
+    private bool _sequentialComplete;
     private int _playbackEpoch;
 
     public BrowserSubtitleRuntime(
@@ -145,6 +146,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                 recognized: false,
                 ct: cancellationToken).ConfigureAwait(false);
             await SetDisplayedAsync(null, cancellationToken).ConfigureAwait(false);
+            _sequentialComplete = false;
             _logger.LogInformation(
                 "Subtitle clear requested; restarting sequential ASR job={JobId}",
                 _localSource.JobId);
@@ -454,6 +456,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _lastKnownDuration = null;
         _modelMissingNotified = false;
         _sourceMissingNotified = false;
+        _sequentialComplete = false;
         lock (_translationSync)
             _translationRequests.Clear();
         ReleasePlaybackActivity();
@@ -523,6 +526,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _lastPlaybackTime = null;
         _lastKnownDuration = null;
         _modelMissingNotified = false;
+        _sequentialComplete = false;
         _mediaKey = mediaKey;
         _pageUrl = pageUrl;
         _localSource = await _localSourceResolver.ResolveAsync(pageUrl, cancellationToken).ConfigureAwait(false);
@@ -601,6 +605,18 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             if (_workTask is { IsCompleted: false })
                 return;
 
+            var knownDuration = duration ?? _lastKnownDuration;
+            if (_sequentialComplete)
+                return;
+
+            var covered = _pipeline.GetSequentialCoveredUntil();
+            if (knownDuration is { } done &&
+                covered + TimeSpan.FromSeconds(1.5) >= done)
+            {
+                _sequentialComplete = true;
+                return;
+            }
+
             if (!IsWhisperModelInstalled())
             {
                 if (!_modelMissingNotified)
@@ -629,8 +645,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             _logger.LogInformation(
                 "Subtitle sequential ASR loop start job={JobId} covered={Covered:g} duration={Duration}",
                 jobId,
-                _pipeline.GetSequentialCoveredUntil(),
-                duration?.ToString("g") ?? "(unknown)");
+                covered,
+                knownDuration?.ToString("g") ?? "(unknown)");
 
             _workTask = Task.Run(async () =>
             {
@@ -642,9 +658,10 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                         _audioDecoder,
                         mode,
                         windowSize,
-                        duration,
+                        knownDuration,
                         liveDuration: () => _lastKnownDuration,
                         shouldContinue: () =>
+                            !_sequentialComplete &&
                             string.Equals(mediaKey, _mediaKey, StringComparison.Ordinal) &&
                             string.Equals(cacheIdentity, _localSource?.CacheIdentity, StringComparison.Ordinal),
                         _logger,
@@ -653,12 +670,13 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                     _modelMissingNotified = false;
                     if (finished)
                     {
+                        _sequentialComplete = true;
                         try
                         {
                             await _downloadEngine.SetSubtitleRecognizedAsync(
                                 jobId,
                                 recognized: true,
-                                durationSec: (_lastKnownDuration ?? duration)?.TotalSeconds,
+                                durationSec: (_lastKnownDuration ?? knownDuration)?.TotalSeconds,
                                 token).ConfigureAwait(false);
                         }
                         catch (Exception ex)

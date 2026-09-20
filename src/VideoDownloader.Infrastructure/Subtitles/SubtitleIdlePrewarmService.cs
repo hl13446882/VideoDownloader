@@ -17,8 +17,10 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
     private static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan IdleBeforeWork = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan BetweenFilesDelay = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan ScanPause = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan ScanPause = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan CoverageCompleteSlack = TimeSpan.FromSeconds(1.5);
+    /// <summary>Do not monopolize Whisper on one long video; rotate after this wall time.</summary>
+    private static readonly TimeSpan PerFileSlice = TimeSpan.FromMinutes(3);
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IDownloadRepository _repository;
@@ -69,6 +71,10 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
             {
                 if (!_options.Enabled || !IsWhisperModelInstalled())
                 {
+                    _logger.LogDebug(
+                        "Subtitle idle prewarm waiting enabled={Enabled} modelReady={ModelReady}",
+                        _options.Enabled,
+                        IsWhisperModelInstalled());
                     await Task.Delay(ScanPause, cancellationToken).ConfigureAwait(false);
                     continue;
                 }
@@ -80,9 +86,12 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
                 var jobs = await LoadCandidatesAsync(cancellationToken).ConfigureAwait(false);
                 if (jobs.Count == 0)
                 {
+                    _logger.LogDebug("Subtitle idle prewarm: no unfinished library media");
                     await Task.Delay(ScanPause, cancellationToken).ConfigureAwait(false);
                     continue;
                 }
+
+                _logger.LogInformation("Subtitle idle prewarm scan candidates={Count}", jobs.Count);
 
                 foreach (var job in jobs)
                 {
@@ -157,13 +166,28 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
     private async Task<IReadOnlyList<DownloadJob>> LoadCandidatesAsync(CancellationToken cancellationToken)
     {
         var all = await _repository.GetAllAsync(cancellationToken).ConfigureAwait(false);
+        // Prefer shorter videos so the gallery shows progress; long titles continue later via slices.
         return all
             .Where(j => j.Status == DownloadStatus.Completed &&
                         !j.SubtitleRecognized &&
                         !string.IsNullOrWhiteSpace(j.TargetPath) &&
                         File.Exists(j.TargetPath))
-            .OrderByDescending(j => j.CompletedAt ?? j.UpdatedAt)
+            .OrderBy(j => j.DurationSec is > 0 ? j.DurationSec.Value : double.MaxValue)
+            .ThenBy(j => TryFileLength(j.TargetPath))
+            .ThenByDescending(j => j.CompletedAt ?? j.UpdatedAt)
             .ToArray();
+    }
+
+    private static long TryFileLength(string? path)
+    {
+        try
+        {
+            return string.IsNullOrWhiteSpace(path) ? long.MaxValue : new FileInfo(path).Length;
+        }
+        catch
+        {
+            return long.MaxValue;
+        }
     }
 
     private async Task PrewarmOneAsync(DownloadJob job, CancellationToken cancellationToken)
@@ -223,6 +247,7 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
             duration?.ToString("g") ?? "(unknown)");
 
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var sliceDeadline = DateTime.UtcNow + PerFileSlice;
         void OnPlayback(object? _, EventArgs __)
         {
             if (_activity.IsPlaybackActive)
@@ -244,7 +269,8 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
                 windowSize,
                 duration,
                 liveDuration: null,
-                shouldContinue: () => !_activity.IsPlaybackActive,
+                shouldContinue: () =>
+                    !_activity.IsPlaybackActive && DateTime.UtcNow < sliceDeadline,
                 _logger,
                 "idle:" + job.Id.ToString("N"),
                 linked.Token).ConfigureAwait(false);
@@ -259,10 +285,11 @@ public sealed class SubtitleIdlePrewarmService : IAsyncDisposable
             }
 
             _logger.LogInformation(
-                "Subtitle idle prewarm end job={JobId} covered={Covered:g} finished={Finished}",
+                "Subtitle idle prewarm end job={JobId} covered={Covered:g} finished={Finished} sliced={Sliced}",
                 job.Id,
                 pipeline.GetSequentialCoveredUntil(),
-                finished);
+                finished,
+                !finished && DateTime.UtcNow >= sliceDeadline);
         }
         finally
         {
