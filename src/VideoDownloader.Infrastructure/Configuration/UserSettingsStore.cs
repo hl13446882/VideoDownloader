@@ -201,7 +201,8 @@ public sealed class UserSettingsStore
                 QueueGrouped = source.Ui?.QueueGrouped ?? false,
                 AutoModeIdleMinutes = source.Ui?.AutoModeIdleMinutes > 0
                     ? source.Ui.AutoModeIdleMinutes
-                    : 5
+                    : 5,
+                AutoCheckForUpdates = source.Ui?.AutoCheckForUpdates ?? false
             },
             Subtitles = new SubtitleOptions
             {

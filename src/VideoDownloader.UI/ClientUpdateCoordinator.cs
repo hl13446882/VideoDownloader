@@ -3,6 +3,7 @@ using System.IO;
 using System.Windows;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Licensing;
 using VideoDownloader.Infrastructure.Update;
 using VideoDownloader.UI.Localization;
@@ -20,6 +21,10 @@ internal static class ClientUpdateCoordinator
     {
         try
         {
+            var options = services.GetRequiredService<AppOptions>();
+            if (!options.Ui.AutoCheckForUpdates)
+                return;
+
             // Let the main window paint first.
             await Task.Delay(1500);
             await RunCheckCoreAsync(services, promptWhenReady: true, showProgress: true);

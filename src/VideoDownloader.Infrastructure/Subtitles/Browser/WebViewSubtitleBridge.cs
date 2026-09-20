@@ -28,6 +28,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     public event EventHandler<SubtitleEditRequestEventArgs>? EditSubtitleRequested;
     public event EventHandler<SubtitleEditCommitEventArgs>? EditSubtitleCommitted;
     public event EventHandler<SubtitleEditNavigateEventArgs>? EditSubtitleNavigateRequested;
+    public event EventHandler? ScriptReady;
 
     public Task InitializeAsync(CancellationToken cancellationToken = default) =>
         RunOnUiAsync(async () =>
@@ -110,7 +111,8 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
             multilingual = model.Multilingual,
             currentTime = model.CurrentTimeSeconds,
             hasPrevious = model.HasPrevious,
-            hasNext = model.HasNext
+            hasNext = model.HasNext,
+            overlayText = model.OverlayText ?? model.OriginalText ?? string.Empty
         });
         return RunOnUiAsync(async () =>
         {
@@ -207,6 +209,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
             var ver = root.TryGetProperty("ver", out var verEl) && verEl.TryGetInt32(out var v) ? v : -1;
             var href = root.TryGetProperty("href", out var hrefEl) ? hrefEl.GetString() : null;
             _logger.LogInformation("Subtitle script boot ver={Ver} href={Href}", ver, href);
+            ScriptReady?.Invoke(this, EventArgs.Empty);
             return;
         }
 
@@ -313,7 +316,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     /// AddScriptToExecuteOnDocumentCreated handlers across app launches; an old
     /// script that only checks <c>window.__vdSubtitle</c> would permanently block upgrades.
     /// </summary>
-    private const int InstallScriptVersion = 9;
+    private const int InstallScriptVersion = 10;
 
     private static string InstallScript => $$"""
 (() => {
@@ -386,12 +389,12 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
       position: 'fixed', left: '50%', transform: 'translateX(-50%)', bottom: '60px',
       zIndex: '2147483647', pointerEvents: 'none', textAlign: 'center',
       fontFamily: 'Microsoft YaHei, sans-serif', fontSize: '28px', fontWeight: '700',
-      color: '#FFFFFF', backgroundColor: 'rgba(0,0,0,0.35)', padding: '4px 10px',
+      color: '#FFFF00', backgroundColor: 'rgba(0,0,0,0.35)', padding: '4px 10px',
       borderRadius: '4px', maxWidth: '85vw', whiteSpace: 'pre-wrap',
       lineHeight: '1.35', display: 'none', boxSizing: 'border-box',
       // Prefer text-shadow rings over -webkit-text-stroke (stroke hollows Chinese glyphs).
       webkitTextStroke: '0 transparent',
-      textShadow: '-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000',
+      textShadow: '-2px -2px 0 #000,2px -2px 0 #000,-2px 2px 0 #000,2px 2px 0 #000',
       cursor: 'default'
     });
     (document.body || document.documentElement).appendChild(el);
@@ -632,6 +635,17 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
       next.style.opacity = next.disabled ? '0.4' : '1';
       next.style.cursor = next.disabled ? 'default' : 'pointer';
     }
+    // Keep on-screen cue in sync while navigating between entries.
+    const overlayValue = String(
+      payload.overlayText != null ? payload.overlayText : (payload.original || '')
+    ).trim();
+    const overlay = ensureOverlay();
+    lastText = overlayValue;
+    overlay.textContent = overlayValue;
+    overlay.style.display = overlayValue ? 'block' : 'none';
+    overlay.style.pointerEvents = overlayValue ? 'auto' : 'none';
+    overlay.style.cursor = overlayValue ? 'context-menu' : 'default';
+    if (overlayValue) layoutOverlay();
     if (multilingual) {
       fields.appendChild(makeLabeledInput('vd-edit-original', '原文', payload.original || '', true));
       fields.appendChild(makeLabeledInput('vd-edit-chinese', '中文', payload.chinese || '', true));
@@ -651,7 +665,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
   window.__vdSubtitleVersion = VER;
   window.__vdSubtitle = {
     setText(text) {
-      if (editing) return;
+      // Always refresh overlay text — including while the editor is open (prev/next nav).
       const el = ensureOverlay();
       const value = String(text || '').trim();
       lastText = value;

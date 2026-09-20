@@ -28,6 +28,7 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
                     <Grid.ColumnDefinitions>
@@ -86,18 +87,23 @@
                     <CheckBox Grid.Row="7" Grid.Column="1" Content="{Binding L.SettingsAutoRecover}"
                               IsChecked="{Binding AutoRecover}" Margin="0,0,0,8"/>
 
-                    <TextBlock Grid.Row="8" Grid.Column="0" Text="{Binding L.SettingsAppVersion}" VerticalAlignment="Center" Margin="0,0,8,8"/>
-                    <DockPanel Grid.Row="8" Grid.Column="1" Margin="0,0,0,8">
-                        <Button DockPanel.Dock="Right"
-                                Content="{Binding L.SettingsCheckUpdate}"
+                    <StackPanel Grid.Row="8" Grid.Column="0" Grid.ColumnSpan="2"
+                                Orientation="Horizontal" Margin="0,0,0,8" VerticalAlignment="Center">
+                        <Button Content="{Binding L.SettingsCheckUpdate}"
                                 Command="{Binding CheckUpdateCommand}"
-                                Padding="12,4" Margin="8,0,0,0"
+                                Padding="12,4" Margin="0,0,12,0"
                                 IsEnabled="{Binding CheckUpdateEnabled}"/>
-                        <TextBlock Text="{Binding AppVersionText}" VerticalAlignment="Center" TextWrapping="Wrap"/>
-                    </DockPanel>
+                        <CheckBox Content="{Binding L.SettingsAutoCheckUpdates}"
+                                  IsChecked="{Binding AutoCheckForUpdates}"
+                                  VerticalAlignment="Center"
+                                  ToolTip="{Binding L.SettingsAutoCheckUpdatesTip}"/>
+                    </StackPanel>
 
-                    <TextBlock Grid.Row="9" Grid.Column="0" Text="{Binding L.SettingsCopyright}" VerticalAlignment="Center" Margin="0,0,8,8"/>
-                    <TextBlock Grid.Row="9" Grid.Column="1" Text="刘志东" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                    <TextBlock Grid.Row="9" Grid.Column="0" Text="{Binding L.SettingsAppVersion}" VerticalAlignment="Center" Margin="0,0,8,8"/>
+                    <TextBlock Grid.Row="9" Grid.Column="1" Text="{Binding AppVersionText}" VerticalAlignment="Center" Margin="0,0,0,8" TextWrapping="Wrap"/>
+
+                    <TextBlock Grid.Row="10" Grid.Column="0" Text="{Binding L.SettingsCopyright}" VerticalAlignment="Center" Margin="0,0,8,8"/>
+                    <TextBlock Grid.Row="10" Grid.Column="1" Text="刘志东" VerticalAlignment="Center" Margin="0,0,0,8"/>
                 </Grid>
             </TabItem>
 

@@ -28,6 +28,9 @@ public sealed class UiOptions
 
     /// <summary>Last used auto-mode session duration in minutes (positive integer). Fixed wall clock from Start.</summary>
     public int AutoModeIdleMinutes { get; set; } = 5;
+
+    /// <summary>When true, check for updates automatically on startup. Default off — user must opt in.</summary>
+    public bool AutoCheckForUpdates { get; set; }
 }
 
 public sealed class UpdateOptions

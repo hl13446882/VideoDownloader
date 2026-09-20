@@ -42,6 +42,8 @@ public sealed class SubtitleEditorOpenModel
     public double CurrentTimeSeconds { get; init; }
     public bool HasPrevious { get; init; }
     public bool HasNext { get; init; }
+    /// <summary>Text currently shown on the overlay (mode-aware display).</summary>
+    public string? OverlayText { get; init; }
 }
 
 public sealed class SubtitleEditNavigateEventArgs : EventArgs

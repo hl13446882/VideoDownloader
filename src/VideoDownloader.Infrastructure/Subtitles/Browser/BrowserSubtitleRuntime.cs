@@ -61,6 +61,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _bridge.EditSubtitleRequested += OnEditSubtitleRequested;
         _bridge.EditSubtitleCommitted += OnEditSubtitleCommitted;
         _bridge.EditSubtitleNavigateRequested += OnEditSubtitleNavigateRequested;
+        _bridge.ScriptReady += OnScriptReady;
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
@@ -73,6 +74,30 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
     {
         _styleFingerprint = null;
         return ApplyStyleIfChangedAsync(cancellationToken);
+    }
+
+    private void OnScriptReady(object? sender, EventArgs e)
+    {
+        _ = HandleScriptReadyAsync(_lifetimeCts.Token);
+    }
+
+    private async Task HandleScriptReadyAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            // Document reinject resets overlay CSS to script defaults; force-push user style + last cue.
+            _styleFingerprint = null;
+            await ApplyStyleIfChangedAsync(cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(_lastDisplayed))
+                await _bridge.SetSubtitleAsync(_lastDisplayed, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Subtitle script-ready restyle skipped");
+        }
     }
 
     private void OnEditSubtitleRequested(object? sender, SubtitleEditRequestEventArgs e)
@@ -114,7 +139,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
                 string.Equals(segment.OriginalText, SourceMissingHint, StringComparison.Ordinal))
                 return;
 
-            await OpenEditorForSegmentAsync(segment, cancellationToken).ConfigureAwait(false);
+            await OpenEditorForSegmentAsync(segment, segment.GetDisplayText(_options.Mode), cancellationToken)
+                .ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -150,13 +176,9 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             _lastPlaybackTime = videoTime;
 
             var display = adjacent.GetDisplayText(_options.Mode);
-            // Bypass editing gate: temporarily clear editing is handled inside openEditor;
-            // update lastDisplayed so overlay matches after editor closes.
-            _lastDisplayed = null;
-            await _bridge.SetSubtitleAsync(display, cancellationToken).ConfigureAwait(false);
             _lastDisplayed = string.IsNullOrWhiteSpace(display) ? null : display.Trim();
-
-            await OpenEditorForSegmentAsync(adjacent, cancellationToken).ConfigureAwait(false);
+            await _bridge.SetSubtitleAsync(_lastDisplayed, cancellationToken).ConfigureAwait(false);
+            await OpenEditorForSegmentAsync(adjacent, display, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -167,7 +189,10 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         }
     }
 
-    private async Task OpenEditorForSegmentAsync(SubtitleSegment segment, CancellationToken cancellationToken)
+    private async Task OpenEditorForSegmentAsync(
+        SubtitleSegment segment,
+        string? overlayText,
+        CancellationToken cancellationToken)
     {
         var hasZh = !string.IsNullOrWhiteSpace(segment.ChineseText);
         var hasEn = !string.IsNullOrWhiteSpace(segment.EnglishText);
@@ -177,6 +202,10 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         if (videoTime < TimeSpan.Zero)
             videoTime = TimeSpan.Zero;
 
+        var display = string.IsNullOrWhiteSpace(overlayText)
+            ? segment.GetDisplayText(_options.Mode)
+            : overlayText.Trim();
+
         await _bridge.OpenSubtitleEditorAsync(new SubtitleEditorOpenModel
         {
             OriginalText = segment.OriginalText,
@@ -185,7 +214,8 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             Multilingual = multilingual,
             CurrentTimeSeconds = videoTime.TotalSeconds,
             HasPrevious = _pipeline.GetAdjacent(mediaAnchor, -1) is not null,
-            HasNext = _pipeline.GetAdjacent(mediaAnchor, 1) is not null
+            HasNext = _pipeline.GetAdjacent(mediaAnchor, 1) is not null,
+            OverlayText = display
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -719,6 +749,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         _bridge.EditSubtitleRequested -= OnEditSubtitleRequested;
         _bridge.EditSubtitleCommitted -= OnEditSubtitleCommitted;
         _bridge.EditSubtitleNavigateRequested -= OnEditSubtitleNavigateRequested;
+        _bridge.ScriptReady -= OnScriptReady;
         _lifetimeCts.Cancel();
         CancelActiveWindow();
         if (_workTask is not null)

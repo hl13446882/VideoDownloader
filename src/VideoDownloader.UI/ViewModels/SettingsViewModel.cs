@@ -35,6 +35,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string _retryCountText;
     [ObservableProperty] private string _failedRetryIntervalText;
     [ObservableProperty] private bool _autoRecover;
+    [ObservableProperty] private bool _autoCheckForUpdates;
     [ObservableProperty] private bool _loggingEnabled;
     [ObservableProperty] private string _logLevel;
     [ObservableProperty] private string _statusMessage = string.Empty;
@@ -116,6 +117,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         _retryCountText = options.Download.RetryCount.ToString();
         _failedRetryIntervalText = options.Download.FailedRetryIntervalSeconds.ToString();
         _autoRecover = options.Download.AutoRecoverDownloads;
+        _autoCheckForUpdates = options.Ui.AutoCheckForUpdates;
         _loggingEnabled = options.Logging.Enabled;
         _logLevel = options.Logging.MinimumLevel;
 
@@ -383,6 +385,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         _options.Download.RetryCount = Math.Clamp(retryCount, 0, 10);
         _options.Download.FailedRetryIntervalSeconds = Math.Clamp(failedRetryInterval, 0, 3600);
         _options.Download.AutoRecoverDownloads = AutoRecover;
+        _options.Ui.AutoCheckForUpdates = AutoCheckForUpdates;
         _options.Logging.Enabled = LoggingEnabled;
         _options.Logging.MinimumLevel = string.IsNullOrWhiteSpace(LogLevel) ? "Information" : LogLevel.Trim();
         _options.Ui.Language = _loc.LanguageCode;
