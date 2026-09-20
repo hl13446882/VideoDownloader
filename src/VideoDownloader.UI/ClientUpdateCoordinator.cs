@@ -247,12 +247,34 @@ internal static class ClientUpdateCoordinator
 
         try
         {
+            // Hand off to a short helper that waits for this process to exit before
+            // starting the launcher. Prevents the launcher from overwriting app\main
+            // DLLs while they are still mapped (especially with older launchers that
+            // only watched app\VideoDownloader.exe and missed app\main\).
+            var helper = Path.Combine(
+                Path.GetTempPath(),
+                "vd-apply-update-" + Guid.NewGuid().ToString("N") + ".cmd");
+            var content =
+                "@echo off\r\n" +
+                "set /a N=0\r\n" +
+                ":wait\r\n" +
+                "ping 127.0.0.1 -n 2 >nul\r\n" +
+                "tasklist /FI \"IMAGENAME eq VideoDownloader.exe\" | find /I \"VideoDownloader.exe\" >nul\r\n" +
+                "if errorlevel 1 goto start\r\n" +
+                "set /a N+=1\r\n" +
+                "if %N% LSS 90 goto wait\r\n" +
+                "taskkill /F /IM VideoDownloader.exe >nul 2>nul\r\n" +
+                "ping 127.0.0.1 -n 2 >nul\r\n" +
+                ":start\r\n" +
+                "start \"\" /D \"" + Path.GetDirectoryName(launcher) + "\" \"" + launcher + "\" --apply-update\r\n" +
+                "del \"%~f0\"\r\n";
+            File.WriteAllText(helper, content);
             Process.Start(new ProcessStartInfo
             {
-                FileName = launcher,
-                WorkingDirectory = Path.GetDirectoryName(launcher) ?? installRoot,
-                Arguments = "--apply-update",
-                UseShellExecute = false
+                FileName = helper,
+                CreateNoWindow = true,
+                UseShellExecute = false,
+                WindowStyle = ProcessWindowStyle.Hidden
             });
         }
         catch (Exception ex)

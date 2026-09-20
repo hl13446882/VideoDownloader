@@ -239,9 +239,6 @@ internal static class Program
 
         try
         {
-            WaitForAppExit(splash);
-            StopHelperProcesses();
-
             var json = File.ReadAllText(pendingPath);
             var pending = ReadPendingUpdate(json);
             var installRoot = !string.IsNullOrWhiteSpace(pending.InstallRoot)
@@ -260,6 +257,12 @@ internal static class Program
                 // Safety: only apply into the directory that started us.
                 installRoot = Path.GetFullPath(launcherDir);
             }
+
+            // Wait until the main app under this install root has exited (and force-kill if needed)
+            // before touching side-by-side DLLs under app\main\.
+            WaitForAppExit(splash, installRoot);
+            StopHelperProcesses();
+            Thread.Sleep(400);
 
             var staging = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -304,14 +307,13 @@ internal static class Program
                         continue;
                     }
 
-                    Directory.CreateDirectory(Path.GetDirectoryName(dest));
-                    File.Copy(file, dest, true);
+                    CopyFileWithRetry(file, dest);
                 }
 
                 if (deferredLauncherSource != null)
                 {
                     var newPath = Path.Combine(installRoot, DeferredLauncherFileName);
-                    File.Copy(deferredLauncherSource, newPath, true);
+                    CopyFileWithRetry(deferredLauncherSource, newPath);
                     ScheduleLauncherReplace(installRoot, newPath);
                 }
             }
@@ -323,8 +325,7 @@ internal static class Program
                     if (string.IsNullOrWhiteSpace(relative) || relative.IndexOf("..", StringComparison.Ordinal) >= 0)
                         continue;
                     var target = Path.Combine(installRoot, relative.Replace('/', Path.DirectorySeparatorChar));
-                    if (File.Exists(target))
-                        File.Delete(target);
+                    DeleteFileWithRetry(target);
                 }
             }
 
@@ -448,33 +449,186 @@ internal static class Program
         });
     }
 
-    private static void WaitForAppExit(LoadingForm splash)
+    private static void WaitForAppExit(LoadingForm splash, string installRoot)
     {
         var deadline = DateTime.UtcNow.AddSeconds(60);
         while (DateTime.UtcNow < deadline)
         {
             Application.DoEvents();
-            var stillRunning = Process.GetProcessesByName("VideoDownloader")
-                .Any(p =>
+            var running = EnumerateMainAppProcesses(installRoot).ToList();
+            try
+            {
+                if (running.Count == 0)
+                    return;
+            }
+            finally
+            {
+                foreach (var process in running)
                 {
-                    try
-                    {
-                        if (p.Id == Process.GetCurrentProcess().Id)
-                            return false;
-                        var module = p.MainModule != null ? p.MainModule.FileName : null;
-                        return module != null &&
-                               module.IndexOf("\\app\\VideoDownloader.exe", StringComparison.OrdinalIgnoreCase) >= 0;
-                    }
-                    catch
-                    {
-                        return false;
-                    }
-                });
-            if (!stillRunning)
-                return;
+                    try { process.Dispose(); } catch { /* ignore */ }
+                }
+            }
+
             splash.SetStatus("等待主程序退出…");
             Thread.Sleep(250);
         }
+
+        splash.SetStatus("正在结束主程序…");
+        Application.DoEvents();
+        foreach (var process in EnumerateMainAppProcesses(installRoot))
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill();
+                    process.WaitForExit(8000);
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+            finally
+            {
+                try { process.Dispose(); } catch { /* ignore */ }
+            }
+        }
+
+        // One more short poll so OS releases loaded DLL handles.
+        var releaseDeadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < releaseDeadline)
+        {
+            var leftover = EnumerateMainAppProcesses(installRoot).ToList();
+            try
+            {
+                if (leftover.Count == 0)
+                    return;
+            }
+            finally
+            {
+                foreach (var process in leftover)
+                {
+                    try { process.Dispose(); } catch { /* ignore */ }
+                }
+            }
+
+            Thread.Sleep(200);
+        }
+    }
+
+    /// <summary>
+    /// Main UI process for this install: app\main\VideoDownloader.exe (current) or
+    /// app\VideoDownloader.exe (legacy forwarder / older layouts). Never match other installs.
+    /// </summary>
+    private static IEnumerable<Process> EnumerateMainAppProcesses(string installRoot)
+    {
+        var rootPrefix = Path.GetFullPath(installRoot).TrimEnd('\\', '/') + Path.DirectorySeparatorChar;
+        var currentId = Process.GetCurrentProcess().Id;
+        foreach (var process in Process.GetProcessesByName("VideoDownloader"))
+        {
+            if (process.Id == currentId)
+            {
+                process.Dispose();
+                continue;
+            }
+
+            string module = null;
+            try
+            {
+                module = process.MainModule != null ? process.MainModule.FileName : null;
+            }
+            catch
+            {
+                process.Dispose();
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(module))
+            {
+                process.Dispose();
+                continue;
+            }
+
+            string full;
+            try
+            {
+                full = Path.GetFullPath(module);
+            }
+            catch
+            {
+                process.Dispose();
+                continue;
+            }
+
+            if (!full.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                process.Dispose();
+                continue;
+            }
+
+            if (!IsMainAppExecutablePath(full, rootPrefix))
+            {
+                process.Dispose();
+                continue;
+            }
+
+            yield return process;
+        }
+    }
+
+    private static bool IsMainAppExecutablePath(string fullPath, string installRootPrefix)
+    {
+        var main = Path.GetFullPath(Path.Combine(installRootPrefix, AppRelativePathMain));
+        var legacy = Path.GetFullPath(Path.Combine(installRootPrefix, AppRelativePathLegacy));
+        return string.Equals(fullPath, main, StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(fullPath, legacy, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void CopyFileWithRetry(string source, string dest, int attempts = 40, int delayMs = 250)
+    {
+        Exception last = null;
+        for (var i = 0; i < attempts; i++)
+        {
+            try
+            {
+                var dir = Path.GetDirectoryName(dest);
+                if (!string.IsNullOrEmpty(dir))
+                    Directory.CreateDirectory(dir);
+                File.Copy(source, dest, true);
+                return;
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                last = ex;
+                Thread.Sleep(delayMs);
+            }
+        }
+
+        throw new IOException("无法替换文件（仍被占用）：" + dest, last);
+    }
+
+    private static void DeleteFileWithRetry(string path, int attempts = 20, int delayMs = 250)
+    {
+        if (!File.Exists(path))
+            return;
+
+        Exception last = null;
+        for (var i = 0; i < attempts; i++)
+        {
+            try
+            {
+                File.Delete(path);
+                return;
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                last = ex;
+                Thread.Sleep(delayMs);
+            }
+        }
+
+        throw new IOException("无法删除文件（仍被占用）：" + path, last);
     }
 
     private static void StopHelperProcesses()
