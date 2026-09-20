@@ -284,6 +284,7 @@ public sealed partial class LocalizationService : ObservableObject
         ["status.autoDelayDownload"] = ("自动模式：即将应用下载，{0} 秒…", "Auto: applying download in {0}s…"),
         ["status.autoDelaySwitch"] = ("自动模式：下载已开始，{0} 秒后切下一条…", "Auto: download started, next in {0}s…"),
         ["status.autoNoAddress"] = ("自动模式：本条暂无地址，{0} 秒后切下一条…", "Auto: no address on this item, next in {0}s…"),
+        ["status.autoSameContent"] = ("自动模式：网址与文案未变，跳过重复下载，继续切页…", "Auto: same URL and caption, skip duplicate, advancing…"),
         ["tip.local"] = ("打开本地视频库", "Open local video library"),
         ["tip.settings"] = ("设置", "Settings"),
         ["tip.language"] = ("切换到英文", "Switch to Chinese"),

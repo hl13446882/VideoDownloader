@@ -421,6 +421,7 @@ public sealed partial class MainViewModel : ObservableObject
         "status.autoDelayDownload",
         "status.autoDelaySwitch",
         "status.autoNoAddress",
+        "status.autoSameContent",
         "update.checking",
         "update.foundVersion",
         "update.downloadingFile",
@@ -437,7 +438,11 @@ public sealed partial class MainViewModel : ObservableObject
     private int _autoProcessedCount;
     /// <summary>Fixed end of the current auto-mode session (start + duration). MaxValue when unlimited.</summary>
     private DateTime _autoSessionEndUtc;
-    private string? _autoSwitchFromIdentity;
+    /// <summary>
+    /// Last auto-enqueued item fingerprint: full page URL + caption. Same pair must not download again
+    /// until either side changes (guards failed feed switches).
+    /// </summary>
+    private string? _autoLastEnqueuedFingerprint;
 
     [ObservableProperty]
     private bool _isAutoMode;
@@ -2138,6 +2143,7 @@ public sealed partial class MainViewModel : ObservableObject
         _autoSessionEndUtc = _autoIdleMinutes > 0
             ? DateTime.UtcNow.AddMinutes(_autoIdleMinutes)
             : DateTime.MaxValue;
+        _autoLastEnqueuedFingerprint = null;
         IsAutoMode = true;
         SetStatusKey("status.autoStarted", FormatAutoStartedLimits());
         _ = RunAutoModeLoopAsync(cts.Token);
@@ -2192,7 +2198,7 @@ public sealed partial class MainViewModel : ObservableObject
         _autoCts?.Dispose();
         _autoCts = null;
         IsAutoMode = false;
-        _autoSwitchFromIdentity = null;
+        _autoLastEnqueuedFingerprint = null;
         _autoProcessedCount = 0;
         if (announce)
             SetStatusKey("status.autoStopped");
@@ -2339,7 +2345,6 @@ public sealed partial class MainViewModel : ObservableObject
     private async Task<bool> AdvanceFeedAsync(DateTime sessionEndUtc, CancellationToken token)
     {
         var beforeIdentity = CaptureAutoIdentity();
-        _autoSwitchFromIdentity = beforeIdentity;
         await SwitchToNextVideoAsync();
         return await WaitForContentSwitchAsync(beforeIdentity, sessionEndUtc, token);
     }
@@ -2437,6 +2442,15 @@ public sealed partial class MainViewModel : ObservableObject
 
             if (IsAutoCandidateDownloadable(candidate))
             {
+                var fingerprint = BuildAutoContentFingerprint(candidate!);
+                if (IsSameAsLastAutoEnqueue(fingerprint))
+                {
+                    // Feed switch failed or SPA still on the same card — do not re-download.
+                    await Application.Current.Dispatcher.InvokeAsync(() =>
+                        SetStatusKey("status.autoSameContent"));
+                    return new AutoProbeResult(null, SkipLive: false, AdvanceNoAddress: true);
+                }
+
                 // Hold the no-address clock while we have a usable first card.
                 noAddressSinceUtc = DateTime.UtcNow;
 
@@ -2479,11 +2493,26 @@ public sealed partial class MainViewModel : ObservableObject
                     if (current!.Video.Variants.Count > 0 &&
                         current.Video.Variants.All(v => UnifiedMediaPipeline.IsDouyinLiveStream(v.SourceUrl)))
                         return null;
-                    return await TryStartDownloadQuietAsync(current.Video, current.SelectedVariant!.Variant);
+                    var currentFp = BuildAutoContentFingerprint(current);
+                    if (IsSameAsLastAutoEnqueue(currentFp))
+                        return null;
+                    var id = await TryStartDownloadQuietAsync(current.Video, current.SelectedVariant!.Variant);
+                    if (id is not null && !string.IsNullOrEmpty(currentFp))
+                        _autoLastEnqueuedFingerprint = currentFp;
+                    return id;
                 }).Task.Unwrap();
 
                 if (jobId is Guid id)
                     return new AutoProbeResult(id, SkipLive: false);
+
+                // Settle finished but fingerprint still matches last enqueue (or candidate vanished).
+                if (IsSameAsLastAutoEnqueue(CaptureAutoIdentity()) ||
+                    IsSameAsLastAutoEnqueue(fingerprint))
+                {
+                    await Application.Current.Dispatcher.InvokeAsync(() =>
+                        SetStatusKey("status.autoSameContent"));
+                    return new AutoProbeResult(null, SkipLive: false, AdvanceNoAddress: true);
+                }
             }
             else
             {
@@ -2560,12 +2589,20 @@ public sealed partial class MainViewModel : ObservableObject
 
     private async Task<bool> WaitForContentSwitchAsync(string? beforeIdentity, DateTime sessionEndUtc, CancellationToken token)
     {
+        var lastNudgeUtc = DateTime.UtcNow;
         while (!token.IsCancellationRequested && DateTime.UtcNow < sessionEndUtc)
         {
             var now = CaptureAutoIdentity();
             if (!string.IsNullOrEmpty(now) &&
                 !string.Equals(now, beforeIdentity, StringComparison.Ordinal))
                 return true;
+
+            // Feed key may be ignored once; keep nudging until URL/caption actually change.
+            if (DateTime.UtcNow - lastNudgeUtc >= TimeSpan.FromSeconds(2))
+            {
+                lastNudgeUtc = DateTime.UtcNow;
+                await SwitchToNextVideoAsync();
+            }
 
             await Application.Current.Dispatcher.InvokeAsync(RefreshAutoRunningStatus);
             await Task.Delay(400, token);
@@ -2574,15 +2611,64 @@ public sealed partial class MainViewModel : ObservableObject
         return false;
     }
 
+    /// <summary>
+    /// Auto-mode content identity: full page URL + caption/title. Session keys alone are not enough —
+    /// a failed feed switch must not look like a new video.
+    /// </summary>
     private string? CaptureAutoIdentity()
     {
         var tab = SelectedTab;
-        if (tab is null)
-            return _currentPageIdentity;
-        return tab.Host.CurrentMediaSessionKey
-               ?? tab.Host.CurrentPageUrl?.AbsoluteUri
-               ?? _currentPageIdentity;
+        string? url = null;
+        string? caption = null;
+
+        if (DetectedVideos.Count > 0)
+        {
+            var video = DetectedVideos[0].Video;
+            url = video.PageUrl.AbsoluteUri;
+            caption = video.DisplayTitle;
+        }
+
+        if (tab is not null)
+        {
+            url ??= tab.Host.CurrentPageUrl?.AbsoluteUri
+                    ?? (Uri.TryCreate(tab.Address, UriKind.Absolute, out var addr) ? addr.AbsoluteUri : tab.Address);
+            if (string.IsNullOrWhiteSpace(caption))
+                caption = tab.Title;
+        }
+        else if (string.IsNullOrWhiteSpace(url))
+        {
+            url = _currentPageIdentity;
+        }
+
+        return BuildAutoContentFingerprint(url, caption);
     }
+
+    private static string? BuildAutoContentFingerprint(DetectedVideoViewModel item) =>
+        BuildAutoContentFingerprint(item.Video.PageUrl.AbsoluteUri, item.Video.DisplayTitle);
+
+    private static string? BuildAutoContentFingerprint(string? pageUrl, string? caption)
+    {
+        var url = (pageUrl ?? string.Empty).Trim();
+        var text = NormalizeAutoCaption(caption);
+        if (url.Length == 0 && text.Length == 0)
+            return null;
+        return url + "\n" + text;
+    }
+
+    private static string NormalizeAutoCaption(string? caption)
+    {
+        if (string.IsNullOrWhiteSpace(caption))
+            return string.Empty;
+        var text = caption.Trim();
+        if (text is "New Tab" or "about:blank")
+            return string.Empty;
+        return System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ");
+    }
+
+    private bool IsSameAsLastAutoEnqueue(string? fingerprint) =>
+        !string.IsNullOrEmpty(fingerprint) &&
+        !string.IsNullOrEmpty(_autoLastEnqueuedFingerprint) &&
+        string.Equals(fingerprint, _autoLastEnqueuedFingerprint, StringComparison.Ordinal);
 
     /// <summary>Always the first detected card (list order), not the UI selection.</summary>
     private DetectedVideoViewModel? FindAutoDownloadCandidate() =>
