@@ -111,6 +111,8 @@ public partial class App : Application
                 UpdateLicenseTitle(mainWindow, current, loc);
             };
 
+            _services.GetRequiredService<VideoDownloader.Infrastructure.Subtitles.SubtitleIdlePrewarmService>().Start();
+
             ClientUpdateCoordinator.ShowPreviousFailureIfAny(loc);
             _ = ClientUpdateCoordinator.RunStartupCheckAsync(_services);
         }

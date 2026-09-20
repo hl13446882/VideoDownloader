@@ -37,6 +37,11 @@ public sealed class LocalPlaybackMediaSourceResolver
             return null;
 
         var job = await _repository.GetByIdAsync(jobId, cancellationToken).ConfigureAwait(false);
+        return FromCompletedJob(job);
+    }
+
+    public static LocalPlaybackMediaSource? FromCompletedJob(DownloadJob? job)
+    {
         if (job is null || job.Status != DownloadStatus.Completed ||
             string.IsNullOrWhiteSpace(job.TargetPath))
             return null;
@@ -55,8 +60,10 @@ public sealed class LocalPlaybackMediaSourceResolver
             return null;
 
         var info = new FileInfo(fullPath);
-        // asr2: FFmpeg coarse+fine seek for Whisper timestamps (invalidates prior keyframe-seek caches).
-        var identity = $"local:{jobId:N}:{info.Length}:{info.LastWriteTimeUtc.Ticks}:asr2";
-        return new LocalPlaybackMediaSource(jobId, fullPath, identity);
+        return new LocalPlaybackMediaSource(job.Id, fullPath, BuildCacheIdentity(job.Id, info));
     }
+
+    public static string BuildCacheIdentity(Guid jobId, FileInfo info) =>
+        // asr2: FFmpeg coarse+fine seek for Whisper timestamps (invalidates prior keyframe-seek caches).
+        $"local:{jobId:N}:{info.Length}:{info.LastWriteTimeUtc.Ticks}:asr2";
 }

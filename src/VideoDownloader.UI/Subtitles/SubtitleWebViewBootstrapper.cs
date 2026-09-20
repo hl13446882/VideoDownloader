@@ -96,6 +96,7 @@ public static class SubtitleWebViewBootstrapper
             _services.GetRequiredService<IMediaAudioDecoder>(),
             _services.GetRequiredService<LocalPlaybackMediaSourceResolver>(),
             _services.GetRequiredService<SubtitleOptions>(),
+            _services.GetRequiredService<SubtitleAsrActivity>(),
             _services.GetRequiredService<ILoggerFactory>().CreateLogger("BrowserSubtitle"));
         var runtimeId = Interlocked.Increment(ref _nextRuntimeId);
         var holder = new RuntimeHolder(runtime, runtimeId);

@@ -54,6 +54,8 @@ public static class SubtitleServiceCollectionExtensions
         services.AddSingleton<TranslationRouter>();
         services.AddSingleton<WhisperModelInstaller>();
         services.AddSingleton<LocalPlaybackMediaSourceResolver>();
+        services.AddSingleton<SubtitleAsrActivity>();
+        services.AddSingleton<SubtitleIdlePrewarmService>();
 
         // Timeline/pipeline are transient: each local-player WebView/tab owns an isolated subtitle session.
         services.AddTransient<ISubtitleTimeline, SubtitleTimeline>();
