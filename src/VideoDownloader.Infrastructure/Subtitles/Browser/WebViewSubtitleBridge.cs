@@ -279,7 +279,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     /// AddScriptToExecuteOnDocumentCreated handlers across app launches; an old
     /// script that only checks <c>window.__vdSubtitle</c> would permanently block upgrades.
     /// </summary>
-    private const int InstallScriptVersion = 6;
+    private const int InstallScriptVersion = 7;
 
     private static string InstallScript => $$"""
 (() => {
@@ -355,11 +355,28 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
       color: '#FFFFFF', backgroundColor: 'rgba(0,0,0,0.35)', padding: '4px 10px',
       borderRadius: '4px', maxWidth: '85vw', whiteSpace: 'pre-wrap',
       lineHeight: '1.35', display: 'none', boxSizing: 'border-box',
+      // Prefer text-shadow rings over -webkit-text-stroke (stroke hollows Chinese glyphs).
+      webkitTextStroke: '0 transparent',
       textShadow: '-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000',
       cursor: 'default'
     });
     (document.body || document.documentElement).appendChild(el);
     return el;
+  };
+
+  const buildOutlineShadow = (size, color) => {
+    const n = Math.max(0, Math.min(8, Number(size) || 0));
+    if (n <= 0) return 'none';
+    const oc = color || '#000000';
+    const parts = [];
+    for (let x = -n; x <= n; x++) {
+      for (let y = -n; y <= n; y++) {
+        if (x === 0 && y === 0) continue;
+        if ((x * x) + (y * y) > (n * n) + 0.1) continue;
+        parts.push(x + 'px ' + y + 'px 0 ' + oc);
+      }
+    }
+    return parts.join(',');
   };
 
   const layoutOverlay = () => {
@@ -405,7 +422,9 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     el.style.backgroundColor = hexToRgba(style.backgroundColor || '#000000', opacity);
     const outline = Number.isFinite(style.outlineSize) ? style.outlineSize : 2;
     const oc = style.outlineColor || '#000000';
-    el.style.webkitTextStroke = outline > 0 ? outline + 'px ' + oc : '0 transparent';
+    // -webkit-text-stroke eats into glyph fills (especially CJK) and looks like hollow outlines.
+    el.style.webkitTextStroke = '0 transparent';
+    el.style.textShadow = buildOutlineShadow(outline, oc);
     layoutOverlay();
   };
 
