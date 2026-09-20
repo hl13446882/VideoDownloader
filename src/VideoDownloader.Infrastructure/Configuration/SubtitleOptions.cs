@@ -18,7 +18,8 @@ public sealed class SubtitleOptions
     public string OutlineColor { get; set; } = "#000000";
     public int OutlineSize { get; set; } = 2;
     public string BackgroundColor { get; set; } = "#000000";
-    public double BackgroundOpacity { get; set; } = 0.35;
+    /// <summary>Background box opacity level 0–10 (0 = transparent, 10 = opaque). Default 5.</summary>
+    public int BackgroundOpacityLevel { get; set; } = 5;
     public int BottomOffsetPx { get; set; } = 60;
     public int MaxLines { get; set; } = 2;
     public int MaxWidthPercent { get; set; } = 85;

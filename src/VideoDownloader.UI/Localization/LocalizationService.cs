@@ -134,6 +134,7 @@ public sealed partial class LocalizationService : ObservableObject
         OnPropertyChanged(nameof(SettingsSubtitleSize));
         OnPropertyChanged(nameof(SettingsSubtitleSizeRange));
         OnPropertyChanged(nameof(SettingsSubtitleColor));
+        OnPropertyChanged(nameof(SettingsSubtitleOpacity));
         OnPropertyChanged(nameof(SettingsSubtitleBottom));
         OnPropertyChanged(nameof(SettingsSubtitleBottomHint));
         OnPropertyChanged(nameof(SettingsSubtitleLocalEndpoint));
@@ -218,6 +219,7 @@ public sealed partial class LocalizationService : ObservableObject
     public string SettingsSubtitleSize => T("settings.subtitle.size");
     public string SettingsSubtitleSizeRange => T("settings.subtitle.sizeRange");
     public string SettingsSubtitleColor => T("settings.subtitle.color");
+    public string SettingsSubtitleOpacity => T("settings.subtitle.opacity");
     public string SettingsSubtitleBottom => T("settings.subtitle.bottom");
     public string SettingsSubtitleBottomHint => T("settings.subtitle.bottomHint");
     public string SettingsSubtitleLocalEndpoint => T("settings.subtitle.localEndpoint");
@@ -343,6 +345,7 @@ public sealed partial class LocalizationService : ObservableObject
         ["settings.subtitle.size"] = ("大小", "Size"),
         ["settings.subtitle.sizeRange"] = ("（12–60）", "(12–60)"),
         ["settings.subtitle.color"] = ("颜色", "Color"),
+        ["settings.subtitle.opacity"] = ("字幕透明度", "Subtitle opacity"),
         ["settings.subtitle.bottom"] = ("距画面下边", "Bottom offset"),
         ["settings.subtitle.bottomHint"] = ("相对视频画面底边的像素距离（含黑边内的实际画面），不是相对窗口。",
             "Pixels from the video picture bottom (the actual picture, including letterbox), not the window."),

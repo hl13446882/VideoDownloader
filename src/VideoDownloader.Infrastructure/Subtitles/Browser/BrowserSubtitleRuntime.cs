@@ -760,7 +760,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
             _options.OutlineColor,
             _options.OutlineSize,
             _options.BackgroundColor,
-            _options.BackgroundOpacity,
+            _options.BackgroundOpacityLevel,
             _options.BottomOffsetPx,
             _options.MaxLines,
             _options.MaxWidthPercent);
@@ -788,7 +788,7 @@ public sealed class BrowserSubtitleRuntime : IAsyncDisposable
         OutlineColor = _options.OutlineColor,
         OutlineSize = _options.OutlineSize,
         BackgroundColor = _options.BackgroundColor,
-        BackgroundOpacity = _options.BackgroundOpacity,
+        BackgroundOpacity = Math.Clamp(_options.BackgroundOpacityLevel, 0, 10) / 10.0,
         BottomOffsetPx = _options.BottomOffsetPx,
         MaxLines = Math.Max(_options.MaxLines, _options.Mode == SubtitleMode.Bilingual ? 2 : 1),
         MaxWidthPercent = _options.MaxWidthPercent

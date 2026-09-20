@@ -22,6 +22,7 @@ namespace VideoDownloader.UI.ViewModels;
 public sealed partial class SettingsViewModel : ObservableObject
 {
     private static readonly int[] BottomOffsets = [20, 40, 60, 80, 100, 120, 140, 160];
+    private static readonly int[] BackgroundOpacityLevels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
     private readonly AppOptions _options;
     private readonly UserSettingsStore _store;
@@ -52,7 +53,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string _subtitleOutlineColor;
     [ObservableProperty] private int _subtitleOutlineSize;
     [ObservableProperty] private string _subtitleBackgroundColor;
-    [ObservableProperty] private double _subtitleBackgroundOpacity;
+    [ObservableProperty] private int _subtitleBackgroundOpacityLevel;
     [ObservableProperty] private int _subtitleBottomOffsetPx;
     [ObservableProperty] private int _subtitleMaxLines;
     [ObservableProperty] private int _subtitleMaxWidthPercent;
@@ -68,6 +69,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     public string AppVersionText => "V" + AppVersionInfo.SemVer;
     public IReadOnlyList<int> ConcurrentOptions { get; } = [1, 2, 3, 4, 5];
     public IReadOnlyList<int> SubtitleBottomOffsetOptions { get; } = BottomOffsets;
+    public IReadOnlyList<int> SubtitleBackgroundOpacityOptions { get; } = BackgroundOpacityLevels;
 
     public IReadOnlyList<NamedValue<SubtitleMode>> SubtitleModeOptions { get; } =
     [
@@ -142,7 +144,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         _subtitleOutlineColor = subtitles.OutlineColor;
         _subtitleOutlineSize = subtitles.OutlineSize;
         _subtitleBackgroundColor = subtitles.BackgroundColor;
-        _subtitleBackgroundOpacity = subtitles.BackgroundOpacity;
+        _subtitleBackgroundOpacityLevel = Math.Clamp(subtitles.BackgroundOpacityLevel, 0, 10);
         _subtitleBottomOffsetPx = SnapBottomOffset(subtitles.BottomOffsetPx);
         _subtitleMaxLines = Math.Max(2, subtitles.MaxLines);
         _subtitleMaxWidthPercent = subtitles.MaxWidthPercent;
@@ -402,7 +404,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         subtitles.OutlineColor = NormalizeColor(SubtitleOutlineColor, "#000000");
         subtitles.OutlineSize = Math.Clamp(SubtitleOutlineSize, 0, 8);
         subtitles.BackgroundColor = NormalizeColor(SubtitleBackgroundColor, "#000000");
-        subtitles.BackgroundOpacity = Math.Clamp(SubtitleBackgroundOpacity, 0, 1);
+        subtitles.BackgroundOpacityLevel = Math.Clamp(SubtitleBackgroundOpacityLevel, 0, 10);
         subtitles.BottomOffsetPx = SnapBottomOffset(SubtitleBottomOffsetPx);
         subtitles.MaxLines = Math.Clamp(Math.Max(SubtitleMaxLines, SubtitleMode == SubtitleMode.Bilingual ? 2 : 1), 1, 4);
         subtitles.MaxWidthPercent = Math.Clamp(SubtitleMaxWidthPercent, 20, 100);

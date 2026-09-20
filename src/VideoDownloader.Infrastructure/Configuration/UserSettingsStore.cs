@@ -79,7 +79,7 @@ public sealed class UserSettingsStore
         options.Subtitles.PreloadAheadSeconds = Math.Clamp(options.Subtitles.PreloadAheadSeconds, 10, 90);
         options.Subtitles.FontSize = Math.Clamp(options.Subtitles.FontSize, 12, 60);
         options.Subtitles.OutlineSize = Math.Clamp(options.Subtitles.OutlineSize, 0, 8);
-        options.Subtitles.BackgroundOpacity = Math.Clamp(options.Subtitles.BackgroundOpacity, 0, 1);
+        options.Subtitles.BackgroundOpacityLevel = Math.Clamp(options.Subtitles.BackgroundOpacityLevel, 0, 10);
         options.Subtitles.BottomOffsetPx = SnapBottomOffset(options.Subtitles.BottomOffsetPx);
         options.Subtitles.MaxLines = Math.Clamp(options.Subtitles.MaxLines, 1, 4);
         options.Subtitles.MaxWidthPercent = Math.Clamp(options.Subtitles.MaxWidthPercent, 20, 100);
@@ -220,7 +220,7 @@ public sealed class UserSettingsStore
                 OutlineColor = source.Subtitles.OutlineColor,
                 OutlineSize = source.Subtitles.OutlineSize,
                 BackgroundColor = source.Subtitles.BackgroundColor,
-                BackgroundOpacity = source.Subtitles.BackgroundOpacity,
+                BackgroundOpacityLevel = source.Subtitles.BackgroundOpacityLevel,
                 BottomOffsetPx = source.Subtitles.BottomOffsetPx,
                 MaxLines = source.Subtitles.MaxLines,
                 MaxWidthPercent = source.Subtitles.MaxWidthPercent,

@@ -134,6 +134,8 @@
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
                         <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding L.SettingsSubtitleToggle}" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,10"/>
@@ -190,31 +192,37 @@
                                   SelectedValuePath="Value"
                                   Margin="0,0,0,10"/>
 
-                        <TextBlock Grid.Row="8" Grid.Column="0" Text="{Binding L.SettingsSubtitleBottom}" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,10"/>
-                        <StackPanel Grid.Row="8" Grid.Column="1" Margin="0,0,0,10">
+                        <TextBlock Grid.Row="8" Grid.Column="0" Text="{Binding L.SettingsSubtitleOpacity}" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,10"/>
+                        <ComboBox Grid.Row="8" Grid.Column="1"
+                                  ItemsSource="{Binding SubtitleBackgroundOpacityOptions}"
+                                  SelectedItem="{Binding SubtitleBackgroundOpacityLevel}"
+                                  Margin="0,0,0,10"/>
+
+                        <TextBlock Grid.Row="9" Grid.Column="0" Text="{Binding L.SettingsSubtitleBottom}" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,10"/>
+                        <StackPanel Grid.Row="9" Grid.Column="1" Margin="0,0,0,10">
                             <ComboBox ItemsSource="{Binding SubtitleBottomOffsetOptions}"
                                       SelectedItem="{Binding SubtitleBottomOffsetPx}"/>
                             <TextBlock Text="{Binding L.SettingsSubtitleBottomHint}"
                                        Foreground="#777" FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0"/>
                         </StackPanel>
 
-                        <Separator Grid.Row="9" Grid.Column="0" Grid.ColumnSpan="2" Margin="0,4,0,12"/>
+                        <Separator Grid.Row="10" Grid.Column="0" Grid.ColumnSpan="2" Margin="0,4,0,12"/>
 
-                        <TextBlock Grid.Row="10" Grid.Column="0" Text="{Binding L.SettingsSubtitleLocalEndpoint}" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,8"/>
-                        <TextBox Grid.Row="10" Grid.Column="1"
+                        <TextBlock Grid.Row="11" Grid.Column="0" Text="{Binding L.SettingsSubtitleLocalEndpoint}" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,8"/>
+                        <TextBox Grid.Row="11" Grid.Column="1"
                                  Text="{Binding SubtitleLocalTranslationEndpoint, UpdateSourceTrigger=PropertyChanged}"
                                  IsEnabled="{Binding SubtitleLocalTranslationFieldsEnabled}"
                                  Margin="0,0,0,8"
                                  ToolTip="{Binding L.SettingsSubtitleLocalEndpointTip}"/>
 
-                        <TextBlock Grid.Row="11" Grid.Column="0" Text="{Binding L.SettingsSubtitleLocalModel}" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,8"/>
-                        <TextBox Grid.Row="11" Grid.Column="1"
+                        <TextBlock Grid.Row="12" Grid.Column="0" Text="{Binding L.SettingsSubtitleLocalModel}" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,8"/>
+                        <TextBox Grid.Row="12" Grid.Column="1"
                                  Text="{Binding SubtitleLocalTranslationModel, UpdateSourceTrigger=PropertyChanged}"
                                  IsEnabled="{Binding SubtitleLocalTranslationFieldsEnabled}"
                                  Margin="0,0,0,8"/>
 
-                        <TextBlock Grid.Row="12" Grid.Column="0" Text="{Binding L.SettingsSubtitleWhisper}" TextWrapping="Wrap" VerticalAlignment="Top" Margin="0,4,8,8"/>
-                        <StackPanel Grid.Row="12" Grid.Column="1" Margin="0,0,0,8">
+                        <TextBlock Grid.Row="13" Grid.Column="0" Text="{Binding L.SettingsSubtitleWhisper}" TextWrapping="Wrap" VerticalAlignment="Top" Margin="0,4,8,8"/>
+                        <StackPanel Grid.Row="13" Grid.Column="1" Margin="0,0,0,8">
                             <TextBox Text="{Binding SubtitleWhisperModelPath, UpdateSourceTrigger=PropertyChanged}"/>
                             <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
                                 <Button Content="{Binding L.SettingsSubtitleInstallBase}"

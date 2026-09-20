@@ -323,7 +323,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     /// AddScriptToExecuteOnDocumentCreated handlers across app launches; an old
     /// script that only checks <c>window.__vdSubtitle</c> would permanently block upgrades.
     /// </summary>
-    private const int InstallScriptVersion = 11;
+    private const int InstallScriptVersion = 12;
 
     private static string InstallScript => $$"""
 (() => {
@@ -396,7 +396,7 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
       position: 'fixed', left: '50%', transform: 'translateX(-50%)', bottom: '60px',
       zIndex: '2147483647', pointerEvents: 'none', textAlign: 'center',
       fontFamily: 'Microsoft YaHei, sans-serif', fontSize: '28px', fontWeight: '700',
-      color: '#FFFF00', backgroundColor: 'rgba(0,0,0,0.35)', padding: '4px 10px',
+      color: '#FFFF00', backgroundColor: 'rgba(0,0,0,0.5)', padding: '4px 10px',
       borderRadius: '4px', maxWidth: '85vw', whiteSpace: 'pre-wrap',
       lineHeight: '1.35', display: 'none', boxSizing: 'border-box',
       // Prefer text-shadow rings over -webkit-text-stroke (stroke hollows Chinese glyphs).
@@ -462,8 +462,10 @@ public sealed class WebViewSubtitleBridge : IAsyncDisposable
     if (Number.isFinite(style.fontSize)) el.style.fontSize = style.fontSize + 'px';
     el.style.fontWeight = style.bold ? '700' : '400';
     if (style.textColor) el.style.color = style.textColor;
-    const opacity = Number.isFinite(style.backgroundOpacity) ? style.backgroundOpacity : .35;
-    el.style.backgroundColor = hexToRgba(style.backgroundColor || '#000000', opacity);
+    const opacity = Number.isFinite(style.backgroundOpacity) ? style.backgroundOpacity : .5;
+    el.style.backgroundColor = opacity <= 0
+      ? 'transparent'
+      : hexToRgba(style.backgroundColor || '#000000', opacity);
     const outline = Number.isFinite(style.outlineSize) ? style.outlineSize : 2;
     const oc = style.outlineColor || '#000000';
     // -webkit-text-stroke eats into glyph fills (especially CJK) and looks like hollow outlines.

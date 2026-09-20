@@ -18,7 +18,8 @@ public sealed class SubtitleStyleOptions
     public string OutlineColor { get; set; } = "#000000";
     public int OutlineSize { get; set; } = 2;
     public string BackgroundColor { get; set; } = "#000000";
-    public double BackgroundOpacity { get; set; } = 0.35;
+    /// <summary>0–1 alpha used by the overlay CSS.</summary>
+    public double BackgroundOpacity { get; set; } = 0.5;
     public int BottomOffsetPx { get; set; } = 60;
     public int MaxLines { get; set; } = 2;
     public int MaxWidthPercent { get; set; } = 85;
