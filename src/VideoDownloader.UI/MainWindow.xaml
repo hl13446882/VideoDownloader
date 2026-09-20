@@ -74,7 +74,7 @@
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
-        <!-- Address(~50%) | Probe(*) | New | Back | Forward | Lang | Go | Probe | Settings -->
+        <!-- Address | Status | New | Favorite | Local | Back | Forward | Lang | Probe | Auto | Settings -->
         <Grid Grid.Row="0" Margin="0,0,0,6"
               Visibility="{Binding IsAppChromeVisible, Converter={StaticResource BoolToVis}}">
             <Grid.ColumnDefinitions>
@@ -97,6 +97,7 @@
                       StaysOpenOnEdit="False"
                       Text="{Binding AddressBar, UpdateSourceTrigger=PropertyChanged, Mode=TwoWay}"
                       ItemsSource="{Binding AddressPresets}"
+                      ToolTip="{Binding L.TipAddressBar}"
                       MinWidth="160"
                       Height="32"
                       VerticalContentAlignment="Center"
@@ -127,30 +128,30 @@
                     Command="{Binding AddTabCommand}"
                     Width="72" Height="32" Margin="0,0,4,0"/>
             <Button Grid.Column="3"
+                    Content="{Binding L.NavFavorite}"
+                    ToolTip="{Binding L.TipFavorite}"
+                    Command="{Binding FavoriteAddressCommand}"
+                    Width="56" Height="32" Margin="0,0,4,0"/>
+            <Button Grid.Column="4"
                     Content="{Binding L.NavLocal}"
                     ToolTip="{Binding L.TipLocal}"
                     Command="{Binding GoLocalLibraryCommand}"
                     Width="56" Height="32" Margin="0,0,4,0"/>
-            <Button Grid.Column="4"
+            <Button Grid.Column="5"
                     Content="{Binding L.NavBack}"
                     ToolTip="{Binding L.TipBack}"
                     Command="{Binding GoBackCommand}"
                     Width="56" Height="32" Margin="0,0,4,0"/>
-            <Button Grid.Column="5"
+            <Button Grid.Column="6"
                     Content="{Binding L.NavForward}"
                     ToolTip="{Binding L.TipForward}"
                     Command="{Binding GoForwardCommand}"
                     Width="56" Height="32" Margin="0,0,4,0"/>
-            <Button Grid.Column="6"
+            <Button Grid.Column="7"
                     Content="{Binding L.LanguageToggleLabel}"
                     ToolTip="{Binding L.LanguageToggleTip}"
                     Command="{Binding ToggleLanguageCommand}"
                     Width="40" Height="32" Margin="0,0,4,0"/>
-            <Button Grid.Column="7"
-                    Content="{Binding L.NavGo}"
-                    ToolTip="{Binding L.TipGo}"
-                    Command="{Binding NavigateCommand}"
-                    Width="72" Height="32" Margin="0,0,4,0"/>
             <Button Grid.Column="8"
                     Content="{Binding L.NavProbe}"
                     ToolTip="{Binding L.TipProbe}"

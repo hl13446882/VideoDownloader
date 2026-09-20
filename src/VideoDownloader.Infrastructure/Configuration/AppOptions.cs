@@ -31,6 +31,15 @@ public sealed class UiOptions
 
     /// <summary>When true, check for updates automatically on startup. Default off — user must opt in.</summary>
     public bool AutoCheckForUpdates { get; set; }
+
+    /// <summary>User-saved address-bar dropdown entries (appended after built-in presets).</summary>
+    public List<SavedAddressPreset> AddressBookmarks { get; set; } = new();
+}
+
+public sealed class SavedAddressPreset
+{
+    public string Name { get; set; } = "";
+    public string Url { get; set; } = "";
 }
 
 public sealed class UpdateOptions

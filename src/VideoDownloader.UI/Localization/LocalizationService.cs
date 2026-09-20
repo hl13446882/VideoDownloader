@@ -64,19 +64,20 @@ public sealed partial class LocalizationService : ObservableObject
         // Convenience aliases used by XAML
         OnPropertyChanged(nameof(NavBack));
         OnPropertyChanged(nameof(NavForward));
-        OnPropertyChanged(nameof(NavGo));
         OnPropertyChanged(nameof(NavProbe));
         OnPropertyChanged(nameof(NavAuto));
         OnPropertyChanged(nameof(NavAutoStop));
         OnPropertyChanged(nameof(NavNewTab));
+        OnPropertyChanged(nameof(NavFavorite));
         OnPropertyChanged(nameof(NavLocal));
         OnPropertyChanged(nameof(NavSettings));
         OnPropertyChanged(nameof(TipBack));
         OnPropertyChanged(nameof(TipForward));
-        OnPropertyChanged(nameof(TipGo));
         OnPropertyChanged(nameof(TipProbe));
         OnPropertyChanged(nameof(TipAuto));
         OnPropertyChanged(nameof(TipNewTab));
+        OnPropertyChanged(nameof(TipFavorite));
+        OnPropertyChanged(nameof(TipAddressBar));
         OnPropertyChanged(nameof(TipLocal));
         OnPropertyChanged(nameof(TipSettings));
         OnPropertyChanged(nameof(SideDetected));
@@ -149,19 +150,20 @@ public sealed partial class LocalizationService : ObservableObject
 
     public string NavBack => T("nav.back");
     public string NavForward => T("nav.forward");
-    public string NavGo => T("nav.go");
     public string NavProbe => T("nav.probe");
     public string NavAuto => T("nav.auto");
     public string NavAutoStop => T("nav.autoStop");
     public string NavNewTab => T("nav.newTab");
+    public string NavFavorite => T("nav.favorite");
     public string NavLocal => T("nav.local");
     public string NavSettings => T("nav.settings");
     public string TipBack => T("tip.back");
     public string TipForward => T("tip.forward");
-    public string TipGo => T("tip.go");
     public string TipProbe => T("tip.probe");
     public string TipAuto => T("tip.auto");
     public string TipNewTab => T("tip.newTab");
+    public string TipFavorite => T("tip.favorite");
+    public string TipAddressBar => T("tip.addressBar");
     public string TipLocal => T("tip.local");
     public string TipSettings => T("tip.settings");
     public string SideDetected => T("side.detected");
@@ -235,19 +237,25 @@ public sealed partial class LocalizationService : ObservableObject
     {
         ["nav.back"] = ("后退", "Back"),
         ["nav.forward"] = ("前进", "Forward"),
-        ["nav.go"] = ("访问", "Go"),
         ["nav.probe"] = ("探测", "Probe"),
         ["nav.auto"] = ("自动", "Auto"),
         ["nav.autoStop"] = ("停止", "Stop"),
         ["nav.newTab"] = ("新标签", "New"),
+        ["nav.favorite"] = ("收藏", "Fav"),
         ["nav.local"] = ("本地", "Local"),
         ["nav.settings"] = ("设置", "Settings"),
         ["tip.back"] = ("后退", "Go back"),
         ["tip.forward"] = ("前进", "Go forward"),
-        ["tip.go"] = ("打开地址", "Open address"),
         ["tip.probe"] = ("重置全部探测状态并重新探测（不刷新网页）", "Reset all probe state and re-detect without reloading"),
         ["tip.auto"] = ("自动下载已发现视频；↓ / Shift+N / ] 切下一条；探测仍由页面切换触发；到达执行时长后停止", "Auto-download detected videos; ↓ / Shift+N / ] next; probing stays nav-driven; stops at session duration"),
         ["tip.newTab"] = ("新标签", "New tab"),
+        ["tip.favorite"] = ("把当前页加入地址下拉收藏", "Add current page to the address dropdown"),
+        ["tip.addressBar"] = ("输入网址后按回车打开", "Press Enter to open the address"),
+        ["favorite.title"] = ("收藏地址", "Favorite address"),
+        ["favorite.prompt"] = ("收藏名称", "Favorite name"),
+        ["favorite.nameRequired"] = ("请输入收藏名称。", "Enter a favorite name."),
+        ["status.favoriteSaved"] = ("已收藏：{0}", "Favorited: {0}"),
+        ["status.favoriteUpdated"] = ("已更新收藏：{0}", "Favorite updated: {0}"),
         ["auto.delayTitle"] = ("自动模式", "Auto mode"),
         ["auto.delayPrompt"] = ("自动模式执行时长（分钟，正整数）", "Auto session duration (minutes, positive integer)"),
         ["auto.delayHint"] = ("从开始起运行指定分钟后结束自动（不再切换/入队）；进行中的下载会继续。", "Runs for the chosen minutes from start, then stops auto (no more switching/enqueue). In-progress downloads continue."),

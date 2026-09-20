@@ -668,6 +668,80 @@ public sealed partial class MainViewModel : ObservableObject
         AddressPresets.Add(new AddressPreset(_loc.T("preset.douyin"), "https://www.douyin.com/"));
         AddressPresets.Add(new AddressPreset(_loc.T("preset.tiktok"), "https://www.tiktok.com/"));
         AddressPresets.Add(new AddressPreset(_loc.T("preset.bilibili"), "https://www.bilibili.com/"));
+
+        foreach (var bookmark in _options.Ui.AddressBookmarks)
+        {
+            if (string.IsNullOrWhiteSpace(bookmark.Name) || string.IsNullOrWhiteSpace(bookmark.Url))
+                continue;
+            AddressPresets.Add(new AddressPreset(bookmark.Name.Trim(), bookmark.Url.Trim()));
+        }
+    }
+
+    [RelayCommand]
+    private void FavoriteAddress()
+    {
+        var raw = !string.IsNullOrWhiteSpace(SelectedTab?.Address)
+            ? SelectedTab!.Address
+            : AddressBar;
+        if (!TryNormalizeAddress(raw, out var url, out var error))
+        {
+            SetStatus(error);
+            return;
+        }
+
+        var defaultName = SuggestFavoriteName(url, SelectedTab?.Title);
+        var dialog = new TextInputDialog(
+            _loc.T("favorite.title"),
+            _loc.T("favorite.prompt"),
+            defaultName)
+        {
+            Owner = Application.Current?.MainWindow
+        };
+        if (dialog.ShowDialog() != true)
+            return;
+
+        var name = dialog.ResultText?.Trim() ?? string.Empty;
+        if (name.Length == 0)
+        {
+            SetStatusKey("favorite.nameRequired");
+            return;
+        }
+
+        if (name.Length > 64)
+            name = name[..64];
+
+        _options.Ui.AddressBookmarks ??= new List<SavedAddressPreset>();
+        var existing = _options.Ui.AddressBookmarks.FirstOrDefault(
+            x => string.Equals(x.Url, url, StringComparison.OrdinalIgnoreCase));
+        var updated = existing is not null;
+        if (existing is not null)
+            existing.Name = name;
+        else
+            _options.Ui.AddressBookmarks.Add(new SavedAddressPreset { Name = name, Url = url });
+
+        try { _settingsStore.Save(_options); }
+        catch { /* settings write is best-effort */ }
+
+        RebuildAddressPresets();
+        SetStatusKey(updated ? "status.favoriteUpdated" : "status.favoriteSaved", name);
+    }
+
+    private static string SuggestFavoriteName(string url, string? tabTitle)
+    {
+        var title = (tabTitle ?? string.Empty).Trim();
+        if (title.Length > 0 &&
+            !string.Equals(title, "新标签页", StringComparison.Ordinal) &&
+            !string.Equals(title, "New Tab", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(title, "New tab", StringComparison.OrdinalIgnoreCase))
+        {
+            return title.Length <= 64 ? title : title[..64];
+        }
+
+        if (Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
+            !string.IsNullOrWhiteSpace(uri.Host))
+            return uri.Host;
+
+        return url.Length <= 64 ? url : url[..64];
     }
 
     private void OnLanguageChanged(object? sender, EventArgs e)

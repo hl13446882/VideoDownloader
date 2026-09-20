@@ -76,6 +76,8 @@ public sealed class UserSettingsStore
         if (options.Ui.AutoModeIdleMinutes < 1)
             options.Ui.AutoModeIdleMinutes = 5;
 
+        options.Ui.AddressBookmarks = SanitizeAddressBookmarks(options.Ui.AddressBookmarks);
+
         options.Subtitles.PreloadAheadSeconds = Math.Clamp(options.Subtitles.PreloadAheadSeconds, 10, 90);
         options.Subtitles.FontSize = Math.Clamp(options.Subtitles.FontSize, 12, 60);
         options.Subtitles.OutlineSize = Math.Clamp(options.Subtitles.OutlineSize, 0, 8);
@@ -202,7 +204,8 @@ public sealed class UserSettingsStore
                 AutoModeIdleMinutes = source.Ui?.AutoModeIdleMinutes > 0
                     ? source.Ui.AutoModeIdleMinutes
                     : 5,
-                AutoCheckForUpdates = source.Ui?.AutoCheckForUpdates ?? false
+                AutoCheckForUpdates = source.Ui?.AutoCheckForUpdates ?? false,
+                AddressBookmarks = CloneAddressBookmarks(source.Ui?.AddressBookmarks)
             },
             Subtitles = new SubtitleOptions
             {
@@ -229,5 +232,41 @@ public sealed class UserSettingsStore
         };
         Sanitize(clone);
         return clone;
+    }
+
+    private static List<SavedAddressPreset> CloneAddressBookmarks(IEnumerable<SavedAddressPreset>? source)
+    {
+        if (source is null)
+            return new List<SavedAddressPreset>();
+
+        return SanitizeAddressBookmarks(source);
+    }
+
+    private static List<SavedAddressPreset> SanitizeAddressBookmarks(IEnumerable<SavedAddressPreset>? source)
+    {
+        var result = new List<SavedAddressPreset>();
+        if (source is null)
+            return result;
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in source)
+        {
+            var name = (item.Name ?? string.Empty).Trim();
+            var url = (item.Url ?? string.Empty).Trim();
+            if (name.Length == 0 || url.Length == 0)
+                continue;
+            if (name.Length > 64)
+                name = name[..64];
+            if (!Uri.TryCreate(url, UriKind.Absolute, out _))
+                continue;
+            if (!seen.Add(url))
+                continue;
+
+            result.Add(new SavedAddressPreset { Name = name, Url = url });
+            if (result.Count >= 50)
+                break;
+        }
+
+        return result;
     }
 }
