@@ -24,4 +24,7 @@ public static class LibraryVideoKinds
     ];
 }
 
-public sealed record LibraryKindEntry(string Value, string Label, int SortOrder, bool IsSeed);
+public sealed record LibraryKindEntry(string Value, string Label, int SortOrder, bool IsSeed, bool IsPrivate = false)
+{
+    public bool HasPassword => IsPrivate;
+}

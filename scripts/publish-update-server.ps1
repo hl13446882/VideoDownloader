@@ -71,8 +71,8 @@ $remoteChannel = "$RemotePath/$Channel"
 $remoteFiles = "$remoteChannel/files"
 $remoteTmp = "$remoteChannel/manifest.json.tmp"
 $remoteManifest = "$remoteChannel/manifest.json"
-$tar = Get-Command tar -ErrorAction SilentlyContinue
-if (-not $tar) { throw 'tar is required to upload update files' }
+$tar = 'C:\Windows\System32\tar.exe'
+if (-not (Test-Path -LiteralPath $tar)) { throw 'Windows tar.exe is required to upload update files' }
 
 ssh -o BatchMode=yes $sshTarget "mkdir -p '$remoteFiles'"
 if ($LASTEXITCODE -ne 0) { throw 'ssh mkdir failed' }
@@ -129,7 +129,7 @@ if ($ForceFullUpload -or -not $hasRemote) {
   Write-Host "Full upload to ${sshTarget}:${remoteChannel} ..."
   Push-Location $filesDir
   try {
-    & tar -czf $bundle .
+    & $tar -czf $bundle .
     if ($LASTEXITCODE -ne 0) { throw 'local tar create failed' }
   }
   finally { Pop-Location }
@@ -158,7 +158,7 @@ else {
     Write-Host "Differential upload ($($changed.Count) files) to ${sshTarget}:${remoteChannel} ..."
     Push-Location $deltaDir
     try {
-      & tar -czf $bundle .
+      & $tar -czf $bundle .
       if ($LASTEXITCODE -ne 0) { throw 'local delta tar create failed' }
     }
     finally { Pop-Location }

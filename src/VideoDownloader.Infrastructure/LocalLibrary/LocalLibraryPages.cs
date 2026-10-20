@@ -28,6 +28,8 @@ internal static class LocalLibraryPages
   .card { background:var(--card); border-radius:12px; overflow:hidden; border:1px solid #334155; display:flex; flex-direction:column; }
   .cover { display:block; aspect-ratio:16/10; background:#0b1220; cursor:pointer; position:relative; overflow:hidden; }
   .cover img { width:100%; height:100%; object-fit:cover; object-position:center; display:block; }
+  .thumb-placeholder { width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:#0b1220; }
+  .thumb-placeholder svg { width:48px; height:48px; opacity:.4; }
   .cover.cover-audio { display:flex; align-items:center; justify-content:center; text-decoration:none;
     background:linear-gradient(165deg,#1e293b 0%,#0f172a 100%); border-bottom:1px solid #334155; }
   .cover.cover-audio .audio-label { color:#e2e8f0; font-size:28px; font-weight:700; letter-spacing:.18em; user-select:none; }
@@ -58,6 +60,16 @@ internal static class LocalLibraryPages
   .dlg-actions button { background:#334155; color:var(--fg); border:0; border-radius:8px; padding:8px 12px; cursor:pointer; }
   .dlg-actions button.primary { background:var(--accent); color:#0f172a; font-weight:600; }
   .err { color:#fca5a5; font-size:12px; min-height:1em; }
+  .privacy-toggle { display:flex; flex-direction:row; align-items:center; gap:8px; cursor:pointer; }
+  .privacy-toggle input[type=checkbox] { width:16px; height:16px; }
+  .privacy-toggle span { font-size:13px; color:var(--fg); }
+  .lock-icon { color:#f59e0b; font-size:14px; margin-left:4px; }
+  .group-private > summary { color:#f59e0b; }
+  .card-private { border-color:#f59e0b33; }
+  .card-encrypted .cover::after {
+    content:'🔒'; position:absolute; top:6px; right:6px; font-size:16px;
+    background:rgba(0,0,0,.5); border-radius:4px; padding:2px 4px;
+  }
 </style>
 </head>
 <body>
@@ -96,10 +108,31 @@ internal static class LocalLibraryPages
     <label>分类名称
       <input id="kindLabel" name="label" autocomplete="off" maxlength="32" required placeholder="例如：纪录片"/>
     </label>
+    <label class="privacy-toggle">
+      <input type="checkbox" id="kindPrivate"/>
+      <span>隐私分类（需要密码才能查看）</span>
+    </label>
+    <label id="kindPasswordRow" hidden>隐私密码
+      <input id="kindPassword" type="password" autocomplete="new-password" placeholder="设置隐私密码"/>
+    </label>
     <div class="err" id="kindErr"></div>
     <div class="dlg-actions">
       <button type="button" id="kindCancel">取消</button>
       <button type="submit" class="primary">添加</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="privacyDlg">
+  <form class="dlg" method="dialog" id="privacyForm">
+    <h2>输入隐私密码</h2>
+    <label>分类：<span id="privacyKindLabel"></span></label>
+    <label>密码
+      <input id="privacyPassword" type="password" autocomplete="current-password" required placeholder="输入隐私密码"/>
+    </label>
+    <div class="err" id="privacyErr"></div>
+    <div class="dlg-actions">
+      <button type="button" id="privacyCancel">取消</button>
+      <button type="submit" class="primary">确认</button>
     </div>
   </form>
 </dialog>
@@ -145,6 +178,52 @@ document.getElementById('kindCancel').onclick = () => {
   kindDlg.close();
   restoreKindSelect();
 };
+document.getElementById('kindPrivate').onchange = () => {
+  document.getElementById('kindPasswordRow').hidden = !document.getElementById('kindPrivate').checked;
+  if (!document.getElementById('kindPrivate').checked)
+    document.getElementById('kindPassword').value = '';
+};
+const privacyDlg = document.getElementById('privacyDlg');
+document.getElementById('privacyCancel').onclick = () => privacyDlg.close();
+let privacyResolve = null;
+let privacyValidate = null;
+privacyDlg.addEventListener('close', () => {
+  if(privacyResolve) privacyResolve(null);
+  privacyResolve = null;
+  privacyValidate = null;
+});
+function showPrivacyPrompt(kindLabel, validate = null){
+  return new Promise(resolve => {
+    privacyResolve = resolve;
+    privacyValidate = validate;
+    document.getElementById('privacyKindLabel').textContent = kindLabel;
+    document.getElementById('privacyPassword').value = '';
+    document.getElementById('privacyErr').textContent = '';
+    privacyDlg.showModal();
+    document.getElementById('privacyPassword').focus();
+  });
+}
+document.getElementById('privacyForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const pw = document.getElementById('privacyPassword').value;
+  const err = document.getElementById('privacyErr');
+  err.textContent = '';
+  if (!pw) { err.textContent = '请输入密码'; return; }
+  const submit = e.submitter;
+  if(submit) submit.disabled = true;
+  try {
+    if(privacyValidate) await privacyValidate(pw);
+  } catch(ex) {
+    err.textContent = ex.message || '验证失败，请重试';
+    document.getElementById('privacyPassword').select();
+    return;
+  } finally {
+    if(submit) submit.disabled = false;
+  }
+  if(!privacyDlg.open) return;
+  if (privacyResolve) { privacyResolve(pw); privacyResolve = null; }
+  privacyDlg.close();
+};
 function setMode(m){
   mode = m;
   saveMode(mode);
@@ -168,22 +247,34 @@ function kindOptions(selected){
   const opts = kinds.map(k => `<option value="${esc(k.value)}"${(selected||'')===k.value?' selected':''}>${esc(k.label)}</option>`).join('');
   return opts + `<option value="${NEW_KIND}">+ 新增分类</option>`;
 }
+const AUDIO_SVG = `<svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="24" cy="24" r="22" fill="#334155"/><path d="M20 16v16l14-8z" fill="#94a3b8"/><path d="M16 20h-2v8h2v-8zm0 0l4-4h2v16h-2l-4-4" stroke="#94a3b8" stroke-width="1.5" fill="none"/></svg>`;
+const PENDING_SVG = `<svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="48" height="48" rx="6" fill="#1e293b"/><circle cx="24" cy="24" r="8" stroke="#475569" stroke-width="2" fill="none"/><path d="M24 18v6l4 2" stroke="#475569" stroke-width="2" stroke-linecap="round"/></svg>`;
 function card(item){
   const meta = item.metaSuffix || '';
   const ext = item.extension || '';
   const audio = !!item.isAudioOnly;
+  const ts = item.thumbStatus || '';
   const coverClass = audio ? 'cover cover-audio' : 'cover';
-  const coverBody = audio
-    ? `<span class="audio-label">音频</span>`
-    : `<img src="${esc(item.thumbUrl)}" alt="" loading="lazy" decoding="async" onerror="this.style.opacity=.25"/>`;
-  return `<article class="card" data-id="${esc(item.id)}">
+  const cardClass = 'card' + (item.isEncrypted ? ' card-encrypted' : '') + (item.isPrivateKind ? ' card-private' : '');
+  let coverBody;
+  if (audio || ts === 'audio') {
+    coverBody = `<span class="audio-label">音频</span>`;
+  } else if (ts === 'ready') {
+    coverBody = `<img data-src="${esc(item.thumbUrl)}" alt="" decoding="async" class="thumb-lazy" onerror="this.style.opacity=.25"/>`;
+  } else {
+    coverBody = `<div class="thumb-placeholder" data-src="${esc(item.thumbUrl)}" data-pending="1">${PENDING_SVG}</div>`;
+  }
+  const lockBadge = item.isPrivateKind || item.isEncrypted ? '<span class="lock-icon" title="隐私视频">🔒</span>' : '';
+  return `<article class="${cardClass}" data-id="${esc(item.id)}">
     <a class="${coverClass}" href="${esc(playHref(item))}" title="播放">
       ${coverBody}
     </a>
     <div class="meta">
       <div class="row">
         <span class="time">${esc(item.downloadedAtText)}</span>
+        ${lockBadge}
         <button type="button" class="edit" data-edit="${esc(item.id)}">编辑</button>
+        ${item.isEncrypted ? `<button type="button" class="edit" data-unprotect="${esc(item.id)}" style="color:#f59e0b">取消隐私</button>` : ''}
         <select class="kind" data-kind="${esc(item.id)}" title="视频类型">${kindOptions(item.videoKind)}</select>
       </div>
       <div class="author-row">
@@ -212,6 +303,10 @@ function openKindDlg(sel){
 }
 function bindCardEvents(scope){
   scope.querySelectorAll('button.edit').forEach(btn => {
+    if (btn.dataset.unprotect) {
+      btn.onclick = () => handleUnprotect(btn.dataset.unprotect);
+      return;
+    }
     btn.onclick = () => openEdit(btn.getAttribute('data-edit'));
   });
   scope.querySelectorAll('select.kind').forEach(sel => {
@@ -234,6 +329,32 @@ function bindCardEvents(scope){
       }
     };
   });
+}
+async function handleUnprotect(id){
+  try {
+    const apiKinds = await fetchKinds();
+    const allKinds = [{ value:'', label:'未分类' }, ...apiKinds.filter(k => k && k.value)];
+    const itemRes = await fetch('/api/item?id='+encodeURIComponent(String(id).replace(/-/g,'')));
+    if(!itemRes.ok) throw new Error('无法加载条目');
+    const item = await itemRes.json();
+    const kindValue = item.videoKind || '';
+    const kindInfo = allKinds.find(k => k.value === kindValue);
+    if(!kindInfo || !kindInfo.isPrivate){ alert('该视频不在隐私分类中'); return; }
+    const pw = await showPrivacyPrompt(kindInfo.label);
+    if(!pw) return;
+    const res = await fetch('/api/privacy/unprotect', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ id, password: pw })
+    });
+    if(!res.ok){
+      const t = await res.text();
+      throw new Error(t || ('HTTP '+res.status));
+    }
+    await load();
+  } catch (ex) {
+    alert(ex.message || String(ex));
+  }
 }
 async function openEdit(id){
   const res = await fetch('/api/item?id='+encodeURIComponent(String(id).replace(/-/g,'')));
@@ -267,8 +388,14 @@ document.getElementById('kindForm').onsubmit = async (e) => {
   const err = document.getElementById('kindErr');
   err.textContent = '';
   if(!label){ err.textContent = '请输入分类名称'; return; }
+  const isPrivate = document.getElementById('kindPrivate').checked;
+  const password = document.getElementById('kindPassword').value;
+  if(isPrivate && !password){ err.textContent = '隐私分类需要设置密码'; return; }
   try {
-    const created = await postKind(label);
+    const created = await postKind(label, isPrivate, password);
+    document.getElementById('kindPrivate').checked = false;
+    document.getElementById('kindPassword').value = '';
+    document.getElementById('kindPasswordRow').hidden = true;
     const apiKinds = await fetchKinds();
     kinds = [{ value:'', label:'未分类' }, ...apiKinds.filter(k => k && k.value)];
     if(!kinds.some(k => k.value === created.value))
@@ -305,11 +432,13 @@ async function postEdit(body){
   }
   return res.json();
 }
-async function postKind(label){
+async function postKind(label, isPrivate, password){
+  const body = { label };
+  if (isPrivate) { body.isPrivate = true; body.password = password || ''; }
   const res = await fetch('/api/kinds', {
     method:'POST',
     headers:{ 'Content-Type':'application/json' },
-    body: JSON.stringify({ label })
+    body: JSON.stringify(body)
   });
   if(!res.ok){
     const t = await res.text();
@@ -323,27 +452,126 @@ async function fetchKinds(){
   const data = await res.json();
   return Array.isArray(data) ? data : [];
 }
+const MAX_CONCURRENT_THUMBS = 16;
+let activeThumbLoads = 0;
+const thumbQueue = [];
+function drainThumbQueue(){
+  while(activeThumbLoads < MAX_CONCURRENT_THUMBS && thumbQueue.length){
+    const el = thumbQueue.shift();
+    if(!el.isConnected || el.dataset.loaded === '1') continue;
+    activeThumbLoads++;
+    const src = el.dataset.src;
+    const isPlaceholder = el.tagName === 'DIV';
+    if(isPlaceholder){
+      const img = new Image();
+      img.decoding = 'async';
+      img.onload = () => {
+        el.replaceWith(img);
+        img.src = src;
+        img.classList.add('thumb-lazy');
+        img.dataset.loaded = '1';
+        activeThumbLoads--;
+        drainThumbQueue();
+      };
+      img.onerror = () => {
+        el.innerHTML = AUDIO_SVG;
+        el.dataset.loaded = '1';
+        activeThumbLoads--;
+        drainThumbQueue();
+      };
+      img.src = src;
+    } else {
+      el.onload = () => { el.dataset.loaded = '1'; activeThumbLoads--; drainThumbQueue(); };
+      el.onerror = () => { el.style.opacity = '.25'; el.dataset.loaded = '1'; activeThumbLoads--; drainThumbQueue(); };
+      el.src = src;
+    }
+  }
+}
+let thumbObserver = null;
+function initThumbLazyLoad(scope){
+  if(thumbObserver) thumbObserver.disconnect();
+  thumbObserver = new IntersectionObserver((entries) => {
+    for(const entry of entries){
+      if(entry.isIntersecting){
+        const el = entry.target;
+        thumbObserver.unobserve(el);
+        if(el.dataset.loaded === '1') continue;
+        thumbQueue.push(el);
+        drainThumbQueue();
+      }
+    }
+  }, { rootMargin: '200px' });
+  scope.querySelectorAll('[data-src]:not([data-loaded="1"])').forEach(el => thumbObserver.observe(el));
+}
 async function load(){
   root.innerHTML = '<div class="empty">加载中…</div>';
-  try {
-    const apiKinds = await fetchKinds();
-    kinds = [{ value:'', label:'未分类' }, ...apiKinds.filter(k => k && k.value)];
-  } catch (_) {}
   const q = mode==='site' ? '?group=site' : (mode==='kind' ? '?group=kind' : '');
-  const res = await fetch('/api/videos'+q);
-  const data = await res.json();
+  const [videosRes, kindsRes] = await Promise.allSettled([
+    fetch('/api/videos'+q).then(r => r.json()),
+    fetchKinds()
+  ]);
+  if (kindsRes.status === 'fulfilled') {
+    kinds = [{ value:'', label:'未分类' }, ...kindsRes.value.filter(k => k && k.value)];
+  }
+  const data = videosRes.status === 'fulfilled' ? videosRes.value : [];
   if(mode==='site' || mode==='kind'){
     if(!data.length){ root.innerHTML='<div class="empty">暂无已完成的本地下载</div>'; return; }
-    // Non-time groups stay collapsed by default (no open attribute).
-    root.innerHTML = data.map(g => `<details class="group">
-      <summary>${esc(g.group)}（${g.items.length}）</summary>
-      <div class="grid">${g.items.map(card).join('')}</div>
-    </details>`).join('');
+    root.innerHTML = data.map(g => {
+      const isPrivate = mode === 'kind' && g.isPrivate;
+      const isUnlocked = mode === 'kind' && g.isUnlocked;
+      const cls = 'group' + (isPrivate ? ' group-private' : '');
+      const cnt = g.items.length;
+      const inner = cnt > 0
+        ? `<div class="grid">${g.items.map(card).join('')}</div>`
+        : (isPrivate && !isUnlocked ? '<div class="empty">需要密码查看</div>' : '<div class="empty">暂无内容</div>');
+      return `<details class="${cls}" ${isUnlocked ? 'open' : ''} data-kind-value="${esc(g.isPrivate ? (kinds.find(k => k.label === g.group)?.value || '') : '')}" data-private="${isPrivate ? '1' : '0'}" data-unlocked="${isUnlocked ? '1' : '0'}">
+        <summary>${esc(g.group)}${isPrivate ? (isUnlocked ? ' 🔓（点击上锁）' : ' 🔒') : `（${cnt}）`}</summary>
+        ${inner}
+      </details>`;
+    }).join('');
+    if(mode === 'kind'){
+      root.querySelectorAll('details.group-private').forEach(det => {
+        const summary = det.querySelector('summary');
+        if(!summary) return;
+        summary.addEventListener('click', async (e) => {
+          e.preventDefault();
+          const kindValue = det.getAttribute('data-kind-value') || '';
+          const label = kinds.find(k => k.value === kindValue)?.label || '隐私分类';
+          try {
+            if(det.dataset.unlocked === '1'){
+              const res = await fetch('/api/privacy/lock', {
+                method:'POST', headers:{ 'Content-Type':'application/json' },
+                body: JSON.stringify({ kindValue })
+              });
+              if(!res.ok) throw new Error('上锁失败，请重试');
+              await load();
+              return;
+            }
+            const pw = await showPrivacyPrompt(label, async password => {
+              const res = await fetch('/api/privacy/unlock', {
+              method:'POST',
+              headers:{ 'Content-Type':'application/json' },
+              body: JSON.stringify({ kindValue, password })
+            });
+            if(!res.ok){
+              const t = await res.text();
+              throw new Error(t || '密码错误');
+            }
+            });
+            if(!pw) return;
+            await load();
+          } catch (ex) {
+            alert(ex.message || String(ex));
+          }
+        });
+      });
+    }
   } else {
     if(!data.length){ root.innerHTML='<div class="empty">暂无已完成的本地下载</div>'; return; }
     root.innerHTML = `<div class="grid">${data.map(card).join('')}</div>`;
   }
   bindCardEvents(root);
+  initThumbLazyLoad(root);
 }
 document.getElementById('btnTime').classList.toggle('active', mode==='time');
 document.getElementById('btnSite').classList.toggle('active', mode==='site');
@@ -412,6 +640,9 @@ load();
   .dlg-actions button { background:#334155; color:var(--fg); border:0; border-radius:8px; padding:8px 12px; cursor:pointer; }
   .dlg-actions button.primary { background:var(--accent); color:#0f172a; font-weight:600; }
   .err { color:#fca5a5; font-size:12px; min-height:1em; }
+  .privacy-toggle { display:flex; flex-direction:row; align-items:center; gap:8px; cursor:pointer; }
+  .privacy-toggle input[type=checkbox] { width:16px; height:16px; }
+  .privacy-toggle span { font-size:13px; color:var(--fg); }
   /* Host window is borderless fullscreen — fill the entire WebView. */
   body.host-fs { overflow:hidden; background:#000; }
   body.host-fs header { display:none; }
@@ -479,10 +710,31 @@ load();
     <label>分类名称
       <input id="kindLabel" name="label" autocomplete="off" maxlength="32" required placeholder="例如：纪录片"/>
     </label>
+    <label class="privacy-toggle">
+      <input type="checkbox" id="kindPrivate"/>
+      <span>隐私分类（需要密码才能查看）</span>
+    </label>
+    <label id="kindPasswordRow" hidden>隐私密码
+      <input id="kindPassword" type="password" autocomplete="new-password" placeholder="设置隐私密码"/>
+    </label>
     <div class="err" id="kindErr"></div>
     <div class="dlg-actions">
       <button type="button" id="kindCancel">取消</button>
       <button type="submit" class="primary">添加</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="privacyDlg">
+  <form class="dlg" method="dialog" id="privacyForm">
+    <h2>输入隐私密码</h2>
+    <label>分类：<span id="privacyKindLabel"></span></label>
+    <label>密码
+      <input id="privacyPassword" type="password" autocomplete="current-password" required placeholder="输入隐私密码"/>
+    </label>
+    <div class="err" id="privacyErr"></div>
+    <div class="dlg-actions">
+      <button type="button" id="privacyCancel">取消</button>
+      <button type="submit" class="primary">确认</button>
     </div>
   </form>
 </dialog>
@@ -652,6 +904,22 @@ function applyMeta(item){
     btnEdit.setAttribute('data-edit', item.id);
     fillKindSelect(item.videoKind || '');
   }
+  let unprotectBtn = document.getElementById('btnUnprotect');
+  if(item?.isEncrypted && hasId){
+    if(!unprotectBtn){
+      unprotectBtn = document.createElement('button');
+      unprotectBtn.type = 'button';
+      unprotectBtn.className = 'edit';
+      unprotectBtn.id = 'btnUnprotect';
+      unprotectBtn.style.color = '#f59e0b';
+      unprotectBtn.textContent = '取消隐私';
+      btnEdit.after(unprotectBtn);
+    }
+    unprotectBtn.onclick = () => handleUnprotect();
+    unprotectBtn.hidden = false;
+  } else if(unprotectBtn) {
+    unprotectBtn.hidden = true;
+  }
 }
 
 function patchPlaylistItem(updated){
@@ -686,11 +954,13 @@ async function postEdit(body){
   return res.json();
 }
 
-async function postKind(label){
+async function postKind(label, isPrivate, password){
+  const body = { label };
+  if (isPrivate) { body.isPrivate = true; body.password = password || ''; }
   const res = await fetch('/api/kinds', {
     method:'POST',
     headers:{ 'Content-Type':'application/json' },
-    body: JSON.stringify({ label })
+    body: JSON.stringify(body)
   });
   if(!res.ok){
     const t = await res.text();
@@ -736,6 +1006,81 @@ document.getElementById('kindCancel').onclick = () => {
   kindDlg.close();
   kindSelect.value = kindSelectPrev;
 };
+const privacyDlg = document.getElementById('privacyDlg');
+document.getElementById('privacyCancel').onclick = () => privacyDlg.close();
+document.getElementById('kindPrivate').onchange = () => {
+  document.getElementById('kindPasswordRow').hidden = !document.getElementById('kindPrivate').checked;
+  if (!document.getElementById('kindPrivate').checked)
+    document.getElementById('kindPassword').value = '';
+};
+let privacyResolve = null;
+let privacyValidate = null;
+privacyDlg.addEventListener('close', () => {
+  if(privacyResolve) privacyResolve(null);
+  privacyResolve = null;
+  privacyValidate = null;
+});
+function showPrivacyPrompt(kindLabel, validate = null){
+  return new Promise(resolve => {
+    privacyResolve = resolve;
+    privacyValidate = validate;
+    document.getElementById('privacyKindLabel').textContent = kindLabel;
+    document.getElementById('privacyPassword').value = '';
+    document.getElementById('privacyErr').textContent = '';
+    privacyDlg.showModal();
+    document.getElementById('privacyPassword').focus();
+  });
+}
+document.getElementById('privacyForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const pw = document.getElementById('privacyPassword').value;
+  const err = document.getElementById('privacyErr');
+  err.textContent = '';
+  if (!pw) { err.textContent = '请输入密码'; return; }
+  const submit = e.submitter;
+  if(submit) submit.disabled = true;
+  try {
+    if(privacyValidate) await privacyValidate(pw);
+  } catch(ex) {
+    err.textContent = ex.message || '验证失败，请重试';
+    document.getElementById('privacyPassword').select();
+    return;
+  } finally {
+    if(submit) submit.disabled = false;
+  }
+  if(!privacyDlg.open) return;
+  if (privacyResolve) { privacyResolve(pw); privacyResolve = null; }
+  privacyDlg.close();
+};
+async function handleUnprotect(){
+  if(!currentItem?.id) return;
+  try {
+    await refreshKinds();
+    const kindValue = currentItem.videoKind || '';
+    const kindInfo = kinds.find(k => k.value === kindValue);
+    if(!kindInfo || !kindInfo.isPrivate){ alert('该视频不在隐私分类中'); return; }
+    const pw = await showPrivacyPrompt(kindInfo.label);
+    if(!pw) return;
+    const res = await fetch('/api/privacy/unprotect', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ id: currentItem.id, password: pw })
+    });
+    if(!res.ok){
+      const t = await res.text();
+      throw new Error(t || ('HTTP '+res.status));
+    }
+    const itemRes = await fetch('/api/item?id='+encodeURIComponent(String(currentItem.id).replace(/-/g,'')));
+    if(!itemRes.ok) throw new Error('无法刷新视频信息');
+    const updated = await itemRes.json();
+    patchPlaylistItem(updated);
+    applyMeta({ ...currentItem, ...updated });
+    video.src = currentItem.streamUrl;
+    video.load();
+  } catch (ex) {
+    alert(ex.message || String(ex));
+  }
+}
 
 kindSelect.onchange = async () => {
   if(!currentItem?.id) return;
@@ -778,8 +1123,14 @@ document.getElementById('kindForm').onsubmit = async (e) => {
   err.textContent = '';
   if(!label){ err.textContent = '请输入分类名称'; return; }
   if(!currentItem?.id){ err.textContent = '当前条目无效'; return; }
+  const isPrivate = document.getElementById('kindPrivate').checked;
+  const password = document.getElementById('kindPassword').value;
+  if(isPrivate && !password){ err.textContent = '隐私分类需要设置密码'; return; }
   try {
-    const created = await postKind(label);
+    const created = await postKind(label, isPrivate, password);
+    document.getElementById('kindPrivate').checked = false;
+    document.getElementById('kindPassword').value = '';
+    document.getElementById('kindPasswordRow').hidden = true;
     await refreshKinds();
     if(!kinds.some(k => k.value === created.value))
       kinds.push({ value: created.value, label: created.label });
@@ -821,6 +1172,26 @@ async function loadById(id, { push } = { push: false }){
     }
   }
 
+  let streamUrl = item.streamUrl;
+  if((item.isEncrypted || item.isPrivateKind) && !item.isUnlocked){
+    const kindValue = item.videoKind || '';
+    const kindInfo = kinds.find(k => k.value === kindValue);
+    const kindLabel = kindInfo ? kindInfo.label : '隐私分类';
+    try {
+      const pw = await showPrivacyPrompt(kindLabel, async password => {
+        const res = await fetch('/api/privacy/unlock', {
+          method:'POST', headers:{ 'Content-Type':'application/json' },
+          body: JSON.stringify({ kindValue, password })
+        });
+        if(!res.ok) throw new Error(await res.text() || '解锁失败');
+      });
+      if(!pw || token !== loadToken){ setMediaReady(false); return; }
+    } catch (_) {
+      setMediaReady(false);
+      return;
+    }
+  }
+
   const onReady = () => {
     if(token !== loadToken) return;
     setMediaReady(true);
@@ -837,7 +1208,7 @@ async function loadById(id, { push } = { push: false }){
     if(token !== loadToken) return;
     setMediaReady(false);
   };
-  video.src = item.streamUrl;
+  video.src = streamUrl;
   video.load();
 }
 
@@ -883,7 +1254,7 @@ video.addEventListener('dblclick', e => {
 
 document.addEventListener('keydown', e => {
   if(e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT')) return;
-  if(dlg.open || kindDlg.open) return;
+  if(dlg.open || kindDlg.open || privacyDlg.open) return;
   if(e.key === 'ArrowLeft' || e.key === 'ArrowUp'){ e.preventDefault(); go(-1); }
   if(e.key === 'ArrowRight' || e.key === 'ArrowDown'){ e.preventDefault(); go(1); }
   if(e.key === 'f' || e.key === 'F'){ e.preventDefault(); toggleFullscreen(); }

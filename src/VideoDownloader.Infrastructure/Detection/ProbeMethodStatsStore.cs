@@ -21,7 +21,7 @@ public sealed class ProbeMethodStatsStore : IProbeMethodStats
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
-    private readonly ILogger<ProbeMethodStatsStore> _logger;
+    private readonly ILogger _logger;
     private readonly object _gate = new();
     private readonly ConcurrentDictionary<string, string> _lastWin = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Counter> _counters = new(StringComparer.OrdinalIgnoreCase);
@@ -30,16 +30,30 @@ public sealed class ProbeMethodStatsStore : IProbeMethodStats
     private bool _persistDirty;
 
     public ProbeMethodStatsStore(ILogger<ProbeMethodStatsStore> logger)
+        : this(logger, DefaultLedgerPath())
+    {
+    }
+
+    public ProbeMethodStatsStore(ILogger logger, string ledgerPath)
     {
         _logger = logger;
-        _ledgerPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VideoDownloader",
-            "probe-method-stats.json");
+        _ledgerPath = ledgerPath;
         LoadUnlocked();
     }
 
-    public void Record(string detectorId, string method, bool success)
+    public static string DefaultLedgerPath() =>
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "VideoDownloader",
+            "probe-method-stats.json");
+
+    public void Record(string detectorId, string method, bool success) =>
+        RecordCore(detectorId, method, success, null);
+
+    public void RecordTimed(string detectorId, string method, bool success, TimeSpan elapsed) =>
+        RecordCore(detectorId, method, success, Math.Max(1, elapsed.TotalMilliseconds));
+
+    private void RecordCore(string detectorId, string method, bool success, double? elapsedMs)
     {
         if (string.IsNullOrWhiteSpace(detectorId) || string.IsNullOrWhiteSpace(method))
             return;
@@ -50,6 +64,16 @@ public sealed class ProbeMethodStatsStore : IProbeMethodStats
             {
                 c = new Counter(detectorId, method);
                 _counters[key] = c;
+            }
+            // A small rolling window adapts after cookies, tools or site behavior change.
+            c.RecentAttempts = c.RecentAttempts * 0.9 + 1;
+            c.RecentSuccesses = c.RecentSuccesses * 0.9 + (success ? 1 : 0);
+            if (elapsedMs is > 0)
+            {
+                if (success)
+                    c.SuccessMs = c.SuccessMs is > 0 ? c.SuccessMs * 0.75 + elapsedMs.Value * 0.25 : elapsedMs.Value;
+                else
+                    c.FailureMs = c.FailureMs is > 0 ? c.FailureMs * 0.75 + elapsedMs.Value * 0.25 : elapsedMs.Value;
             }
             c.Attempts++;
             if (success)
@@ -73,7 +97,7 @@ public sealed class ProbeMethodStatsStore : IProbeMethodStats
         {
             if (!_counters.TryGetValue(Key(detectorId, method), out var c) || c.Attempts == 0)
                 return 0.5;
-            return (c.Successes + 1.0) / (c.Attempts + 2.0);
+            return (double)c.Successes / c.Attempts;
         }
     }
 
@@ -89,58 +113,61 @@ public sealed class ProbeMethodStatsStore : IProbeMethodStats
             return _counters.TryGetValue(Key(detectorId, method), out var c) ? c.Successes : 0;
     }
 
-    public IReadOnlyList<T> OrderBySuccessRate<T>(string detectorId, IReadOnlyList<T> items, Func<T, string> methodOf)
+    public IReadOnlyList<T> OrderBySuccessCount<T>(string detectorId, IReadOnlyList<T> items, Func<T, string> methodOf)
     {
         if (items.Count <= 1) return items;
-        return items
-            .Select((item, index) => (item, index, rate: SuccessRate(detectorId, methodOf(item))))
-            .OrderByDescending(x => x.rate)
-            .ThenBy(x => x.index)
-            .Select(x => x.item)
-            .ToArray();
+        lock (_gate)
+        {
+            return items
+                .Select((item, index) => (item, index, score: SuccessRate(detectorId, methodOf(item))))
+                .OrderByDescending(x => x.score)
+                .ThenBy(x => x.index)
+                .Select(x => x.item)
+                .ToArray();
+        }
     }
 
-    public bool PreferYtdlpFirst(string detectorId)
+    public IReadOnlyList<string> OrderedMethods(string detectorId) =>
+        OrderBySuccessCount(detectorId,
+            string.Equals(detectorId, SiteIds.YouTube, StringComparison.OrdinalIgnoreCase)
+                ? ProbeDetectors.MethodsOf(detectorId)
+                : ProbeDetectors.CallableMethodsOf(detectorId), method => method);
+
+    public bool PreferYtdlpFirst(string detectorId) =>
+        ProbeDetectors.IsYtDlpMethod(OrderedMethods(detectorId).FirstOrDefault());
+
+    public int MethodSharePercent(string detectorId, string method)
     {
-        if (!ProbeDetectors.HasYtDlp(detectorId))
-            return false;
-
-        if (detectorId is SiteIds.YouTube)
+        if (string.IsNullOrWhiteSpace(detectorId) || string.IsNullOrWhiteSpace(method))
+            return 0;
+        lock (_gate)
         {
-            var ytdlp = Math.Max(
-                SuccessRate(detectorId, ProbeMethods.YtDlpPotMweb),
-                Math.Max(
-                    SuccessRate(detectorId, ProbeMethods.YtDlpDefault),
-                    SuccessRate(detectorId, ProbeMethods.YtDlpWebEmbedded)));
-            var network = SuccessRate(detectorId, ProbeMethods.NetworkMedia);
-            var attempts = Attempts(detectorId, ProbeMethods.YtDlpPotMweb)
-                           + Attempts(detectorId, ProbeMethods.YtDlpDefault)
-                           + Attempts(detectorId, ProbeMethods.YtDlpWebEmbedded);
-            if (attempts < 2)
-                return true;
-            return ytdlp >= network;
-        }
+            var total = 0;
+            var mine = 0;
+            foreach (var counter in _counters.Values)
+            {
+                if (!string.Equals(counter.DetectorId, detectorId, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                total += counter.Successes;
+                if (string.Equals(counter.Method, method, StringComparison.OrdinalIgnoreCase))
+                    mine = counter.Successes;
+            }
 
-        if (detectorId is SiteIds.Bilibili)
-        {
-            var api = SuccessRate(detectorId, ProbeMethods.PlayurlApi);
-            var ytdlp = SuccessRate(detectorId, ProbeMethods.YtDlp);
-            var network = SuccessRate(detectorId, ProbeMethods.NetworkPlayurl);
-            if (Attempts(detectorId, ProbeMethods.PlayurlApi) + Attempts(detectorId, ProbeMethods.YtDlp) < 2)
-                return false; // prefer network/grace until we have playurl_api samples
-            return Math.Max(api, ytdlp) >= network;
+            if (total <= 0)
+                return 0;
+            return (int)Math.Round(100.0 * mine / total, MidpointRounding.AwayFromZero);
         }
+    }
 
-        // TikTok: yt-dlp is the designed primary.
-        var tk = SuccessRate(detectorId, ProbeMethods.YtDlp);
-        var alt = Math.Max(
-            SuccessRate(detectorId, ProbeMethods.NetworkMedia),
-            Math.Max(
-                SuccessRate(detectorId, ProbeMethods.WebData),
-                SuccessRate(detectorId, ProbeMethods.VideoElement)));
-        if (Attempts(detectorId, ProbeMethods.YtDlp) < 2)
-            return true;
-        return tk >= alt;
+    public event EventHandler<ProbeMethodNotice>? MethodStarted;
+
+    public void ReportMethod(string detectorId, string method)
+    {
+        if (string.IsNullOrWhiteSpace(detectorId) || string.IsNullOrWhiteSpace(method))
+            return;
+        var attempts = Attempts(detectorId, method);
+        var percent = attempts == 0 ? 0 : (int)Math.Round(100.0 * Successes(detectorId, method) / attempts);
+        MethodStarted?.Invoke(this, new ProbeMethodNotice(detectorId, method, percent));
     }
 
     public string? LastWinningMethod(string detectorId) =>
@@ -331,6 +358,11 @@ public sealed class ProbeMethodStatsStore : IProbeMethodStats
                 if (string.IsNullOrWhiteSpace(detectorId) || string.IsNullOrWhiteSpace(c.Method))
                     continue;
                 c.DetectorId = detectorId;
+                if (c.RecentAttempts <= 0 && c.Attempts > 0)
+                {
+                    c.RecentAttempts = Math.Min(10, c.Attempts);
+                    c.RecentSuccesses = c.RecentAttempts * c.Successes / c.Attempts;
+                }
                 _counters[Key(detectorId, c.Method)] = c;
             }
             if (loaded.LastWin is not null)
@@ -421,6 +453,7 @@ public sealed class ProbeMethodStatsStore : IProbeMethodStats
         SiteIds.Bilibili => 1,
         SiteIds.Douyin => 2,
         SiteIds.TikTok => 3,
+        SiteIds.Generic => 4,
         _ => 9
     };
 
@@ -455,6 +488,10 @@ public sealed class ProbeMethodStatsStore : IProbeMethodStats
         public string Method { get; set; } = "";
         public int Attempts { get; set; }
         public int Successes { get; set; }
+        public double RecentAttempts { get; set; }
+        public double RecentSuccesses { get; set; }
+        public double SuccessMs { get; set; }
+        public double FailureMs { get; set; }
     }
 
     private sealed class LedgerFile

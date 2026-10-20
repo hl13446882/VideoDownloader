@@ -63,6 +63,21 @@ public sealed class RemuxTrackSelectionTests
     }
 
     [Fact]
+    public void KeepsVideoPlusAudio_WhenVideoSegmentEmbedsDummyAudio()
+    {
+        var video = Track("v-dash", MediaTrackKind.Video, 50_000_000);
+        var audio = Track("a-dash", MediaTrackKind.Audio, 5_000_000);
+        var selected = FfmpegAdapter.SelectTracksForRemux(
+        [
+            (video, HasVideo: true, HasAudio: true),
+            (audio, HasVideo: false, HasAudio: true)
+        ]);
+        Assert.Equal(2, selected.Count);
+        Assert.Contains(video, selected);
+        Assert.Contains(audio, selected);
+    }
+
+    [Fact]
     public void KeepsHqVideoPlusAudioExtract_FromProgressiveCombinedDonor()
     {
         var hd = Track("hd", MediaTrackKind.Video, 100_000_000);

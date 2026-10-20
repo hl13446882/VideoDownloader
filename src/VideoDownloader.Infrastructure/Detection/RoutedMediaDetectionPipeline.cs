@@ -165,6 +165,9 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
         IExclusiveSiteMediaDetector? exclusive;
         lock (_gate)
         {
+            // Reject retired network work before it can route back to the old page.
+            if (normalized.SessionId != Guid.Empty && normalized.SessionId != SessionId)
+                return Task.CompletedTask;
             var page = normalized.PageUrl ?? _page;
             if (page is not null)
             {
@@ -207,12 +210,22 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
         IExclusiveSiteMediaDetector? exclusive;
         lock (_gate)
         {
-            EnsureRouteUnlocked(pageUrl);
+            if (_active is not null &&
+                _page is not null &&
+                string.Equals(_page.Host, pageUrl.Host, StringComparison.OrdinalIgnoreCase) &&
+                SameExclusiveWork(_page, pageUrl, _kind))
+            {
+                _page = pageUrl;
+            }
+            else
+            {
+                EnsureRouteUnlocked(pageUrl);
+            }
             exclusive = _active;
         }
 
         if (exclusive is not null)
-            return exclusive.ProcessPageObservationAsync(pageUrl, pageTitle, pageScriptJson, context, ct);
+            return exclusive.ProcessPageObservationAsync(pageUrl, pageTitle, pageScriptJson, context, ct, runExternal);
         return _unified.ProbePageAsync(pageUrl, pageTitle, pageScriptJson, context, ct, runExternal);
     }
 
@@ -404,7 +417,9 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
     private static string? ExtractBilibiliId(Uri page)
     {
         var bv = System.Text.RegularExpressions.Regex.Match(page.AbsolutePath, @"/video/(BV[\w]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        return bv.Success ? bv.Groups[1].Value : null;
+        if (bv.Success) return bv.Groups[1].Value;
+        var av = System.Text.RegularExpressions.Regex.Match(page.AbsolutePath, @"/video/av(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return av.Success ? "av" + av.Groups[1].Value : null;
     }
 
     private static string? ExtractDigitId(Uri page)
@@ -450,9 +465,12 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
         List<DetectedVideo> videos;
         lock (_gate)
         {
+            if (!ReferenceEquals(sender, _active)) return;
             videos = descriptors
+                .Where(d => d.SessionId == _session.Id)
                 .Select(d => MediaDescriptorMapper.ToDetectedVideo(d, _session.Id))
                 .ToList();
+            if (videos.Count == 0) return;
             _lastBuilt = videos;
             // Late exclusive emit (e.g. TikTok yt-dlp after empty Complete) must latch completed
             // so settle loops see hasMedia + IsCompleted together.
@@ -496,7 +514,7 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
             {
                 if (_disposed || sessionId != owner._session.Id || owner._active is null)
                     return Task.CompletedTask;
-                return owner._active.ProcessPageObservationAsync(page, null, json, context, ct);
+                return owner._active.ProcessPageObservationAsync(page, null, json, context, ct, runExternal: false);
             }
         }
 

@@ -818,6 +818,26 @@ public sealed class HttpMediaDownloader
             throw new DownloadException(ErrorCodes.Range416, "Range not satisfiable.");
         }
 
+        else if (response.StatusCode == HttpStatusCode.NotModified)
+        {
+            job.ETag = null;
+            job.LastModified = null;
+            if (BilibiliCdnPreference.IsMediaHost(job.Variant.SourceUrl))
+            {
+                _logger.LogWarning(
+                    "Bilibili CDN returned 304 at offset={Offset} for {JobId}; renewing host={Host}",
+                    offset,
+                    job.Id,
+                    job.Variant.SourceUrl.Host);
+                throw new DownloadException(
+                    ErrorCodes.Http403,
+                    $"Bilibili CDN returned 304 at offset {offset} ({job.Variant.SourceUrl.Host}); renewing.");
+            }
+
+            ResetPart(job, file);
+            throw new HttpRequestException("HTTP 304 Not Modified");
+        }
+
         response.EnsureSuccessStatusCode();
 
         var newEtag = response.Headers.ETag?.Tag;
@@ -1052,6 +1072,8 @@ public sealed class HttpMediaDownloader
     {
         if (job.Variant.Container?.ToLowerInvariant() is not ("mp4" or "m4a" or "mov"))
             return false;
+        if (HasNonMp4PayloadExtension(job.Variant.SourceUrl))
+            return false;
         if (DownloadBackendRouter.IsStreamingManifest(job.Variant.SourceUrl))
             return false;
         if (LooksLikeDashSegment(job.Variant.SourceUrl, partPath, job.TargetPath))
@@ -1072,6 +1094,21 @@ public sealed class HttpMediaDownloader
         }
 
         return LooksM4s(sourceUrl.AbsolutePath) || LooksM4s(partPath) || LooksM4s(targetPath);
+    }
+
+    /// <summary>Album BGM is often an <c>.mp3</c> whose container was labeled mp4. Do not reject those bytes as a broken MP4.</summary>
+    private static bool HasNonMp4PayloadExtension(Uri url)
+    {
+        var ext = Path.GetExtension(url.AbsolutePath);
+        return ext.Equals(".mp3", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".aac", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".wav", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".flac", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".jpg", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".jpeg", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".png", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".webp", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".gif", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ReconcilePartPath(DownloadJob job, string writtenPartPath)

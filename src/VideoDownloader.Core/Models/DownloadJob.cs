@@ -50,5 +50,17 @@ public sealed class DownloadJob
     /// <summary>True when sequential subtitle recognition has finished for this completed file.</summary>
     public bool SubtitleRecognized { get; set; }
 
+    /// <summary>True when a thumbnail JPEG has been generated and persisted for this completed video.</summary>
+    public bool ThumbReady { get; set; }
+
+    /// <summary>Obfuscated filename on disk when encrypted; null for normal files.</summary>
+    public string? EncryptedFilename { get; set; }
+
+    /// <summary>Original filename before encryption; used for restore when removing privacy.</summary>
+    public string? OriginalFilename { get; set; }
+
+    /// <summary>True when the file is encrypted (has VDENC marker and obfuscated name).</summary>
+    public bool IsEncrypted => !string.IsNullOrEmpty(EncryptedFilename);
+
     public DateTimeOffset CreatedAt { get; init; }
 }

@@ -147,8 +147,8 @@ internal static class DouyinObservationScript
             const push=v=>{
               if(typeof v==='string' && /^https?:/i.test(v) &&
                  /(?:byteimg|douyinpic)/i.test(v) &&
-                 /(?:aweme-images|biz_tag=aweme_images|\/tos-cn-i-|\/tos-|obj\/)/i.test(v) &&
-                 !/avatar|emoji|badge|logo|cover_thumb|thumbnail/i.test(v))
+                 /(?:aweme-images|biz_tag=aweme_images)/i.test(v) &&
+                 !/avatar|emoji|badge|logo|cover_thumb|thumbnail|cropcenter|image-cut-tos|resize-origshort|~noop\.|tsj2vxp0zn/i.test(v))
                 urls.push(v);
               else if(v&&typeof v==='object'){
                 for(const k of ['urlList','url_list','download_url_list','display_image','origin','url']){
@@ -205,8 +205,8 @@ internal static class DouyinObservationScript
               if(typeof v!=='string' || !/^https?:/i.test(v)) return;
               // Note album stills are signed douyinpic/byteimg aweme-images — not site chrome on douyinstatic.
               if(!/(?:byteimg|douyinpic)/i.test(v)) return;
-              if(!/(?:aweme-images|biz_tag=aweme_images|\/tos-cn-i-)/i.test(v)) return;
-              if(/avatar|emoji|emoticon|badge|logo|\/aweme-avatar\/|cover_thumb|thumbnail/i.test(v)) return;
+              if(!/(?:aweme-images|biz_tag=aweme_images)/i.test(v)) return;
+              if(/avatar|emoji|emoticon|badge|logo|\/aweme-avatar\/|cover_thumb|thumbnail|cropcenter|image-cut-tos|resize-origshort|~noop\.|tsj2vxp0zn/i.test(v)) return;
               urls.push(v.split(' ')[0]);
             };
             for(const el of document.querySelectorAll('img')){

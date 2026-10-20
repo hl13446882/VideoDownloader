@@ -80,6 +80,18 @@ public static class MediaVariantDisplay
                     : $"{label} · {heightTag}";
         }
 
+        if (variant.Width is > 0 && variant.Height is > 0)
+        {
+            var dimensions = $"{variant.Width}×{variant.Height}";
+            if (!label.Contains(dimensions, StringComparison.Ordinal))
+                label += $" · {dimensions}";
+        }
+        else if (variant.Height is null or <= 0 &&
+                 variant.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined))
+        {
+            label += " · 分辨率未知";
+        }
+
         var (size, approximate) = ResolveDisplaySize(variant, durationSec);
         if (size is > 0)
             label += approximate

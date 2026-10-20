@@ -55,6 +55,9 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
         await TryAddColumnAsync(conn, "edited_at", "TEXT NULL");
         await TryAddColumnAsync(conn, "author", "TEXT NULL");
         await TryAddColumnAsync(conn, "subtitle_recognized", "INTEGER NOT NULL DEFAULT 0");
+        await TryAddColumnAsync(conn, "thumb_ready", "INTEGER NOT NULL DEFAULT 0");
+        await TryAddColumnAsync(conn, "encrypted_filename", "TEXT NULL");
+        await TryAddColumnAsync(conn, "original_filename", "TEXT NULL");
         // One-time backfill: treat updated_at as completion time for already-finished rows.
         await conn.ExecuteAsync("""
             UPDATE download_jobs
@@ -90,14 +93,16 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
                 downloaded_bytes, total_bytes, etag, last_modified, context_version,
                 request_context_meta_json, request_context_secret, page_url, last_error_code,
                 caption, duration_sec, expected_total_bytes, content_prefix_hash,
-                video_kind, completed_at, edited_at, author, subtitle_recognized,
+                video_kind, completed_at, edited_at, author, subtitle_recognized, thumb_ready,
+                encrypted_filename, original_filename,
                 created_at, updated_at)
             VALUES (
                 @Id, @DisplayName, @SourceUrl, @TargetPath, @MediaFamily, @Status,
                 @DownloadedBytes, @TotalBytes, @ETag, @LastModified, @ContextVersion,
                 @MetaJson, @Secret, @PageUrl, @LastErrorCode,
                 @Caption, @DurationSec, @ExpectedTotalBytes, @ContentPrefixHash,
-                @VideoKind, @CompletedAt, @EditedAt, @Author, @SubtitleRecognized,
+                @VideoKind, @CompletedAt, @EditedAt, @Author, @SubtitleRecognized, @ThumbReady,
+                @EncryptedFilename, @OriginalFilename,
                 @CreatedAt, @UpdatedAt)
             ON CONFLICT(id) DO UPDATE SET
                 display_name = excluded.display_name,
@@ -123,6 +128,9 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
                 edited_at = excluded.edited_at,
                 author = COALESCE(excluded.author, download_jobs.author),
                 subtitle_recognized = excluded.subtitle_recognized,
+                thumb_ready = excluded.thumb_ready,
+                encrypted_filename = excluded.encrypted_filename,
+                original_filename = excluded.original_filename,
                 updated_at = excluded.updated_at;
             """;
 
@@ -152,6 +160,9 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
             EditedAt = job.EditedAt?.ToString("O"),
             Author = job.Author,
             SubtitleRecognized = job.SubtitleRecognized ? 1 : 0,
+            ThumbReady = job.ThumbReady ? 1 : 0,
+            EncryptedFilename = job.EncryptedFilename,
+            OriginalFilename = job.OriginalFilename,
             CreatedAt = job.CreatedAt.ToString("O"),
             UpdatedAt = job.UpdatedAt.ToString("O")
         });
@@ -159,8 +170,12 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
 
     public async Task<DownloadJob?> GetByIdAsync(Guid id, CancellationToken ct = default)
     {
-        var all = await GetAllAsync(ct);
-        return all.FirstOrDefault(j => j.Id == id);
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        var row = await conn.QueryFirstOrDefaultAsync<JobRow>(
+            "SELECT * FROM download_jobs WHERE id = @Id",
+            new { Id = id.ToString() });
+        return row is null ? null : MapRow(row);
     }
 
     public async Task DeleteAsync(Guid id, CancellationToken ct = default)
@@ -170,6 +185,15 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
         await conn.ExecuteAsync(
             "DELETE FROM download_jobs WHERE id = @Id",
             new { Id = id.ToString() });
+    }
+
+    public async Task UpdateThumbReadyAsync(Guid id, bool ready, CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            "UPDATE download_jobs SET thumb_ready = @Ready WHERE id = @Id",
+            new { Id = id.ToString(), Ready = ready ? 1 : 0 });
     }
 
     public async Task<IReadOnlyList<DownloadJob>> GetAllAsync(CancellationToken ct = default)
@@ -218,7 +242,10 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
             UpdatedAt = DateTimeOffset.Parse(row.updated_at),
             CompletedAt = ParseOptionalOffset(row.completed_at),
             EditedAt = ParseOptionalOffset(row.edited_at),
-            SubtitleRecognized = row.subtitle_recognized != 0
+            SubtitleRecognized = row.subtitle_recognized != 0,
+            ThumbReady = row.thumb_ready != 0,
+            EncryptedFilename = row.encrypted_filename,
+            OriginalFilename = row.original_filename
         };
     }
 
@@ -261,6 +288,9 @@ public sealed class SqliteDownloadRepository : IDownloadRepository
         public string? edited_at { get; set; }
         public string? author { get; set; }
         public int subtitle_recognized { get; set; }
+        public int thumb_ready { get; set; }
+        public string? encrypted_filename { get; set; }
+        public string? original_filename { get; set; }
         public string created_at { get; set; } = string.Empty;
         public string updated_at { get; set; } = string.Empty;
     }

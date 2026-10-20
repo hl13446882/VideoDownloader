@@ -209,6 +209,13 @@ public class CancelScratchCleanupTests
             return Task.CompletedTask;
         }
 
+        public Task UpdateThumbReadyAsync(Guid id, bool ready, CancellationToken ct = default)
+        {
+            if (_jobs.TryGetValue(id, out var job))
+                job.ThumbReady = ready;
+            return Task.CompletedTask;
+        }
+
         public Task InitializeAsync(CancellationToken ct = default) => Task.CompletedTask;
     }
 }

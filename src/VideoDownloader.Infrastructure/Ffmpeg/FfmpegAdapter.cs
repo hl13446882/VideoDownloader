@@ -327,7 +327,9 @@ public sealed class FfmpegAdapter : IFfmpegAdapter
     }
 
     /// <summary>
-    /// When a primary already embeds audio, drop companion Audio tracks.
+    /// When a Combined (self-contained A+V) primary embeds audio, drop companion Audio tracks.
+    /// DASH video-only tracks that happen to contain an audio stream (common with Bilibili)
+    /// do NOT cause companion Audio tracks to be dropped — the dedicated audio track is preferred.
     /// When no usable video-only primary exists but a self-contained A+V file does, use that alone.
     /// </summary>
     internal static IReadOnlyList<MediaTrack> SelectTracksForRemux(
@@ -338,9 +340,12 @@ public sealed class FfmpegAdapter : IFfmpegAdapter
 
         IReadOnlyList<(MediaTrack Track, bool HasVideo, bool HasAudio)> candidates = probed;
 
-        // Already-muxed primary (Combined / video with embedded audio): do not merge extra audio.
+        // Combined track with embedded audio: it is already a complete A+V file, so drop
+        // companion Audio tracks to avoid duplicate audio.  A plain Video-kind DASH segment
+        // that happens to carry an audio stream (Bilibili .m4s) is NOT treated as combined —
+        // the dedicated Audio track is kept because it is the real audio source.
         if (candidates.Any(p =>
-                p.Track.Kind != MediaTrackKind.Audio &&
+                p.Track.Kind == MediaTrackKind.Combined &&
                 p.HasAudio))
         {
             candidates = candidates
@@ -348,12 +353,21 @@ public sealed class FfmpegAdapter : IFfmpegAdapter
                 .ToArray();
         }
 
+        var hasDedicatedAudio = candidates.Any(p => p.Track.Kind == MediaTrackKind.Audio);
+        var hasRealVideo = candidates.Any(p =>
+            p.Track.Kind != MediaTrackKind.Audio &&
+            p.HasVideo);
+
         var videoOnlyPrimary = candidates.Any(p =>
             p.Track.Kind != MediaTrackKind.Audio &&
             p.HasVideo &&
             !p.HasAudio);
 
-        if (!videoOnlyPrimary)
+        // When a dedicated Audio track exists alongside a video track that carries real video,
+        // always do multi-input remux (video:v:0 + audio:a:0).  A DASH video segment that probes
+        // HasAudio=true is not treated as self-contained — the dedicated audio track is the real
+        // audio source.  Skip this when no non-audio track has video (e.g. video crumb unreadable).
+        if (!videoOnlyPrimary && !(hasDedicatedAudio && hasRealVideo))
         {
             var selfContained = candidates
                 .Where(p => p.HasVideo && p.HasAudio)

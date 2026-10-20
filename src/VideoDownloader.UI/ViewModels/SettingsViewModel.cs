@@ -9,6 +9,7 @@ using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Core.Subtitles;
 using VideoDownloader.Infrastructure.Configuration;
+using VideoDownloader.Infrastructure.Licensing;
 using VideoDownloader.Infrastructure.Logging;
 using VideoDownloader.Infrastructure.Security;
 using VideoDownloader.Infrastructure.Subtitles.Speech;
@@ -67,6 +68,7 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     public LocalizationService L => _loc;
     public string AppVersionText => "V" + AppVersionInfo.SemVer;
+    public string MachineIdText => _services.GetRequiredService<LicenseService>().Current.MachineId;
     public IReadOnlyList<int> ConcurrentOptions { get; } = [1, 2, 3, 4, 5];
     public IReadOnlyList<int> SubtitleBottomOffsetOptions { get; } = BottomOffsets;
     public IReadOnlyList<int> SubtitleBackgroundOpacityOptions { get; } = BackgroundOpacityLevels;

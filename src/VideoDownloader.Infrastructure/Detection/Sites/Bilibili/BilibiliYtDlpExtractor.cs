@@ -348,6 +348,7 @@ public sealed class BilibiliYtDlpExtractor : IExternalSiteResolver
         var root = doc.RootElement;
         var title = root.TryGetProperty("title", out var t) ? t.GetString() ?? "Video" : "Video";
         var id = root.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
+        var bvid = root.TryGetProperty("bvid", out var bvidEl) ? bvidEl.GetString() : null;
         var metadata = ExtractMetadata(root);
         var durationSec = JsonNumber.TryDoubleProp(root, "duration", out var dur) && dur > 0
             ? dur
@@ -553,7 +554,7 @@ public sealed class BilibiliYtDlpExtractor : IExternalSiteResolver
             new DetectedVideo(
                 DeterministicGuid($"yt-dlp:{siteId}:{id ?? pageUrl.AbsoluteUri}"),
                 siteId,
-                id,
+                bvid ?? id,
                 title,
                 pageUrl,
                 family,
@@ -580,6 +581,7 @@ public sealed class BilibiliYtDlpExtractor : IExternalSiteResolver
         AddString(metadata, root, "description");
         AddString(metadata, root, "webpage_url");
         AddString(metadata, root, "id");
+        AddString(metadata, root, "bvid");
         return metadata;
     }
 

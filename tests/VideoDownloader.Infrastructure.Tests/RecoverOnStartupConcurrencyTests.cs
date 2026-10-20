@@ -19,6 +19,22 @@ namespace VideoDownloader.Infrastructure.Tests;
 public class RecoverOnStartupConcurrencyTests
 {
     [Fact]
+    public async Task SavedYouTubeLiveCannotConsumeStartupRecoveryCapacityOrBeEnqueued()
+    {
+        var repo = new MemoryDownloadRepository();
+        var live = MakeJob("old-live", "https://manifest.googlevideo.com/api/manifest/hls_playlist/source/yt_live_broadcast/live/1/index.m3u8",
+            DateTimeOffset.UtcNow, DownloadStatus.Downloading);
+        await repo.SaveAsync(live);
+        using var engine = CreateEngine(repo, 1, true);
+        await engine.RecoverOnStartupAsync();
+        Assert.Equal(DownloadStatus.Failed, live.Status);
+        Assert.Equal(ErrorCodes.LiveNotSupported, live.LastErrorCode);
+        Assert.Equal(1, engine.FreeDownloadSlots);
+        var error = await Assert.ThrowsAsync<DownloadException>(() => engine.EnqueueAsync(live.Variant, "live"));
+        Assert.Equal(ErrorCodes.LiveNotSupported, error.ErrorCode);
+    }
+
+    [Fact]
     public async Task RecoverOnStartup_DoesNotMarkStalePausedAsContextExpired()
     {
         var repo = new MemoryDownloadRepository();
@@ -176,6 +192,13 @@ public class RecoverOnStartupConcurrencyTests
         public Task DeleteAsync(Guid id, CancellationToken ct = default)
         {
             _jobs.TryRemove(id, out _);
+            return Task.CompletedTask;
+        }
+
+        public Task UpdateThumbReadyAsync(Guid id, bool ready, CancellationToken ct = default)
+        {
+            if (_jobs.TryGetValue(id, out var job))
+                job.ThumbReady = ready;
             return Task.CompletedTask;
         }
 

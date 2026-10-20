@@ -11,6 +11,7 @@ using VideoDownloader.Infrastructure.Detection;
 using VideoDownloader.Infrastructure.Detection.Sites.Bilibili;
 using VideoDownloader.Infrastructure.Detection.Sites.Douyin;
 using VideoDownloader.Infrastructure.Detection.Sites.TikTok;
+using VideoDownloader.Infrastructure.Detection.Sites.YouTube;
 using VideoDownloader.Infrastructure.Diagnostics;
 using VideoDownloader.Infrastructure.Http;
 using VideoDownloader.Infrastructure.Licensing;
@@ -41,6 +42,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
     private readonly ConcurrentDictionary<Guid, byte> _removedJobs = new();
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _runLocks = new();
     private readonly SemaphoreSlim _concurrency;
+    private readonly int _maxConcurrent;
     private readonly object _targetPathSync = new();
     private readonly CancellationTokenSource _lifetime = new();
     private readonly Task _failedRetryLoop;
@@ -77,7 +79,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         _resolvers = (resolvers ?? []).ToArray();
         _availability = availability;
         _rediscoverer = rediscoverer;
-        _concurrency = new SemaphoreSlim(Math.Clamp(_options.Download.MaxConcurrentDownloads, 1, 5));
+        _maxConcurrent = Math.Clamp(_options.Download.MaxConcurrentDownloads, 1, 5);
+        _concurrency = new SemaphoreSlim(_maxConcurrent);
         _failedRetryLoop = Task.Run(() => FailedRetryLoopAsync(_lifetime.Token));
     }
 
@@ -92,6 +95,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         CancellationToken ct = default)
     {
         RejectMseOrdinaryDownload(variant);
+        if (YouTubeLiveMedia.IsLiveVariant(variant))
+            throw new DownloadException(ErrorCodes.LiveNotSupported, "Live streams are skipped; only recorded videos can be downloaded.");
 
         // Persist the full quality ladder so 403 recovery can resume the same object.
         variant = MediaVariantAlternatives.WithLadder(variant, siblingVariants);
@@ -247,6 +252,11 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         await _repository.DeleteAsync(jobId, ct);
     }
 
+    public int FreeDownloadSlots => _concurrency.CurrentCount;
+    internal TimeSpan ProgressIdleTimeout { get; init; } = DownloadProgressWatchdog.IdleTimeout;
+
+    public int MaxDownloadSlots => _maxConcurrent;
+
     public IReadOnlyList<DownloadJob> GetActiveJobs() =>
         DownloadQueueOrder.Sort(
                 _jobs.Values.Where(j => j.Status is not (DownloadStatus.Removed or DownloadStatus.Cancelled)))
@@ -273,6 +283,15 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
 
         if (job.Status is DownloadStatus.Cancelled or DownloadStatus.Removed)
             throw new InvalidOperationException("该任务不可重命名。");
+
+        if (job.IsEncrypted)
+        {
+            var privateStem = DownloadFileNameBuilder.NormalizeRenameStem(newStem,
+                Path.GetExtension(job.OriginalFilename ?? job.TargetPath));
+            DownloadFileNameBuilder.TrySplitMetaSuffix(privateStem, out var title, out _);
+            await UpdateLibraryItemAsync(jobId, titleHead: title, ct: ct);
+            return job.DisplayName;
+        }
 
         var extension = Path.GetExtension(job.TargetPath);
         if (string.IsNullOrWhiteSpace(extension))
@@ -498,6 +517,33 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         File.Delete(source);
     }
 
+    public async Task RepairPrivateLibraryAsync(string kindValue, CancellationToken ct = default)
+    {
+        if (!_kinds.GetAll().Any(k => k.Value == kindValue && k.IsPrivate))
+            throw new InvalidOperationException("无效的隐私分类。");
+        foreach (var job in _jobs.Values.Where(j => j.Status == DownloadStatus.Completed && j.VideoKind == kindValue))
+        {
+            var editLock = _runLocks.GetOrAdd(job.Id, _ => new SemaphoreSlim(1));
+            await editLock.WaitAsync(ct);
+            try
+            {
+                var recovered = PrivateLibraryFileRecovery.Find(job, _jobs.Values.ToArray());
+                if (recovered is null) continue;
+                var old = (job.TargetPath, job.EncryptedFilename, job.OriginalFilename);
+                job.OriginalFilename ??= Path.GetFileName(job.TargetPath);
+                job.TargetPath = recovered;
+                job.EncryptedFilename = Path.GetFileName(recovered);
+                try { await _repository.SaveAsync(job, ct); }
+                catch
+                {
+                    (job.TargetPath, job.EncryptedFilename, job.OriginalFilename) = old;
+                    throw;
+                }
+            }
+            finally { editLock.Release(); }
+        }
+    }
+
     public async Task UpdateLibraryItemAsync(
         Guid jobId,
         string? titleHead = null,
@@ -505,43 +551,108 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         string? videoKind = null,
         CancellationToken ct = default)
     {
-        if (!_jobs.TryGetValue(jobId, out var job))
-            throw new InvalidOperationException("任务不存在。");
-
-        if (job.Status != DownloadStatus.Completed)
-            throw new InvalidOperationException("仅已完成任务可编辑。");
-
-        if (titleHead is not null)
+        var editLock = _runLocks.GetOrAdd(jobId, _ => new SemaphoreSlim(1));
+        await editLock.WaitAsync(ct);
+        try
         {
-            var currentStem = Path.GetFileNameWithoutExtension(job.TargetPath);
-            if (string.IsNullOrWhiteSpace(currentStem))
-                currentStem = job.DisplayName;
-            var newStem = DownloadFileNameBuilder.ReplaceTitleHead(currentStem, titleHead);
-            await RenameAsync(jobId, newStem, ct);
-        }
-
-        var dirty = false;
-        if (caption is not null)
-        {
-            job.Caption = caption;
-            dirty = true;
-        }
-
-        if (videoKind is not null)
-        {
-            if (!_kinds.IsKnown(videoKind))
+            if (!_jobs.TryGetValue(jobId, out var job))
+                throw new InvalidOperationException("任务不存在。");
+            if (job.Status != DownloadStatus.Completed)
+                throw new InvalidOperationException("仅已完成任务可编辑。");
+            if (videoKind is not null && !_kinds.IsKnown(videoKind))
                 throw new InvalidOperationException("无效的视频类型。");
-            job.VideoKind = _kinds.Normalize(videoKind);
-            dirty = true;
-        }
 
-        if (dirty)
-        {
-            job.EditedAt = DateTimeOffset.UtcNow;
-            await _repository.SaveAsync(job, ct);
+            var old = (job.TargetPath, job.DisplayName, job.Caption, job.VideoKind,
+                job.EncryptedFilename, job.OriginalFilename, job.EditedAt);
+            void Restore() => (job.TargetPath, job.DisplayName, job.Caption, job.VideoKind,
+                job.EncryptedFilename, job.OriginalFilename, job.EditedAt) = old;
+            var nextKind = videoKind is null ? job.VideoKind : _kinds.Normalize(videoKind);
+            var protect = _kinds.GetAll().Any(k => k.Value == nextKind && k.IsPrivate);
+            var originalName = job.IsEncrypted
+                ? job.OriginalFilename ?? throw new InvalidOperationException("缺少原文件名，无法恢复文件。")
+                : Path.GetFileName(job.TargetPath);
+            originalName = Path.GetFileName(originalName);
+            if (titleHead is not null)
+            {
+                var stem = DownloadFileNameBuilder.ReplaceTitleHead(Path.GetFileNameWithoutExtension(originalName), titleHead);
+                stem = DownloadFileNameBuilder.NormalizeRenameStem(stem, Path.GetExtension(originalName));
+                if (string.IsNullOrWhiteSpace(stem)) throw new InvalidOperationException("名称不能为空。");
+                originalName = stem + Path.GetExtension(originalName);
+            }
+
+            var nextPath = protect
+                ? job.IsEncrypted ? job.TargetPath : Path.Combine(Path.GetDirectoryName(job.TargetPath) ?? "",
+                    VideoEncryptionService.GenerateObfuscatedFilename(originalName))
+                : Path.Combine(Path.GetDirectoryName(job.TargetPath) ?? "", originalName);
+            var transforms = protect != job.IsEncrypted;
+            var changesFile = transforms || !string.Equals(nextPath, job.TargetPath, StringComparison.OrdinalIgnoreCase);
+            string? temporary = null;
+            var created = false;
+            var saved = false;
+            var retainCreated = false;
+            try
+            {
+                if (changesFile)
+                {
+                    if (!File.Exists(old.TargetPath)) throw new FileNotFoundException("视频文件不存在。", old.TargetPath);
+                    if (File.Exists(nextPath)) throw new IOException("目标文件已存在：" + Path.GetFileName(nextPath));
+                    if (protect && !job.IsEncrypted && VideoEncryptionService.IsEncryptedFile(old.TargetPath))
+                        throw new InvalidOperationException("文件已加密，但记录不一致；未执行重复加密。");
+                    temporary = nextPath + ".privacy-" + Guid.NewGuid().ToString("N") + ".tmp";
+                    if (transforms && protect)
+                        await VideoEncryptionService.EncryptFileAsync(old.TargetPath, temporary, ct);
+                    else if (transforms)
+                        await VideoEncryptionService.DecryptFileAsync(old.TargetPath, temporary, ct);
+                    else
+                    {
+                        await using var input = new FileStream(old.TargetPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                        await using var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                        await input.CopyToAsync(output, ct);
+                    }
+                    ct.ThrowIfCancellationRequested();
+                    File.Move(temporary, nextPath); // No overwrite, including collisions occurring during the transform.
+                    created = true;
+                }
+
+                job.TargetPath = nextPath;
+                job.VideoKind = nextKind;
+                job.Caption = caption ?? job.Caption;
+                // Leaving privacy restores both the disk filename and the name shown in the queue.
+                if (titleHead is not null || (job.IsEncrypted && !protect))
+                    job.DisplayName = Path.GetFileNameWithoutExtension(originalName);
+                job.OriginalFilename = protect ? originalName : null;
+                job.EncryptedFilename = protect ? Path.GetFileName(nextPath) : null;
+                job.EditedAt = DateTimeOffset.UtcNow;
+                await _repository.SaveAsync(job, ct);
+                saved = true;
+                // Keep the source intact until the complete replacement and database save succeed.
+                if (changesFile) File.Delete(old.TargetPath);
+            }
+            catch (Exception editError)
+            {
+                Restore();
+                if (saved)
+                {
+                    try { await _repository.SaveAsync(job, CancellationToken.None); }
+                    catch (Exception rollbackError)
+                    {
+                        // The database may still reference the replacement. Keep BOTH files for recovery.
+                        retainCreated = true;
+                        throw new AggregateException("保存后的文件清理失败，记录回滚也失败；已保留文件。", editError, rollbackError);
+                    }
+                }
+                throw;
+            }
+            finally
+            {
+                if (temporary is not null) TryDeleteFile(temporary);
+                if (created && !retainCreated && !saved) TryDeleteFile(nextPath);
+                // A successful database rollback after a failed source deletion leaves the replacement unused.
+                if (created && !retainCreated && saved && job.TargetPath == old.TargetPath) TryDeleteFile(nextPath);
+            }
         }
+        finally { editLock.Release(); }
     }
-
     public async Task SetSubtitleRecognizedAsync(
         Guid jobId,
         bool recognized,
@@ -744,6 +855,13 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                 job.CompletedAt = job.UpdatedAt;
 
             _jobs[job.Id] = job;
+            if (job.Status != DownloadStatus.Completed && YouTubeLiveMedia.IsLiveVariant(job.Variant))
+            {
+                job.Status = DownloadStatus.Failed;
+                job.LastErrorCode = ErrorCodes.LiveNotSupported;
+                await _repository.SaveAsync(job, ct);
+                continue;
+            }
             await _repository.SaveAsync(job, ct);
 
             if (!_options.Download.AutoRecoverDownloads)
@@ -849,7 +967,9 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
 
     private async Task ApplyCompletedFileNameAsync(DownloadJob job, CancellationToken ct)
     {
-        if (job.Status != DownloadStatus.Completed || !File.Exists(job.TargetPath))
+        // The disk stem is an obfuscated transport name while private. Feeding it through
+        // RenameAsync overwrites OriginalFilename and destroys the name needed to unprotect.
+        if (job.Status != DownloadStatus.Completed || job.IsEncrypted || !File.Exists(job.TargetPath))
             return;
 
         UpdateCompletedFileSize(job);
@@ -958,6 +1078,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                 return;
 
             BeginExecution(job);
+            if (YouTubeLiveMedia.IsLiveVariant(job.Variant))
+                throw new DownloadException(ErrorCodes.LiveNotSupported, "Live streams are not downloaded.");
             await _repository.SaveAsync(job, cts.Token);
 
             Func<Task> checkpoint = () => _repository.SaveAsync(job, CancellationToken.None);
@@ -966,13 +1088,26 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             var addressRenewed = false;
             var alternatesTried = false;
             var browserRediscovered = false;
+            var retriedAfterStall = false;
 
             while (true)
             {
                 try
                 {
-                    await ExecuteDownloadAsync(job, checkpoint, cts.Token);
+                    await DownloadProgressWatchdog.RunAsync(
+                        token => ExecuteDownloadAsync(job, checkpoint, token),
+                        () => job.DownloadedBytes,
+                        () => job.Status != DownloadStatus.Muxing,
+                        ProgressIdleTimeout, cts.Token);
                     break;
+                }
+                catch (DownloadException ex) when (ex.ErrorCode == ErrorCodes.NoProgress &&
+                    !retriedAfterStall && !cts.IsCancellationRequested)
+                {
+                    retriedAfterStall = true;
+                    _logger.LogWarning("Download idle for one minute job={JobId}; reopening requests with saved parts", job.Id);
+                    await checkpoint();
+                    // A fresh request exposes expired signed URLs as HTTP_403 and enters renewal below.
                 }
                 catch (DownloadException ex) when (
                     (ex.ErrorCode == ErrorCodes.Http403 ||
@@ -1313,7 +1448,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                         .Where(p => File.Exists(p) && new FileInfo(p).Length >= 1024)
                         .ToArray();
                     var audio = tracks.FirstOrDefault(t => t.Kind == MediaTrackKind.Audio);
-                    var expectedImages = job.Variant.Tracks.Count(t => t.Kind == MediaTrackKind.Image);
+                    var expectedImages = job.Variant.Tracks.Count(t =>
+                        t.Kind == MediaTrackKind.Image && !IsDouyinPageChrome(t));
                     if (images.Length == 0 || audio is null)
                         throw new DownloadException(ErrorCodes.FfmpegFailed, "Album download requires images and audio.");
                     if (expectedImages > 0 && images.Length < expectedImages)
@@ -1403,6 +1539,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         CancellationToken ct)
     {
         var tracks = job.Variant.Tracks
+            .Where(t => !IsDouyinPageChrome(t))
             .OrderBy(t => t.Kind == MediaTrackKind.Audio ? 1 : 0)
             .ToList();
 
@@ -1916,25 +2053,40 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             ? ".webm"
             : ".mp4";
 
-    private static string ResolveTrackExtension(MediaTrack track) =>
-        track.Kind == MediaTrackKind.Image
-            ? Path.GetExtension(track.SourceUrl.AbsolutePath).ToLowerInvariant() switch
+    private static bool IsDouyinPageChrome(MediaTrack track) =>
+        track.Kind == MediaTrackKind.Image &&
+        track.SourceUrl.Host.Contains("weboff", StringComparison.OrdinalIgnoreCase);
+
+    private static string ResolveTrackExtension(MediaTrack track)
+    {
+        if (track.Kind == MediaTrackKind.Image)
+        {
+            return Path.GetExtension(track.SourceUrl.AbsolutePath).ToLowerInvariant() switch
             {
                 ".png" => ".png",
                 ".webp" => ".webp",
                 ".gif" => ".gif",
                 ".bmp" => ".bmp",
                 _ => ".jpg"
-            }
-            : track.Container?.ToLowerInvariant() switch
-            {
-                "webm" => ".webm",
-                "m4a" => ".m4a",
-                "mp4" => ".mp4",
-                "m4v" => ".m4v",
-                "image" => ".jpg",
-                _ => track.Kind == MediaTrackKind.Audio ? ".m4a" : ".mp4"
             };
+        }
+
+        var urlExt = Path.GetExtension(track.SourceUrl.AbsolutePath).ToLowerInvariant();
+        if (urlExt is ".mp3" or ".aac" or ".m4a" or ".wav" or ".flac" or ".ogg" or ".opus" or ".webm")
+            return urlExt;
+
+        return track.Container?.ToLowerInvariant() switch
+        {
+            "webm" => ".webm",
+            "m4a" => ".m4a",
+            "mp3" => ".mp3",
+            "aac" => ".aac",
+            "mp4" => ".mp4",
+            "m4v" => ".m4v",
+            "image" => ".jpg",
+            _ => track.Kind == MediaTrackKind.Audio ? ".m4a" : ".mp4"
+        };
+    }
 
     /// <summary>
     /// Last-line defense: MSE adaptive tracks must never enter ordinary HTTP/ffmpeg remux.
@@ -2004,8 +2156,11 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             // cannot recover without a fresh probe. Skip auto-retry.
             if (string.Equals(job.LastErrorCode, ErrorCodes.ContextExpired, StringComparison.OrdinalIgnoreCase))
                 continue;
+            if (string.Equals(job.LastErrorCode, ErrorCodes.LiveNotSupported, StringComparison.OrdinalIgnoreCase))
+                continue;
             // Timed-out / incomplete transfers usually need a fresh probe, not a 10s replay.
             if (string.Equals(job.LastErrorCode, ErrorCodes.NetTimeout, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(job.LastErrorCode, ErrorCodes.NoProgress, StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(job.LastErrorCode, ErrorCodes.IncompleteDownload, StringComparison.OrdinalIgnoreCase))
                 continue;
             // HTTP_403 recovery already ran alternate/renew inside the job; auto-picking only

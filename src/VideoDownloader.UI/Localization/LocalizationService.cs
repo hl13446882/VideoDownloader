@@ -119,6 +119,7 @@ public sealed partial class LocalizationService : ObservableObject
         OnPropertyChanged(nameof(SettingsAutoCheckUpdatesTip));
         OnPropertyChanged(nameof(SettingsAppVersion));
         OnPropertyChanged(nameof(SettingsCopyright));
+        OnPropertyChanged(nameof(SettingsMachineId));
         OnPropertyChanged(nameof(SettingsCheckUpdate));
         OnPropertyChanged(nameof(SettingsSave));
         OnPropertyChanged(nameof(SettingsClose));
@@ -205,6 +206,7 @@ public sealed partial class LocalizationService : ObservableObject
     public string SettingsAutoCheckUpdatesTip => T("settings.autoCheckUpdatesTip");
     public string SettingsAppVersion => T("settings.appVersion");
     public string SettingsCopyright => T("settings.copyright");
+    public string SettingsMachineId => T("settings.machineId");
     public string SettingsCheckUpdate => T("settings.checkUpdate");
     public string SettingsSave => T("settings.save");
     public string SettingsClose => T("settings.close");
@@ -269,8 +271,7 @@ public sealed partial class LocalizationService : ObservableObject
         ["status.autoRunning"] = ("自动模式中…剩余约 {0} 分 · 已入队 {1}", "Auto… ~{0} min left · enqueued {1}"),
         ["status.autoRunningCount"] = ("自动模式中…已入队 {0}/{1}", "Auto… enqueued {0}/{1}"),
         ["status.autoRunningUnlimited"] = ("自动模式中…已入队 {0}", "Auto… enqueued {0}"),
-        ["status.autoWaitingSlot"] = ("自动模式：等待下载空位…剩余约 {0} 分 · 已入队 {1}", "Auto: waiting slot… ~{0} min left · enqueued {1}"),
-        ["status.autoWaitingSlotCount"] = ("自动模式：等待下载空位…已入队 {0}/{1}", "Auto: waiting slot… enqueued {0}/{1}"),
+        ["status.autoWaitingSlot"] = ("自动模式：等待下载空位 {0}/{1}", "Auto: waiting for a download slot {0}/{1}"),
         ["status.autoStoppedTimeout"] = ("自动模式已结束：到达执行时长", "Auto mode ended: duration reached"),
         ["status.autoStoppedCount"] = ("自动模式已结束：到达视频数量", "Auto mode ended: video count reached"),
         ["status.autoStopped"] = ("自动模式已停止", "Auto mode stopped"),
@@ -285,6 +286,7 @@ public sealed partial class LocalizationService : ObservableObject
         ["status.autoDelaySwitch"] = ("自动模式：下载已开始，{0} 秒后切下一条…", "Auto: download started, next in {0}s…"),
         ["status.autoNoAddress"] = ("自动模式：本条暂无地址，{0} 秒后切下一条…", "Auto: no address on this item, next in {0}s…"),
         ["status.autoSameContent"] = ("自动模式：网址与文案未变，跳过重复下载，继续切页…", "Auto: same URL and caption, skip duplicate, advancing…"),
+        ["status.autoFeedStuck"] = ("自动模式已结束：页面无法切换到下一条", "Auto mode ended: page could not advance to next"),
         ["tip.local"] = ("打开本地视频库", "Open local video library"),
         ["tip.settings"] = ("设置", "Settings"),
         ["tip.language"] = ("切换到英文", "Switch to Chinese"),
@@ -342,6 +344,7 @@ public sealed partial class LocalizationService : ObservableObject
         ["settings.autoCheckUpdatesTip"] = ("开启后，启动时自动检查并下载更新；默认关闭，需手动点「检查更新」", "When on, check and download updates on startup. Off by default — use Check for updates manually."),
         ["settings.appVersion"] = ("应用版本", "App version"),
         ["settings.copyright"] = ("版权", "Copyright"),
+        ["settings.machineId"] = ("本机 ID", "Machine ID"),
         ["settings.checkUpdate"] = ("检查更新", "Check for updates"),
         ["settings.save"] = ("保存", "Save"),
         ["settings.close"] = ("关闭", "Close"),
@@ -434,6 +437,7 @@ public sealed partial class LocalizationService : ObservableObject
         ["status.probeManualFailed"] = ("手动探测失败：{0}", "Manual probe failed: {0}"),
         ["status.probeWaiting"] = ("探测中：等待页面媒体加载…", "Probing: waiting for page media…"),
         ["status.probeRunning"] = ("探测中：DOM + 外置解析…", "Probing: DOM + external…"),
+        ["status.probeMethod"] = ("正在使用{0}方法探测，目前成功率{1}%", "Probing with {0}, success rate {1}%"),
         ["status.probeDone"] = ("探测完成：{0} 个结果", "Probe done: {0} result(s)"),
         ["status.probeEmpty"] = ("探测完成：未发现可下载地址（请先播放视频，或点「探测」重试）",
             "Probe done: no downloadable URL (play video or retry Probe)"),
@@ -477,8 +481,8 @@ public sealed partial class LocalizationService : ObservableObject
         ["status.openFolderFailed"] = ("无法打开所在目录：{0}", "Cannot open containing folder: {0}"),
         ["status.webviewInitFailed"] = ("浏览器初始化失败：{0}。地址栏仍可输入网址，请检查 WebView2 Runtime。",
             "Browser init failed: {0}. Address bar still works; check WebView2 Runtime."),
-        ["status.demoBody"] = ("本机 ID 是 {0}，请联系管理员获取正式版本。\nDEMO 版本仅可下载不超过 10 MiB 的视频或音频文件。",
-            "Machine ID: {0}. Contact admin for a full license.\nDEMO can download files up to 10 MiB only."),
+        ["status.demoBody"] = ("本机 ID 是 {0}，请联系管理员获取正式版本。\nDEMO 版本仅可下载不超过 10 MiB 的视频或音频文件。\n如需使用正版软件，请联系作者 hl13446882@gmail.com",
+            "Machine ID: {0}. Contact admin for a full license.\nDEMO can download files up to 10 MiB only.\nTo purchase a license, contact the author at hl13446882@gmail.com"),
         ["title.full"] = ("Video Downloader - 正版用户", "Video Downloader - Licensed"),
         ["title.demo"] = ("Video Downloader - DEMO用户", "Video Downloader - DEMO"),
         ["job.removed"] = ("已移除", "Removed"),
@@ -492,6 +496,8 @@ public sealed partial class LocalizationService : ObservableObject
         ["job.failed"] = ("失败", "Failed"),
         ["job.fileDeleted"] = ("文件已删除", "File deleted"),
         ["error.NET_TIMEOUT"] = ("网络超时", "Network timeout"),
+        ["error.DOWNLOAD_NO_PROGRESS"] = ("下载连续一分钟无进展，重新请求后仍无响应", "No download progress for one minute; reopened requests also stalled"),
+        ["error.LIVE_NOT_DOWNLOADABLE"] = ("已跳过直播，仅下载录播视频", "Live stream skipped; only recorded videos are downloaded"),
         ["error.HTTP_403"] = ("拒绝访问 (403)", "Access denied (403)"),
         ["error.HTTP_404"] = ("地址不存在 (404)", "Not found (404)"),
         ["error.RANGE_MISMATCH"] = ("续传校验失败", "Resume mismatch"),

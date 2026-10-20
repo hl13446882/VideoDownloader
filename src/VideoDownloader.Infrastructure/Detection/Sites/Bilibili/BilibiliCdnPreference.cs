@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
 
@@ -49,6 +50,20 @@ internal static class BilibiliCdnPreference
             return 20;
         return 0;
     }
+
+    /// <summary>
+    /// Bilibili audio DASH objects use qn 302xx (<c>…-1-30280.m4s</c>).
+    /// AVC/HEVC/AV1 video objects are 300xx, 301xx, or 100xxx and must stay video.
+    /// </summary>
+    public static bool IsDashAudio(Uri url)
+    {
+        var name = Path.GetFileName(url.AbsolutePath);
+        return !string.IsNullOrWhiteSpace(name) && DashAudioName.IsMatch(name);
+    }
+
+    private static readonly Regex DashAudioName = new(
+        @"-302\d{2}\.m4s$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     /// <summary>Same DASH object across CDNs (e.g. <c>41747222317-1-30080.m4s</c>).</summary>
     public static string ObjectKey(Uri url)

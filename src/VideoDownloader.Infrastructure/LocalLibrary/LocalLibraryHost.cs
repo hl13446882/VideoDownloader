@@ -10,7 +10,7 @@ using VideoDownloader.Core.Naming;
 namespace VideoDownloader.Infrastructure.LocalLibrary;
 
 /// <summary>
-/// Loopback-only gallery for completed downloads. Serves HTML cards, Range streams, and thumbs.
+/// Gallery for completed downloads. Serves HTML cards, Range streams, and thumbs on loopback and LAN.
 /// </summary>
 public sealed class LocalLibraryHost : IAsyncDisposable
 {
@@ -23,6 +23,25 @@ public sealed class LocalLibraryHost : IAsyncDisposable
     private HttpListener? _listener;
     private CancellationTokenSource? _cts;
     private Task? _loop;
+
+    private List<LibraryItem>? _completedCache;
+    private DateTimeOffset _completedCacheExpiry = DateTimeOffset.MinValue;
+    private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(10);
+    private sealed record PrivateSession(string Kind, DateTimeOffset ExpiresAt, byte[] LegacyKeyMaterial);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, PrivateSession> _privateSessions = new();
+
+    private PrivateSession? GetPrivateSession(HttpListenerRequest request, string kind)
+    {
+        var token = request.Cookies[$"vd_unlocked_{kind}"]?.Value;
+        return token is not null && _privateSessions.TryGetValue(token, out var session) &&
+            session.Kind == kind && session.ExpiresAt > DateTimeOffset.UtcNow ? session : null;
+    }
+
+    private void RevokePrivateSession(HttpListenerRequest request, string kind)
+    {
+        var token = request.Cookies[$"vd_unlocked_{kind}"]?.Value;
+        if (token is not null) _privateSessions.TryRemove(token, out _);
+    }
 
     public LocalLibraryHost(
         IDownloadRepository repository,
@@ -70,31 +89,57 @@ public sealed class LocalLibraryHost : IAsyncDisposable
         if (IsRunning)
             return;
 
+
+
+        var networkReady = await LocalLibraryNetworkAccess.EnsureConfiguredAsync(PreferredPort, _logger, ct);
         Exception? last = null;
-        for (var port = PreferredPort; port < PreferredPort + 20; port++)
+        // Keep the advertised port stable. A different port would invalidate the firewall rule and shared URLs.
+        var port = PreferredPort;
         {
-            var prefix = $"http://127.0.0.1:{port}/";
-            var listener = new HttpListener();
-            listener.Prefixes.Add(prefix);
+            if (networkReady)
+            {
+                var dualListener = new HttpListener();
+                // A strong wildcard also handles 10/8, 172.16/12, VPN adapters and later IP changes.
+                dualListener.Prefixes.Add(LocalLibraryNetworkAccess.GetPrefix(port));
+                try
+                {
+                    dualListener.Start();
+                    _listener = dualListener;
+                    BaseUri = new Uri($"http://127.0.0.1:{port}/");
+                    _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    _loop = Task.Run(() => AcceptLoopAsync(_cts.Token), _cts.Token);
+                    _logger.LogInformation("Local library listening on all interfaces at port {Port}", port);
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    last = ex;
+                    _logger.LogWarning(ex, "Local library LAN listener failed on port {Port}; trying loopback", port);
+                    try { dualListener.Close(); } catch { /* ignore */ }
+                }
+            }
+
+            var loopbackListener = new HttpListener();
+            loopbackListener.Prefixes.Add($"http://127.0.0.1:{port}/");
             try
             {
-                listener.Start();
-                _listener = listener;
-                BaseUri = new Uri(prefix);
+                loopbackListener.Start();
+                _listener = loopbackListener;
+                BaseUri = new Uri($"http://127.0.0.1:{port}/");
                 _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 _loop = Task.Run(() => AcceptLoopAsync(_cts.Token), _cts.Token);
-                _logger.LogInformation("Local library listening at {Url}", prefix);
+                _logger.LogInformation("Local library listening at 127.0.0.1:{Port} (loopback only)", port);
                 return;
             }
             catch (Exception ex)
             {
                 last = ex;
-                try { listener.Close(); } catch { /* ignore */ }
+                try { loopbackListener.Close(); } catch { /* ignore */ }
             }
         }
 
         throw new InvalidOperationException(
-            "Unable to bind local library on 127.0.0.1.", last);
+            $"Unable to bind local library on port {PreferredPort}.", last);
     }
 
     public async ValueTask DisposeAsync()
@@ -166,6 +211,17 @@ public sealed class LocalLibraryHost : IAsyncDisposable
             if (path.Equals("/", StringComparison.Ordinal) ||
                 path.Equals("/index.html", StringComparison.OrdinalIgnoreCase))
             {
+                // A new gallery visit must not reuse an earlier page's private-category unlock.
+                foreach (var kind in _kinds.GetAll().Where(k => k.IsPrivate))
+                {
+                    RevokePrivateSession(ctx.Request, kind.Value);
+                    ctx.Response.SetCookie(new Cookie($"vd_unlocked_{kind.Value}", string.Empty, "/")
+                    {
+                        HttpOnly = true,
+                        Expires = DateTime.UtcNow.AddDays(-1)
+                    });
+                }
+                ctx.Response.Headers["Cache-Control"] = "no-store";
                 await WriteHtmlAsync(ctx, LocalLibraryPages.GalleryHtml);
                 return;
             }
@@ -191,7 +247,35 @@ public sealed class LocalLibraryHost : IAsyncDisposable
                     return;
                 }
 
-                await WriteJsonAsync(ctx, _kinds.GetAll().Select(x => new { value = x.Value, label = x.Label }));
+                await WriteJsonAsync(ctx, _kinds.GetAll().Select(x => new { value = x.Value, label = x.Label, isPrivate = x.IsPrivate }));
+                return;
+            }
+
+            if (path.Equals("/api/privacy/verify", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(ctx.Request.HttpMethod, "POST", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleVerifyPrivacyPasswordAsync(ctx);
+                return;
+            }
+
+            if (path.Equals("/api/privacy/unlock", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(ctx.Request.HttpMethod, "POST", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleUnlockPrivateKindAsync(ctx);
+                return;
+            }
+
+            if (path.Equals("/api/privacy/lock", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(ctx.Request.HttpMethod, "POST", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleLockPrivateKindAsync(ctx);
+                return;
+            }
+
+            if (path.Equals("/api/privacy/unprotect", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(ctx.Request.HttpMethod, "POST", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleUnprotectAsync(ctx);
                 return;
             }
 
@@ -266,8 +350,8 @@ public sealed class LocalLibraryHost : IAsyncDisposable
 
         try
         {
-            var entry = await _kinds.AddAsync(req?.Label ?? string.Empty, CancellationToken.None);
-            await WriteJsonAsync(ctx, new { value = entry.Value, label = entry.Label });
+            var entry = await _kinds.AddAsync(req?.Label ?? string.Empty, req?.IsPrivate == true, req?.Password, CancellationToken.None);
+            await WriteJsonAsync(ctx, new { value = entry.Value, label = entry.Label, isPrivate = entry.IsPrivate });
         }
         catch (Exception ex)
         {
@@ -304,13 +388,17 @@ public sealed class LocalLibraryHost : IAsyncDisposable
 
         try
         {
-            await _engine.UpdateLibraryItemAsync(
-                id,
-                req.TitleHead,
-                req.Caption,
-                req.VideoKind,
-                CancellationToken.None);
+            var job = await _repository.GetByIdAsync(id, CancellationToken.None);
+            if (job is null)
+            {
+                ctx.Response.StatusCode = 404;
+                await WriteTextAsync(ctx, "missing");
+                return;
+            }
 
+            await _engine.UpdateLibraryItemAsync(
+                id, req.TitleHead, req.Caption, req.VideoKind, CancellationToken.None);
+            _completedCacheExpiry = DateTimeOffset.MinValue;
             var items = await LoadCompletedAsync();
             var item = items.FirstOrDefault(i => i.Id == id);
             if (item is null)
@@ -329,15 +417,223 @@ public sealed class LocalLibraryHost : IAsyncDisposable
         }
     }
 
+    private async Task HandleVerifyPrivacyPasswordAsync(HttpListenerContext ctx)
+    {
+        using var reader = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding);
+        var raw = await reader.ReadToEndAsync();
+        PrivacyVerifyRequest? req;
+        try
+        {
+            req = JsonSerializer.Deserialize<PrivacyVerifyRequest>(raw, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch
+        {
+            ctx.Response.StatusCode = 400;
+            await WriteTextAsync(ctx, "bad json");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(req?.KindValue))
+        {
+            ctx.Response.StatusCode = 400;
+            await WriteTextAsync(ctx, "missing kindValue");
+            return;
+        }
+
+        var ok = await _kinds.VerifyPasswordAsync(req.KindValue, req?.Password ?? string.Empty, CancellationToken.None);
+        if (!ok)
+        {
+            ctx.Response.StatusCode = 403;
+            await WriteTextAsync(ctx, "密码错误");
+            return;
+        }
+
+        await WriteJsonAsync(ctx, new { ok = true });
+    }
+
+    private async Task HandleUnlockPrivateKindAsync(HttpListenerContext ctx)
+    {
+        using var reader = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding);
+        var raw = await reader.ReadToEndAsync();
+        PrivacyVerifyRequest? req;
+        try
+        {
+            req = JsonSerializer.Deserialize<PrivacyVerifyRequest>(raw, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch
+        {
+            ctx.Response.StatusCode = 400;
+            await WriteTextAsync(ctx, "bad json");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(req?.KindValue))
+        {
+            ctx.Response.StatusCode = 400;
+            await WriteTextAsync(ctx, "missing kindValue");
+            return;
+        }
+
+        var ok = await _kinds.VerifyPasswordAsync(req.KindValue, req?.Password ?? string.Empty, CancellationToken.None);
+        if (!ok)
+        {
+            ctx.Response.StatusCode = 403;
+            await WriteTextAsync(ctx, "密码错误");
+            return;
+        }
+
+        // Older encryption renamed files without persisting their replacement paths.
+        // Repair through the engine so its tracked jobs and the database stay in sync.
+        try
+        {
+            await _engine.RepairPrivateLibraryAsync(req.KindValue);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Private library record recovery failed");
+            ctx.Response.StatusCode = 500;
+            await WriteTextAsync(ctx, "恢复隐私视频记录失败，请重试");
+            return;
+        }
+
+        // Set cookie for this client only
+        var cookieName = $"vd_unlocked_{req.KindValue}";
+        var cookieValue = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+        RevokePrivateSession(ctx.Request, req.KindValue);
+        foreach (var expired in _privateSessions.Where(p => p.Value.ExpiresAt <= DateTimeOffset.UtcNow))
+            _privateSessions.TryRemove(expired.Key, out _);
+        _privateSessions[cookieValue] = new PrivateSession(req.KindValue, DateTimeOffset.UtcNow.AddDays(1),
+            VideoEncryptionService.DeriveLegacyKeyMaterial(req.Password ?? string.Empty));
+        ctx.Response.SetCookie(new Cookie(cookieName, cookieValue, "/")
+        {
+            HttpOnly = true,
+            Expires = DateTime.UtcNow.AddDays(1)
+        });
+
+        _completedCacheExpiry = DateTimeOffset.MinValue;
+        await WriteJsonAsync(ctx, new { ok = true });
+    }
+
+    private async Task HandleLockPrivateKindAsync(HttpListenerContext ctx)
+    {
+        PrivacyVerifyRequest? req;
+        try
+        {
+            req = await JsonSerializer.DeserializeAsync<PrivacyVerifyRequest>(ctx.Request.InputStream,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch (JsonException)
+        {
+            ctx.Response.StatusCode = 400;
+            await WriteTextAsync(ctx, "bad json");
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(req?.KindValue) || !_kinds.GetAll().Any(k => k.Value == req.KindValue && k.IsPrivate))
+        {
+            ctx.Response.StatusCode = 400;
+            await WriteTextAsync(ctx, "invalid kindValue");
+            return;
+        }
+        RevokePrivateSession(ctx.Request, req.KindValue);
+        ctx.Response.SetCookie(new Cookie($"vd_unlocked_{req.KindValue}", string.Empty, "/")
+        {
+            HttpOnly = true,
+            Expires = DateTime.UtcNow.AddDays(-1)
+        });
+        _completedCacheExpiry = DateTimeOffset.MinValue;
+        await WriteJsonAsync(ctx, new { ok = true });
+    }
+
+    private async Task HandleUnprotectAsync(HttpListenerContext ctx)
+    {
+        using var reader = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding);
+        var raw = await reader.ReadToEndAsync();
+        UnprotectRequest? req;
+        try
+        {
+            req = JsonSerializer.Deserialize<UnprotectRequest>(raw, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch
+        {
+            ctx.Response.StatusCode = 400;
+            await WriteTextAsync(ctx, "bad json");
+            return;
+        }
+
+        if (req is null || !Guid.TryParse(req.Id, out var id))
+        {
+            ctx.Response.StatusCode = 400;
+            await WriteTextAsync(ctx, "missing id");
+            return;
+        }
+
+        var job = await _repository.GetByIdAsync(id, CancellationToken.None);
+        if (job is null || !job.IsEncrypted)
+        {
+            ctx.Response.StatusCode = 404;
+            await WriteTextAsync(ctx, "未找到加密文件");
+            return;
+        }
+
+        var kind = _kinds.Normalize(job.VideoKind);
+        var ok = await _kinds.VerifyPasswordAsync(kind, req.Password ?? string.Empty, CancellationToken.None);
+        if (!ok)
+        {
+            ctx.Response.StatusCode = 403;
+            await WriteTextAsync(ctx, "密码错误");
+            return;
+        }
+
+        try
+        {
+            await _engine.UpdateLibraryItemAsync(id, videoKind: LibraryVideoKinds.Unspecified, ct: CancellationToken.None);
+
+            _completedCacheExpiry = DateTimeOffset.MinValue;
+            await WriteJsonAsync(ctx, new { ok = true });
+        }
+        catch (Exception ex)
+        {
+            ctx.Response.StatusCode = 500;
+            await WriteTextAsync(ctx, ex.Message);
+        }
+    }
+
     private async Task WriteVideosJsonAsync(HttpListenerContext ctx)
     {
         var groupMode = (ctx.Request.QueryString["group"] ?? "").Trim().ToLowerInvariant();
         var items = (await LoadCompletedAsync()).ToList();
-        var timeOrdered = items.OrderByDescending(i => i.DownloadedAt).ToList();
+
+        // Get unlocked kinds from cookies (client-specific)
+        var unlockedKinds = GetUnlockedKindsFromCookies(ctx.Request);
+
+        bool IsPrivateKind(string? kindValue)
+        {
+            if (string.IsNullOrEmpty(kindValue)) return false;
+            return _kinds.GetAll().FirstOrDefault(k => k.Value == kindValue)?.IsPrivate == true;
+        }
+
+        bool IsUnlocked(string? kindValue)
+        {
+            if (string.IsNullOrEmpty(kindValue)) return false;
+            return unlockedKinds.Contains(kindValue);
+        }
+
+        // For non-kind group modes, exclude private videos unless unlocked
+        // For kind group mode, include all items (BuildKindGroups will handle filtering)
+        var filteredItems = items.Where(i =>
+        {
+            if (!IsPrivateKind(i.VideoKind))
+                return true;
+            if (groupMode == "kind")
+                return true; // BuildKindGroups will filter based on unlock status
+            return IsUnlocked(i.VideoKind);
+        }).ToList();
+
+        var timeOrdered = filteredItems.OrderByDescending(i => i.DownloadedAt).ToList();
 
         object payload = groupMode switch
         {
-            "site" => items.GroupBy(i => i.SiteGroup)
+            "site" => filteredItems.GroupBy(i => i.SiteGroup)
                 .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
                 .Select(g => new
                 {
@@ -347,21 +643,81 @@ public sealed class LocalLibraryHost : IAsyncDisposable
                         .ToArray()
                 })
                 .ToArray(),
-            "kind" => items.GroupBy(i => i.VideoKindLabel)
-                .OrderBy(g => g.Key == "未分类" ? 1 : 0)
-                .ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
-                .Select(g => new
-                {
-                    group = g.Key,
-                    items = LocalLibraryOrdering
-                        .OrderByAuthorThenDownloadedAtDesc(g, i => i.Author, i => i.DownloadedAt)
-                        .ToArray()
-                })
-                .ToArray(),
+            "kind" => BuildKindGroups(items, unlockedKinds), // Pass all items, let BuildKindGroups filter
             _ => timeOrdered
         };
 
         await WriteJsonAsync(ctx, payload);
+    }
+
+    private HashSet<string> GetUnlockedKindsFromCookies(HttpListenerRequest request)
+    {
+        var unlocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var allKinds = _kinds.GetAll().Where(k => k.IsPrivate);
+
+        foreach (var kind in allKinds)
+        {
+            if (GetPrivateSession(request, kind.Value) is not null)
+            {
+                unlocked.Add(kind.Value);
+            }
+        }
+
+        return unlocked;
+    }
+
+    private object BuildKindGroups(List<LibraryItem> items, HashSet<string>? unlockedKinds)
+    {
+        var allKinds = _kinds.GetAll();
+        var kindByLabel = allKinds.ToDictionary(k => k.Label, k => k, StringComparer.OrdinalIgnoreCase);
+
+        var grouped = items.GroupBy(i => i.VideoKindLabel)
+            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+
+        var allLabels = new HashSet<string>(grouped.Keys, StringComparer.OrdinalIgnoreCase);
+        foreach (var kind in allKinds)
+        {
+            if (kind.IsPrivate)
+                allLabels.Add(kind.Label);
+        }
+
+        var result = new List<object>();
+
+        foreach (var label in allLabels)
+        {
+            kindByLabel.TryGetValue(label, out var kindEntry);
+            var isPrivate = kindEntry?.IsPrivate == true;
+            var isUnlocked = isPrivate && unlockedKinds != null && unlockedKinds.Contains(kindEntry!.Value);
+
+            IEnumerable<LibraryItem> groupItems;
+            if (grouped.TryGetValue(label, out var group))
+            {
+                groupItems = isPrivate && !isUnlocked
+                    ? Array.Empty<LibraryItem>()
+                    : LocalLibraryOrdering.OrderByAuthorThenDownloadedAtDesc(group, i => i.Author, i => i.DownloadedAt);
+            }
+            else
+            {
+                groupItems = Array.Empty<LibraryItem>();
+            }
+
+            result.Add(new
+            {
+                group = label,
+                isPrivate,
+                isUnlocked,
+                items = groupItems.ToArray()
+            });
+        }
+
+        return result
+            .OrderBy(g =>
+            {
+                var name = (string)g.GetType().GetProperty("group")!.GetValue(g)!;
+                return name == "未分类" ? 1 : 0;
+            })
+            .ThenBy(g => (string)g.GetType().GetProperty("group")!.GetValue(g)!, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
     private async Task WriteItemJsonAsync(HttpListenerContext ctx, Guid id)
@@ -375,11 +731,23 @@ public sealed class LocalLibraryHost : IAsyncDisposable
             return;
         }
 
-        await WriteJsonAsync(ctx, item);
+        ctx.Response.Headers["Cache-Control"] = "no-store";
+        await WriteJsonAsync(ctx, item with { IsUnlocked = GetPrivateSession(ctx.Request, item.VideoKind) is not null });
     }
 
     private async Task WriteThumbAsync(HttpListenerContext ctx, Guid id)
     {
+        var thumb = _thumbs.GetPath(id);
+        if (_thumbs.Exists(id))
+        {
+            ctx.Response.ContentType = "image/jpeg";
+            ctx.Response.Headers["Cache-Control"] = "public, max-age=31536000, immutable";
+            var bytes = await File.ReadAllBytesAsync(thumb);
+            ctx.Response.ContentLength64 = bytes.Length;
+            await ctx.Response.OutputStream.WriteAsync(bytes);
+            return;
+        }
+
         var job = await _repository.GetByIdAsync(id);
         if (job is null || job.Status != DownloadStatus.Completed ||
             string.IsNullOrWhiteSpace(job.TargetPath) || !File.Exists(job.TargetPath))
@@ -395,24 +763,23 @@ public sealed class LocalLibraryHost : IAsyncDisposable
             return;
         }
 
-        var thumb = _thumbs.GetPath(id);
-        if (!_thumbs.Exists(id))
+        _thumbs.EnsureAsyncFireAndForget(id, job.TargetPath, async jobId =>
         {
-            _thumbs.EnsureAsyncFireAndForget(id, job.TargetPath);
-            ctx.Response.Headers["Cache-Control"] = "no-store";
-            ctx.Response.ContentType = "image/svg+xml";
-            var svg = Encoding.UTF8.GetBytes(
-                "<svg xmlns='http://www.w3.org/2000/svg' width='320' height='200'><rect fill='#1f2937' width='100%' height='100%'/><text x='50%' y='50%' fill='#9ca3af' font-size='14' text-anchor='middle' dy='.3em'>…</text></svg>");
-            ctx.Response.ContentLength64 = svg.Length;
-            await ctx.Response.OutputStream.WriteAsync(svg);
-            return;
-        }
-
-        ctx.Response.ContentType = "image/jpeg";
-        ctx.Response.Headers["Cache-Control"] = "public, max-age=31536000, immutable";
-        await using var fs = File.OpenRead(thumb);
-        ctx.Response.ContentLength64 = fs.Length;
-        await fs.CopyToAsync(ctx.Response.OutputStream);
+            try
+            {
+                await _repository.UpdateThumbReadyAsync(jobId, true);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Failed to update thumb_ready for {JobId}", jobId);
+            }
+        });
+        ctx.Response.Headers["Cache-Control"] = "no-store";
+        ctx.Response.ContentType = "image/svg+xml";
+        var svg = Encoding.UTF8.GetBytes(
+            "<svg xmlns='http://www.w3.org/2000/svg' width='320' height='200'><rect fill='#1f2937' width='100%' height='100%'/><text x='50%' y='50%' fill='#9ca3af' font-size='14' text-anchor='middle' dy='.3em'>…</text></svg>");
+        ctx.Response.ContentLength64 = svg.Length;
+        await ctx.Response.OutputStream.WriteAsync(svg);
     }
 
     private static async Task WriteAudioPlaceholderThumbAsync(HttpListenerContext ctx)
@@ -444,29 +811,109 @@ public sealed class LocalLibraryHost : IAsyncDisposable
         }
 
         var path = job.TargetPath;
-        var length = new FileInfo(path).Length;
-        var contentType = GuessContentType(path);
-        ctx.Response.Headers["Accept-Ranges"] = "bytes";
-        ctx.Response.ContentType = contentType;
+        var isEncrypted = job.IsEncrypted;
 
-        long start = 0;
-        long end = length - 1;
-        var range = ctx.Request.Headers["Range"];
-        if (!string.IsNullOrWhiteSpace(range) &&
-            range.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase))
+        var privateKind = _kinds.GetAll().Any(k => k.Value == job.VideoKind && k.IsPrivate);
+        var session = GetPrivateSession(ctx.Request, job.VideoKind ?? string.Empty);
+        if ((isEncrypted || privateKind) && session is null)
         {
-            var spec = range[6..];
+            ctx.Response.StatusCode = 403;
+            await WriteTextAsync(ctx, "需要隐私密码");
+            return;
+        }
+        if (isEncrypted)
+        {
+            DecryptedVideoStream? decStream = null;
+            try
+            {
+                decStream = VideoEncryptionService.OpenDecryptedRead(path, session!.LegacyKeyMaterial);
+            }
+            catch
+            {
+                ctx.Response.StatusCode = 500;
+                await WriteTextAsync(ctx, "解密失败");
+                return;
+            }
+
+            var virtualLength = decStream.Length;
+            var contentType = GuessContentType(job.OriginalFilename ?? path);
+            ctx.Response.Headers["Accept-Ranges"] = "bytes";
+            ctx.Response.Headers["Cache-Control"] = "no-store";
+            ctx.Response.ContentType = contentType;
+
+            long start = 0;
+            long end = virtualLength - 1;
+            var range = ctx.Request.Headers["Range"];
+            if (!string.IsNullOrWhiteSpace(range))
+            {
+                if (!System.Net.Http.Headers.RangeHeaderValue.TryParse(range, out var parsed) ||
+                    !parsed.Unit.Equals("bytes", StringComparison.OrdinalIgnoreCase) || parsed.Ranges.Count != 1)
+                {
+                    decStream.Dispose();
+                    ctx.Response.StatusCode = 416;
+                    ctx.Response.Headers["Content-Range"] = $"bytes */{virtualLength}";
+                    return;
+                }
+                var requested = parsed.Ranges.Single();
+                start = requested.From ?? Math.Max(0, virtualLength - requested.To!.Value);
+                end = requested.From is null ? virtualLength - 1 : Math.Min(requested.To ?? end, end);
+                if (start > end || start >= virtualLength)
+                {
+                    decStream.Dispose();
+                    ctx.Response.StatusCode = 416;
+                    ctx.Response.Headers["Content-Range"] = $"bytes */{virtualLength}";
+                    return;
+                }
+                ctx.Response.StatusCode = 206;
+                ctx.Response.Headers["Content-Range"] = $"bytes {start}-{end}/{virtualLength}";
+            }
+
+            var count = end - start + 1;
+            ctx.Response.ContentLength64 = count;
+            decStream.Seek(start, SeekOrigin.Begin);
+            var buffer = new byte[256 * 1024];
+            var remaining = count;
+            try
+            {
+                while (remaining > 0)
+                {
+                    var read = await decStream.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, remaining)));
+                    if (read <= 0)
+                        break;
+                    await ctx.Response.OutputStream.WriteAsync(buffer.AsMemory(0, read));
+                    remaining -= read;
+                }
+            }
+            finally
+            {
+                decStream.Dispose();
+            }
+            return;
+        }
+
+        var length = new FileInfo(path).Length;
+        var ct = GuessContentType(path);
+        ctx.Response.Headers["Accept-Ranges"] = "bytes";
+        ctx.Response.ContentType = ct;
+
+        long s2 = 0;
+        long e2 = length - 1;
+        var range2 = ctx.Request.Headers["Range"];
+        if (!string.IsNullOrWhiteSpace(range2) &&
+            range2.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase))
+        {
+            var spec = range2[6..];
             var dash = spec.IndexOf('-');
             if (dash >= 0)
             {
                 var left = spec[..dash];
                 var right = spec[(dash + 1)..];
                 if (long.TryParse(left, out var s))
-                    start = s;
-                if (long.TryParse(right, out var e) && e >= start)
-                    end = e;
-                end = Math.Min(end, length - 1);
-                if (start > end || start >= length)
+                    s2 = s;
+                if (long.TryParse(right, out var e) && e >= s2)
+                    e2 = e;
+                e2 = Math.Min(e2, length - 1);
+                if (s2 > e2 || s2 >= length)
                 {
                     ctx.Response.StatusCode = 416;
                     ctx.Response.Headers["Content-Range"] = $"bytes */{length}";
@@ -474,28 +921,31 @@ public sealed class LocalLibraryHost : IAsyncDisposable
                 }
 
                 ctx.Response.StatusCode = 206;
-                ctx.Response.Headers["Content-Range"] = $"bytes {start}-{end}/{length}";
+                ctx.Response.Headers["Content-Range"] = $"bytes {s2}-{e2}/{length}";
             }
         }
 
-        var count = end - start + 1;
-        ctx.Response.ContentLength64 = count;
-        await using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-        fs.Seek(start, SeekOrigin.Begin);
-        var buffer = new byte[1024 * 256];
-        var remaining = count;
-        while (remaining > 0)
+        var cnt = e2 - s2 + 1;
+        ctx.Response.ContentLength64 = cnt;
+        await using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        fs.Seek(s2, SeekOrigin.Begin);
+        var buf = new byte[256 * 1024];
+        var rem = cnt;
+        while (rem > 0)
         {
-            var read = await fs.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, remaining)));
+            var read = await fs.ReadAsync(buf.AsMemory(0, (int)Math.Min(buf.Length, rem)));
             if (read <= 0)
                 break;
-            await ctx.Response.OutputStream.WriteAsync(buffer.AsMemory(0, read));
-            remaining -= read;
+            await ctx.Response.OutputStream.WriteAsync(buf.AsMemory(0, read));
+            rem -= read;
         }
     }
 
     private async Task<List<LibraryItem>> LoadCompletedAsync()
     {
+        if (_completedCache is not null && DateTimeOffset.UtcNow < _completedCacheExpiry)
+            return _completedCache;
+
         var all = await _repository.GetAllAsync();
         var list = new List<LibraryItem>();
         foreach (var job in all)
@@ -506,22 +956,40 @@ public sealed class LocalLibraryHost : IAsyncDisposable
                 continue;
 
             var audioOnly = IsAudioOnlyJob(job);
-            if (!audioOnly)
-                _thumbs.EnsureAsyncFireAndForget(job.Id, job.TargetPath);
+            string thumbStatus;
+            if (audioOnly)
+            {
+                thumbStatus = "audio";
+            }
+            else if (job.ThumbReady)
+            {
+                thumbStatus = "ready";
+            }
+            else
+            {
+                thumbStatus = "pending";
+            }
+
             var fileName = Path.GetFileName(job.TargetPath);
-            var stem = Path.GetFileNameWithoutExtension(job.TargetPath);
+            var displayName = job.IsEncrypted && !string.IsNullOrEmpty(job.OriginalFilename)
+                ? job.OriginalFilename
+                : fileName;
+            var stem = Path.GetFileNameWithoutExtension(displayName);
             DownloadFileNameBuilder.TrySplitMetaSuffix(stem, out var titleHead, out var metaSuffix);
             if (string.IsNullOrWhiteSpace(titleHead))
                 titleHead = stem;
             var caption = string.IsNullOrWhiteSpace(job.Caption) ? job.DisplayName : job.Caption!;
             var kind = _kinds.Normalize(job.VideoKind);
+            var kindEntry = _kinds.GetAll().FirstOrDefault(k => k.Value == kind);
+            var isPrivateKind = kindEntry?.IsPrivate == true;
             var downloadedAt = job.CompletedAt ?? job.UpdatedAt;
+            var ext = Path.GetExtension(displayName);
             list.Add(new LibraryItem(
                 job.Id,
                 fileName,
                 titleHead,
                 metaSuffix,
-                Path.GetExtension(job.TargetPath),
+                ext,
                 caption,
                 kind,
                 _kinds.LabelOf(kind),
@@ -532,9 +1000,14 @@ public sealed class LocalLibraryHost : IAsyncDisposable
                 $"/api/stream/{job.Id:N}",
                 $"/play/{job.Id:N}",
                 audioOnly,
-                job.SubtitleRecognized));
+                job.SubtitleRecognized,
+                thumbStatus,
+                job.IsEncrypted,
+                isPrivateKind));
         }
 
+        _completedCache = list;
+        _completedCacheExpiry = DateTimeOffset.UtcNow.Add(CacheTtl);
         return list;
     }
 
@@ -615,6 +1088,20 @@ public sealed class LocalLibraryHost : IAsyncDisposable
     private sealed class AddKindRequest
     {
         public string? Label { get; set; }
+        public bool? IsPrivate { get; set; }
+        public string? Password { get; set; }
+    }
+
+    private sealed class PrivacyVerifyRequest
+    {
+        public string? KindValue { get; set; }
+        public string? Password { get; set; }
+    }
+
+    private sealed class UnprotectRequest
+    {
+        public string? Id { get; set; }
+        public string? Password { get; set; }
     }
 
     private sealed record LibraryItem(
@@ -633,8 +1120,12 @@ public sealed class LocalLibraryHost : IAsyncDisposable
         string StreamUrl,
         string PlayUrl,
         bool IsAudioOnly,
-        bool SubtitleRecognized)
+        bool SubtitleRecognized,
+        string ThumbStatus,
+        bool IsEncrypted,
+        bool IsPrivateKind)
     {
+        public bool IsUnlocked { get; init; }
         public string DownloadedAtText =>
             DownloadedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
 

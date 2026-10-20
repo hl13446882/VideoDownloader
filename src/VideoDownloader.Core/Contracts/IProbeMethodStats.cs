@@ -12,17 +12,38 @@ public interface IProbeMethodStats
     /// <param name="detectorId">Exclusive detector id — use <see cref="SiteIds"/> values.</param>
     void Record(string detectorId, string method, bool success);
 
+    void RecordTimed(string detectorId, string method, bool success, TimeSpan elapsed) =>
+        Record(detectorId, method, success);
+
     double SuccessRate(string detectorId, string method);
 
     int Attempts(string detectorId, string method);
 
     int Successes(string detectorId, string method);
 
-    /// <summary>Reorder methods within one detector only.</summary>
-    IReadOnlyList<T> OrderBySuccessRate<T>(string detectorId, IReadOnlyList<T> items, Func<T, string> methodOf);
+    /// <summary>Legacy entry name; order by recent probability per unit of probe time.</summary>
+    IReadOnlyList<T> OrderBySuccessCount<T>(string detectorId, IReadOnlyList<T> items, Func<T, string> methodOf);
 
-    /// <summary>Within this detector, whether yt-dlp historically beats that detector's network methods.</summary>
+    /// <summary>
+    /// Callable methods ordered by historical success rate (untried methods use a neutral 50% prior).
+    /// Ties keep <see cref="ProbeDetectors.CallableMethodsOf"/> order.
+    /// Passive network observations run alongside the selected external client.
+    /// </summary>
+    IReadOnlyList<string> OrderedMethods(string detectorId);
+
+    /// <summary>True when this detector's leading callable method is a yt-dlp client.</summary>
     bool PreferYtdlpFirst(string detectorId);
+
+    /// <summary>
+    /// This method's successes as a percent of all successes recorded for <paramref name="detectorId"/>.
+    /// Zero when the detector has no successes yet.
+    /// </summary>
+    int MethodSharePercent(string detectorId, string method);
+
+    /// <summary>Tell listeners a method is starting, with its own historical success percentage.</summary>
+    void ReportMethod(string detectorId, string method);
+
+    event EventHandler<ProbeMethodNotice>? MethodStarted;
 
     string? LastWinningMethod(string detectorId);
 
@@ -30,6 +51,8 @@ public interface IProbeMethodStats
 
     void CommitRound(string runId, IReadOnlyList<ProbeMethodRoundEntry> entries, string? markdownDocPath = null, string? historyDir = null);
 }
+
+public sealed record ProbeMethodNotice(string DetectorId, string Method, int SuccessPercent);
 
 public sealed record ProbeMethodStatRow(
     string DetectorId,
@@ -72,6 +95,12 @@ public static class ProbeMethods
 
     // —— TikTok ——
     public const string WebData = "web_data";
+
+    // —— Generic ——
+    public const string BrowserPlay = "browser_play";
+    public const string Morphology = "morphology";
+    public const string DomMorphology = "dom_morphology";
+    public const string Manifest = "manifest";
 
     public const string ScheduleYtdlpFirst = "schedule:ytdlp_first";
     public const string ScheduleNetworkFirst = "schedule:network_first";
@@ -148,12 +177,127 @@ public static class ProbeDetectors
             ProbeMethods.VideoElement,
             ProbeMethods.Album
         ],
+        SiteIds.Generic =>
+        [
+            ProbeMethods.YtDlp,
+            ProbeMethods.BrowserPlay,
+            ProbeMethods.Morphology,
+            ProbeMethods.DomMorphology,
+            ProbeMethods.Manifest
+        ],
         _ => [ProbeMethods.NetworkMedia]
     };
 
-    public static bool HasYtDlp(string detectorId) => detectorId switch
+    /// <summary>
+    /// Methods a detector may invoke or adopt, in cold-start order.
+    /// Album stays a content-mode branch. <see cref="ProbeMethods.PlayurlApi"/> stays out until implemented.
+    /// YouTube's list is the three clients; network media is always appended by the stats store.
+    /// </summary>
+    public static IReadOnlyList<string> CallableMethodsOf(string detectorId) => detectorId switch
     {
-        SiteIds.YouTube or SiteIds.Bilibili or SiteIds.TikTok => true,
-        _ => false
+        SiteIds.YouTube =>
+        [
+            ProbeMethods.YtDlpPotMweb,
+            ProbeMethods.YtDlpDefault,
+            ProbeMethods.YtDlpWebEmbedded
+        ],
+        SiteIds.Bilibili =>
+        [
+            ProbeMethods.YtDlp,
+            ProbeMethods.NetworkPlayurl
+        ],
+        SiteIds.Douyin =>
+        [
+            ProbeMethods.AwemeDetail,
+            ProbeMethods.NetworkMedia,
+            ProbeMethods.VideoElement,
+            ProbeMethods.RouterData
+        ],
+        SiteIds.TikTok =>
+        [
+            ProbeMethods.YtDlp,
+            ProbeMethods.WebData,
+            ProbeMethods.NetworkMedia,
+            ProbeMethods.VideoElement
+        ],
+        SiteIds.Generic => MethodsOf(SiteIds.Generic),
+        _ when detectorId.StartsWith(SiteIds.Generic + "@", StringComparison.OrdinalIgnoreCase) => MethodsOf(SiteIds.Generic),
+        _ => [ProbeMethods.NetworkMedia]
     };
+
+    public static bool IsYtDlpMethod(string? method) =>
+        method is ProbeMethods.YtDlp
+            or ProbeMethods.YtDlpPotMweb
+            or ProbeMethods.YtDlpDefault
+            or ProbeMethods.YtDlpWebEmbedded;
+
+    public static bool HasYtDlp(string detectorId) =>
+        CallableMethodsOf(detectorId).Any(IsYtDlpMethod);
+}
+
+/// <summary>Expected-speed order inside one detector. Unknown sites retain the cold-start list.</summary>
+public static class ProbeMethodRanking
+{
+    public static string Scope(string siteId, Uri page) => siteId == SiteIds.Generic
+        ? SiteIds.Generic + "@" + page.IdnHost.ToLowerInvariant()
+        : siteId;
+
+    public static IReadOnlyList<string> Order(IProbeMethodStats? stats, string detectorId)
+    {
+        if (stats is not null)
+        {
+            var ordered = stats.OrderedMethods(detectorId);
+            if (ordered is { Count: > 0 })
+                return ordered;
+        }
+
+        return ColdStart(detectorId);
+    }
+
+    public static IReadOnlyList<string> ColdStart(string detectorId)
+    {
+        var callable = ProbeDetectors.CallableMethodsOf(detectorId);
+        if (!string.Equals(detectorId, SiteIds.YouTube, StringComparison.OrdinalIgnoreCase))
+            return callable;
+        return callable.Concat([ProbeMethods.NetworkMedia]).ToArray();
+    }
+
+    public static bool Outranks(IReadOnlyList<string> ordered, string? left, string? right)
+    {
+        var leftIndex = IndexOf(ordered, left);
+        var rightIndex = IndexOf(ordered, right);
+        if (leftIndex < 0)
+            return false;
+        if (rightIndex < 0)
+            return true;
+        return leftIndex < rightIndex;
+    }
+
+    /// <summary>Highest-ranked method that appears in <paramref name="present"/>.</summary>
+    public static string? BestPresent(IReadOnlyList<string> ordered, IEnumerable<string?> present)
+    {
+        var available = new HashSet<string>(
+            present.Where(method => !string.IsNullOrWhiteSpace(method))!,
+            StringComparer.OrdinalIgnoreCase);
+        foreach (var method in ordered)
+        {
+            if (available.Contains(method))
+                return method;
+        }
+
+        return available.FirstOrDefault();
+    }
+
+    private static int IndexOf(IReadOnlyList<string> ordered, string? method)
+    {
+        if (string.IsNullOrWhiteSpace(method))
+            return -1;
+        for (var i = 0; i < ordered.Count; i++)
+        {
+            if (string.Equals(ordered[i], method, StringComparison.OrdinalIgnoreCase))
+                return i;
+        }
+
+        return -1;
+    }
 }

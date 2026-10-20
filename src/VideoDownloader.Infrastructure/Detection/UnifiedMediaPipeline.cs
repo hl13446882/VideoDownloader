@@ -134,6 +134,10 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
     private readonly VideoDownloader.Infrastructure.Http.MediaAvailabilityValidator? _availability;
     private readonly ILogger<UnifiedMediaPipeline> _logger;
     private readonly ISiteMediaAdapterResolver? _siteAdapters;
+    private readonly IProbeMethodStats? _probeStats;
+    private bool _genericWinCounted;
+    private long _genericProbeStarted = Stopwatch.GetTimestamp();
+    private string GenericStatsScope => _page is null ? SiteIds.Generic : ProbeMethodRanking.Scope(SiteIds.Generic, _page);
     private readonly ICandidateDecisionPolicy _candidatePolicy;
 
     public event EventHandler<DetectedVideo>? VideoDetected;
@@ -148,7 +152,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         VideoDownloader.Infrastructure.Http.MediaAvailabilityValidator? availability = null,
         ILogger<UnifiedMediaPipeline>? logger = null,
         ISiteMediaAdapterResolver? siteAdapters = null,
-        ICandidateDecisionPolicy? candidatePolicy = null)
+        ICandidateDecisionPolicy? candidatePolicy = null,
+        IProbeMethodStats? probeStats = null)
     {
         _requests = requests;
         _externals = (externals ?? []).ToArray();
@@ -158,6 +163,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         _logger = logger ?? NullLogger<UnifiedMediaPipeline>.Instance;
         _siteAdapters = siteAdapters;
         _candidatePolicy = candidatePolicy ?? new CandidateDecisionPolicy();
+        _probeStats = probeStats;
     }
 
     public void Clear()
@@ -189,6 +195,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         _lastBuilt = null;
         _albumImages = [];
         LastExternalError = null;
+        _genericWinCounted = false;
+        _genericProbeStarted = Stopwatch.GetTimestamp();
     }
 
     public Task ProcessAsync(NormalizedNetworkEvent e, CancellationToken ct)
@@ -649,6 +657,11 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             _title = pageTitle!.Trim();
 
         Publish(_generation.Token);
+        var leading = _probeStats is null
+            ? null
+            : ProbeMethodRanking.Order(_probeStats, GenericStatsScope).FirstOrDefault();
+        if (leading is not null && !ProbeDetectors.IsYtDlpMethod(leading))
+            _probeStats!.ReportMethod(GenericStatsScope, leading);
         if (runExternal)
         {
             // Y3: only start external resolve for a concrete video identity or stable watch URL.
@@ -1163,7 +1176,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             page,
             new MediaTrack("media", kind, url, Text(kind == MediaTrackKind.Audio ? audio : video, "codec_name"), container, bandwidth, size > 0 ? size : null, clean) { IsValidated = true },
             duration,
-            height);
+            height) { Width = video.ValueKind != JsonValueKind.Undefined && video.TryGetProperty("width", out var w) && w.TryGetInt32(out var width) && width > 0 ? width : null };
     }
 
     private static bool IsStrongProgressiveUrl(Uri url)
@@ -1215,6 +1228,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             if (generation.IsCancellationRequested || sessionId != SessionId)
                 return;
 
+            _probeStats?.ReportMethod(ProbeMethodRanking.Scope(SiteIds.Generic, pageUrl), ProbeMethods.YtDlp);
+            var attemptStarted = Stopwatch.GetTimestamp();
             try
             {
                 var videos = await resolver.ResolveAsync(target, context, token);
@@ -1291,6 +1306,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 {
                     if (LastExternalError is null)
                         LastExternalError = "外置解析未返回可用媒体 / External resolver returned no usable media";
+                    _probeStats?.RecordTimed(ProbeMethodRanking.Scope(SiteIds.Generic, pageUrl), ProbeMethods.YtDlp,
+                        false, Stopwatch.GetElapsedTime(attemptStarted));
                     RecordDecision(new("external", "page", MediaOwnership.ForPage(pageUrl, _observedIdentity),
                         "rejected", "no_usable_variants", target.Host, LastExternalError));
                     continue;
@@ -1389,18 +1406,51 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         lock (_gate) PublishCore(generation, forceEmit);
     }
 
-    private void EmitBuilt(IReadOnlyList<DetectedVideo> videos)
+    private void CountGenericWin(IReadOnlyList<DetectedVideo> videos)
+    {
+        if (_probeStats is null || _genericWinCounted)
+            return;
+        var tracks = videos.SelectMany(video => video.Variants).SelectMany(variant => variant.Tracks).ToArray();
+        if (tracks.Length == 0 && _externalVideos.IsEmpty)
+            return;
+
+        var present = new List<string>();
+        if (!_externalVideos.IsEmpty)
+            present.Add(ProbeMethods.YtDlp);
+        if (tracks.Any(track => track.BrowserObserved || track.Evidence == MediaEvidence.BrowserObserved))
+            present.Add(ProbeMethods.BrowserPlay);
+        if (tracks.Any(track =>
+                track.Container is "hls" or "dash" ||
+                track.SourceUrl.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) ||
+                track.SourceUrl.AbsolutePath.EndsWith(".mpd", StringComparison.OrdinalIgnoreCase)))
+            present.Add(ProbeMethods.Manifest);
+        if (tracks.Any(track => track.Evidence == MediaEvidence.DomObserved))
+            present.Add(ProbeMethods.DomMorphology);
+        if (tracks.Any(track => track.Evidence is not MediaEvidence.BrowserObserved and not MediaEvidence.DomObserved))
+            present.Add(ProbeMethods.Morphology);
+        if (present.Count == 0)
+            present.Add(ProbeMethods.Morphology);
+
+        var win = ProbeMethodRanking.BestPresent(ProbeMethodRanking.Order(_probeStats, GenericStatsScope), present);
+        if (string.IsNullOrWhiteSpace(win))
+            return;
+        _genericWinCounted = true;
+        _probeStats.RecordTimed(GenericStatsScope, win, true, Stopwatch.GetElapsedTime(_genericProbeStarted));
+    }
+
+    private void EmitBuilt(IReadOnlyList<DetectedVideo> videos, bool publishPage = true)
     {
         if (videos.Count == 0)
             return;
 
+        CountGenericWin(videos);
         foreach (var video in videos)
         {
             VideoDetected?.Invoke(this, video);
             VideoUpdated?.Invoke(this, video);
         }
 
-        PageProbed?.Invoke(this, videos);
+        if (publishPage) PageProbed?.Invoke(this, videos);
     }
 
     private void PublishCore(CancellationToken generation, bool forceEmit = false)
@@ -1502,16 +1552,18 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             };
         }
 
-        var built = SplitByMediaGroup(merged, page, owner, recovery);
+        var built = SplitByMediaGroup(merged, page, owner, recovery, probed);
         // Keep PreferDisplayTitle / UpdateCaption results — do not flatten back to document.title.
 
         _lastBuilt = built;
 
-        // Defer UI emission until discovery completes so the list shows the final fact set once.
-        if (!forceEmit && _session.Phase != DetectionPhase.Completed)
+        // Validated discoveries can be used immediately; further media/formats enrich this
+        // same session. Partial audio-only/denied results still wait for final completion.
+        if (!forceEmit && _session.Phase != DetectionPhase.Completed &&
+            !built.Any(VideoDownloader.Core.Detection.DetectionReadiness.IsUsable))
             return;
 
-        EmitBuilt(built);
+        EmitBuilt(built, publishPage: forceEmit || _session.Phase == DetectionPhase.Completed);
     }
 
     private DetectedVideo BuildAggregatedVideo(IReadOnlyList<Probed> all, string? extractedCaption)
@@ -1537,7 +1589,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             a.Manifest.Variants.Where(v => v.Tracks.Count == 1).Select(v => new Probed(a.Page,
                 v.Tracks[0] with { ContentIdentity = a.Track.ContentIdentity ?? v.Tracks[0].ContentIdentity },
                 a.Duration > 0 ? a.Duration : 0,
-                v.Height ?? a.Height))).ToArray();
+                v.Height ?? a.Height) { Width = v.Width ?? a.Width })).ToArray();
         var videos = singleTracks.Where(a => a.Track.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)
             .Where(a => !IsInsufficientByteDanceDownloadObject(a.Track.SourceUrl, a.Track.ContentLength))
             .Where(a => !IsHlsTransportSegment(a.Track.SourceUrl, null) && !MediaUrlNormalizer.IsLikelySegment(a.Track.SourceUrl))
@@ -1624,7 +1676,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             {
                 variants.Add(MediaVariant.FromTracks(
                     FormatVideoLabel(item.Height),
-                    null,
+                    item.Width,
                     item.Height,
                     track.Bandwidth,
                     track.Container,
@@ -1643,7 +1695,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             {
                 variants.Add(MediaVariant.FromTracks(
                     FormatVideoLabel(item.Height),
-                    null,
+                    item.Width,
                     item.Height,
                     (track.Bandwidth ?? 0) + (bestAudio.Track.Bandwidth ?? 0),
                     "mkv",
@@ -1659,7 +1711,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                     !IsInsufficientByteDanceDownloadObject(item.Track.SourceUrl, item.Track.ContentLength);
                 variants.Add(MediaVariant.FromTracks(
                     FormatVideoLabel(item.Height, promoteCombined ? null : (audios.Length > 0 ? "音轨待匹配" : "无音轨")),
-                    null,
+                    item.Width,
                     item.Height,
                     track.Bandwidth,
                     track.Container,
@@ -1708,7 +1760,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             : MediaFamily.DirectMp4;
 
         var id = new Guid(SHA256.HashData(Encoding.UTF8.GetBytes("page:" + page.AbsoluteUri)).AsSpan(0, 16));
-        var durationSec = _media.Values
+        var durationSec = all
             .Where(p => p.Duration > 0 && double.IsFinite(p.Duration))
             .Select(p => p.Duration)
             .DefaultIfEmpty(0)
@@ -1739,7 +1791,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         DetectedVideo merged,
         Uri? page,
         string? owner,
-        Uri? recovery)
+        Uri? recovery,
+        IReadOnlyList<Probed> probed)
     {
         var videoVariants = merged.Variants
             .Where(v => v.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined or MediaTrackKind.Image))
@@ -1761,6 +1814,9 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                        ?? bags.FirstOrDefault(b => string.Equals(b.Key, VariantSplitKey(audio), StringComparison.OrdinalIgnoreCase));
             if (home is null)
             {
+                // An unrelated audio resource is not another discovered video.
+                if (videoVariants.Length > 0)
+                    continue;
                 home = new MediaGroupBag(VariantSplitKey(audio), []);
                 bags.Add(home);
             }
@@ -1819,6 +1875,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 SessionId = _session.Id,
                 SiteContentId = merged.SiteContentId ?? (ordered.Length > 1 ? $"part:{i + 1}" : null),
                 DisplayTitle = title,
+                DurationSec = ResolveGroupDuration(groupVariants, probed)
+                    ?? (ordered.Length == 1 ? merged.DurationSec : null),
                 Variants = stamped,
                 Family = stamped.Any(v => v.Tracks.Any(t => t.Container == "hls")) ? MediaFamily.Hls
                     : stamped.Any(v => v.Tracks.Any(t => t.Container == "dash")) ? MediaFamily.Dash
@@ -1827,6 +1885,17 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         }
 
         return results;
+    }
+
+    internal static double? ResolveGroupDuration(IReadOnlyList<MediaVariant> variants, IReadOnlyList<Probed> probed)
+    {
+        var tracks = variants.Select(PrimaryMediaTrack).ToArray();
+        var durations = probed.Where(p => p.Duration > 0 && double.IsFinite(p.Duration) &&
+            (p.Manifest is null
+                ? tracks.Any(t => SameMediaGroup(t, p.Track))
+                : p.Manifest.Variants.Any(v => tracks.Any(t => SameMediaGroup(t, PrimaryMediaTrack(v))))))
+            .Select(p => p.Duration).ToArray();
+        return durations.Length > 0 ? durations.Max() : null;
     }
 
     private sealed class MediaGroupBag(string key, List<MediaVariant> variants)
@@ -2260,6 +2329,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                         Variants = resolved.Variants
                             .Select(v => v with
                             {
+                                Width = v.Width ?? segmentProbe.Width,
                                 Height = v.Height ?? height,
                                 VariantId = v.Height is > 0 || v.VariantId is not ("media" or "default" or "stream")
                                     ? v.VariantId
@@ -2462,5 +2532,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         RequestContext Context,
         long? ContentLength = null);
 
-    internal sealed record Probed(Uri Page, MediaTrack Track, double Duration, int? Height, ManifestResolutionResult? Manifest = null);
+    internal sealed record Probed(Uri Page, MediaTrack Track, double Duration, int? Height, ManifestResolutionResult? Manifest = null)
+    {
+        public int? Width { get; init; }
+    }
 }

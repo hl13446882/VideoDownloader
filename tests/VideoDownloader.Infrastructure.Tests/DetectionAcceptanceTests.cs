@@ -162,10 +162,11 @@ public sealed class DetectionAcceptanceTests
         var pipeline = Create();
         var url = new Uri("https://cdn.test/movie.mp4?x-signature=secret&range=0-9&n=token");
         Uri? requested = null;
+        // Stay above the existing 2 MiB generic-video threshold; this tests captions/signatures.
         pipeline.InspectOverride = (u, p, c, _) =>
         {
             requested = u;
-            return Task.FromResult<UnifiedMediaPipeline.Probed?>(new(p, MediaVariant.FromCombinedTrack("video", u,c,contentLength:2_000_000).Tracks[0],30,720));
+            return Task.FromResult<UnifiedMediaPipeline.Probed?>(new(p, MediaVariant.FromCombinedTrack("video", u,c,contentLength:3_000_000).Tracks[0],30,720));
         };
         DetectedVideo? latest = null;
         pipeline.VideoDetected += (_, v) => latest = v;

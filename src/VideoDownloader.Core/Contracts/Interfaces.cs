@@ -103,6 +103,9 @@ public interface IDownloadEngine
         string? videoKind = null,
         CancellationToken ct = default);
 
+    /// <summary>Reconnects private library records to uniquely matched encrypted files after legacy renames.</summary>
+    Task RepairPrivateLibraryAsync(string kindValue, CancellationToken ct = default);
+
     /// <summary>
     /// Persists whether sequential subtitle recognition finished for a completed library job.
     /// Optionally refreshes <see cref="DownloadJob.DurationSec"/> when probed.
@@ -122,6 +125,12 @@ public interface IDownloadEngine
     Task RegisterImportedCompletedJobAsync(DownloadJob job, CancellationToken ct = default);
 
     IReadOnlyList<DownloadJob> GetActiveJobs();
+
+    /// <summary>Concurrency permits still free. This is the download gate, not the queue length.</summary>
+    int FreeDownloadSlots { get; }
+
+    /// <summary>Permits configured on the download gate (1–5). Changes apply after restart.</summary>
+    int MaxDownloadSlots { get; }
 }
 
 public interface IDownloadJobStateMachine
@@ -143,6 +152,7 @@ public interface IDownloadRepository
     Task<IReadOnlyList<DownloadJob>> GetAllAsync(CancellationToken ct = default);
     Task DeleteAsync(Guid id, CancellationToken ct = default);
     Task InitializeAsync(CancellationToken ct = default);
+    Task UpdateThumbReadyAsync(Guid id, bool ready, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -155,7 +165,9 @@ public interface ILibraryKindCatalog
     string Normalize(string? value);
     string LabelOf(string? value);
     bool IsKnown(string? value);
-    Task<LibraryKindEntry> AddAsync(string label, CancellationToken ct = default);
+    Task<LibraryKindEntry> AddAsync(string label, bool isPrivate = false, string? password = null, CancellationToken ct = default);
+    Task<bool> VerifyPasswordAsync(string kindValue, string password, CancellationToken ct = default);
+    Task RemovePrivacyAsync(string kindValue, string password, CancellationToken ct = default);
 }
 
 public interface IRequestContextProvider

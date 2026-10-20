@@ -3,6 +3,8 @@ namespace VideoDownloader.Core.Errors;
 public static class ErrorCodes
 {
     public const string NetTimeout = "NET_TIMEOUT";
+    public const string NoProgress = "DOWNLOAD_NO_PROGRESS";
+    public const string LiveNotSupported = "LIVE_NOT_DOWNLOADABLE";
     public const string Http403 = "HTTP_403";
     public const string Http404 = "HTTP_404";
     public const string RangeMismatch = "RANGE_MISMATCH";

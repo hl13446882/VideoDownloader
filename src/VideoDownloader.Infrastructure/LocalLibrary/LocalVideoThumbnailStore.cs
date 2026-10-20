@@ -13,6 +13,7 @@ public sealed class LocalVideoThumbnailStore
     private readonly IFfmpegAdapter _ffmpeg;
     private readonly ILogger<LocalVideoThumbnailStore> _logger;
     private readonly ConcurrentDictionary<Guid, byte> _inFlight = new();
+    private readonly SemaphoreSlim _concurrency = new(2, 2);
     private readonly string _root;
 
     public LocalVideoThumbnailStore(IFfmpegAdapter ffmpeg, ILogger<LocalVideoThumbnailStore> logger)
@@ -35,7 +36,8 @@ public sealed class LocalVideoThumbnailStore
         var path = GetPath(jobId);
         try
         {
-            return File.Exists(path) && new FileInfo(path).Length >= 32;
+            var info = new FileInfo(path);
+            return info.Exists && info.Length >= 32;
         }
         catch
         {
@@ -44,7 +46,7 @@ public sealed class LocalVideoThumbnailStore
     }
 
     /// <summary>No-op when a valid thumb already exists. Otherwise extract once (deduped).</summary>
-    public void EnsureAsyncFireAndForget(Guid jobId, string? videoPath)
+    public void EnsureAsyncFireAndForget(Guid jobId, string? videoPath, Func<Guid, Task>? onReady = null)
     {
         if (string.IsNullOrWhiteSpace(videoPath) || !File.Exists(videoPath))
             return;
@@ -57,7 +59,9 @@ public sealed class LocalVideoThumbnailStore
         {
             try
             {
-                await EnsureAsync(jobId, videoPath, CancellationToken.None);
+                var ok = await EnsureAsync(jobId, videoPath, CancellationToken.None);
+                if (ok && onReady is not null)
+                    await onReady(jobId);
             }
             finally
             {
@@ -74,8 +78,11 @@ public sealed class LocalVideoThumbnailStore
             return false;
 
         var thumb = GetPath(jobId);
+        await _concurrency.WaitAsync(ct);
         try
         {
+            if (Exists(jobId))
+                return true;
             var ok = await _ffmpeg.TryExtractThumbnailAsync(videoPath, thumb, ct);
             if (ok && Exists(jobId))
                 return true;
@@ -87,6 +94,10 @@ public sealed class LocalVideoThumbnailStore
         {
             _logger.LogDebug(ex, "Thumbnail extract failed for {JobId}", jobId);
             return false;
+        }
+        finally
+        {
+            _concurrency.Release();
         }
     }
 }

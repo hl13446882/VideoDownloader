@@ -584,7 +584,7 @@ public class ExclusiveSiteDetectionTests
             """{"identity":"content:7682715203741568283","media":["https://v3.douyinvod.com/v.mp4"],"album":false}""",
             RequestContext.CreateEmpty(), CancellationToken.None);
         await detector.ProcessPageObservationAsync(page, "album",
-            """{"identity":"content:7682715203741568283","album":true,"images":["https://p3.douyinpic.com/tos-cn-i-xxx/img1.jpeg","https://p3.douyinpic.com/tos-cn-i-xxx/img2.jpeg"],"media":["https://sf3.douyinstatic.com/obj/ies-music/bgm.mp3"]}""",
+            """{"identity":"content:7682715203741568283","album":true,"images":["https://p3.douyinpic.com/tos-cn-i-xxx/img1~tplv-dy-aweme-images:q75.jpeg","https://p3.douyinpic.com/tos-cn-i-xxx/img2~tplv-dy-aweme-images:q75.jpeg"],"media":["https://sf3.douyinstatic.com/obj/ies-music/bgm.mp3"]}""",
             RequestContext.CreateEmpty(), CancellationToken.None);
         await detector.CompleteAsync(CancellationToken.None);
 
@@ -604,7 +604,7 @@ public class ExclusiveSiteDetectionTests
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         detector.BeginSession(page, Guid.NewGuid());
         await detector.ProcessPageObservationAsync(page, "album",
-            """{"album":true,"images":["https://p3.douyinpic.com/a.jpeg?x=1","https://p3.douyinpic.com/b.jpeg","https://p3.douyinpic.com/a.jpeg?x=2"],"media":[]}""",
+            """{"album":true,"images":["https://p3.douyinpic.com/a.jpeg?biz_tag=aweme_images&x=1","https://p3.douyinpic.com/b.jpeg?biz_tag=aweme_images","https://p3.douyinpic.com/a.jpeg?biz_tag=aweme_images&x=2"],"media":[]}""",
             RequestContext.CreateEmpty(), CancellationToken.None);
         await detector.CompleteAsync(CancellationToken.None);
 
@@ -623,7 +623,7 @@ public class ExclusiveSiteDetectionTests
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         detector.BeginSession(page, Guid.NewGuid());
         await detector.ProcessPageObservationAsync(page, "album",
-            """{"album":true,"images":["https://p3.douyinpic.com/avatar/user.jpeg","https://p3.douyinpic.com/logo/badge.png","https://p3.douyinpic.com/tos-cn-i-xxx/real1.jpeg","https://p3.douyinpic.com/tos-cn-i-xxx/real2.jpeg"],"media":[]}""",
+            """{"album":true,"images":["https://p3.douyinpic.com/avatar/user.jpeg?biz_tag=aweme_images","https://p3.douyinpic.com/logo/badge.png?biz_tag=aweme_images","https://p3.douyinpic.com/tos-cn-i-xxx/real1.jpeg?biz_tag=aweme_images","https://p3.douyinpic.com/tos-cn-i-xxx/real2.jpeg?biz_tag=aweme_images"],"media":[]}""",
             RequestContext.CreateEmpty(), CancellationToken.None);
         await detector.CompleteAsync(CancellationToken.None);
 
@@ -640,7 +640,7 @@ public class ExclusiveSiteDetectionTests
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         detector.BeginSession(page, Guid.NewGuid());
         await detector.ProcessPageObservationAsync(page, "album",
-            """{"album":true,"images":["https://p3.douyinpic.com/a.jpeg","https://p3.douyinpic.com/b.jpeg"],"media":["https://sf3.douyinstatic.com/obj/ies-music/bgm.mp3"]}""",
+            """{"album":true,"images":["https://p3.douyinpic.com/a.jpeg?biz_tag=aweme_images","https://p3.douyinpic.com/b.jpeg?biz_tag=aweme_images"],"media":["https://sf3.douyinstatic.com/obj/ies-music/bgm.mp3"]}""",
             RequestContext.CreateEmpty(), CancellationToken.None);
         await detector.CompleteAsync(CancellationToken.None);
         Assert.NotNull(last!.Audio);
@@ -656,7 +656,7 @@ public class ExclusiveSiteDetectionTests
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         detector.BeginSession(page, Guid.NewGuid());
         await detector.ProcessPageObservationAsync(page, "album",
-            """{"album":true,"images":["https://p3.douyinpic.com/a.jpeg","https://p3.douyinpic.com/b.jpeg"],"media":[]}""",
+            """{"album":true,"images":["https://p3.douyinpic.com/a.jpeg?biz_tag=aweme_images","https://p3.douyinpic.com/b.jpeg?biz_tag=aweme_images"],"media":[]}""",
             RequestContext.CreateEmpty(), CancellationToken.None);
         await detector.CompleteAsync(CancellationToken.None);
         Assert.Null(last!.Audio);
@@ -850,6 +850,59 @@ public class ExclusiveSiteDetectionTests
         Assert.Equal(MediaContentType.Album, last!.ContentType);
         Assert.NotEmpty(last.Images);
         Assert.NotNull(last.Audio);
+        Assert.Equal("mp3", last.Audio!.Container);
+    }
+
+    [Fact]
+    public async Task Douyin_Album_Drops_Weboff_Chrome_Images()
+    {
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var page = new Uri("https://www.douyin.com/note/7276638706021240125");
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "图文",
+            """{"identity":"content:7276638706021240125","album":true,"caption":"图文","media":["https://sf6-cdn-tos.douyinstatic.com/obj/ies-music/7200404307408079672.mp3"],"images":["https://p3-pc-sign.douyinpic.com/tos-cn-i-0813/o8AtefgZAFF7UzPVIS0BqQAvDVhBeJpGAAE7E9~tplv-dy-aweme-images:q75.jpeg"]}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        await detector.ProcessNetworkAsync(Evt(page,
+            "https://p-pc-weboff.byteimg.com/tos-cn-i-9r5gewecjs/emblem-new.png") with
+        {
+            ResourceType = "Image", StatusCode = 200, ContentLength = 4_000, MimeType = "image/png"
+        }, CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.NotNull(last);
+        Assert.DoesNotContain(last!.Images, img => img.Url.Host.Contains("weboff", StringComparison.OrdinalIgnoreCase));
+        Assert.Single(last.Images);
+    }
+
+    [Fact]
+    public async Task Douyin_Album_Keeps_Aweme_Slides_Only()
+    {
+        var detector = new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>());
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var page = new Uri("https://www.douyin.com/note/7276638706021240125");
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "图文",
+            """{"identity":"content:7276638706021240125","album":true,"caption":"图文","media":["https://sf6-cdn-tos.douyinstatic.com/obj/ies-music/7200404307408079672.mp3"],"images":["https://p3-pc-sign.douyinpic.com/tos-cn-i-0813/slideA~tplv-dy-aweme-images:q75.webp","https://p3-pc-sign.douyinpic.com/tos-cn-i-0813/slideA~tplv-dy-aweme-images:q75.jpeg","https://p3-pc-sign.douyinpic.com/tos-cn-i-0813/slideB~tplv-dy-aweme-images:q75.webp"]}""",
+            RequestContext.CreateEmpty(), CancellationToken.None);
+        foreach (var extra in new[]
+        {
+            "https://p3-pc-sign.douyinpic.com/tos-cn-i-0813/cover~tplv-dy-cropcenter:323:430.jpeg",
+            "https://p3-pc-sign.douyinpic.com/obj/tos-cn-i-tsj2vxp0zn/commentpic",
+            "https://p3-pc-sign.douyinpic.com/tos-cn-i-0813/slideA~noop.jpeg",
+            "https://p3-pc-sign.douyinpic.com/image-cut-tos-priv/related~tplv-dy-resize-origshort-autoq-75:330.jpeg"
+        })
+        {
+            await detector.ProcessNetworkAsync(Evt(page, extra) with
+            {
+                ResourceType = "Image", StatusCode = 200, ContentLength = 40_000, MimeType = "image/jpeg"
+            }, CancellationToken.None);
+        }
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.NotNull(last);
+        Assert.Equal(2, last!.Images.Count);
+        Assert.All(last.Images, img => Assert.Contains("aweme-images", img.Url.AbsoluteUri, StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -861,7 +914,7 @@ public class ExclusiveSiteDetectionTests
         var page = new Uri("https://www.douyin.com/note/7276638706021240125");
         detector.BeginSession(page, Guid.NewGuid());
         await detector.ProcessPageObservationAsync(page, "相册文案",
-            """{"identity":"content:7276638706021240125","album":true,"caption":"相册文案","media":[],"images":["https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img1.jpeg","https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img2.jpeg"]}""",
+            """{"identity":"content:7276638706021240125","album":true,"caption":"相册文案","media":[],"images":["https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img1~tplv-dy-aweme-images:q75.jpeg","https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img2~tplv-dy-aweme-images:q75.jpeg"]}""",
             RequestContext.CreateEmpty(), CancellationToken.None);
         await detector.ProcessNetworkAsync(Evt(page,
             "https://v3.douyinvod.com/video/tos/cn/x/media-video-avc1/?mime_type=video_mp4") with
@@ -892,13 +945,13 @@ public class ExclusiveSiteDetectionTests
         var page = new Uri("https://www.douyin.com/note/7276638706021240125");
         detector.BeginSession(page, Guid.NewGuid());
         await detector.ProcessPageObservationAsync(page, "相册",
-            """{"identity":"content:7276638706021240125","album":true,"caption":"相册","media":["https://sf6-cdn-tos.douyinstatic.com/obj/ies-music/a.mp3"],"images":["https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img1.jpeg","https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img2.jpeg"],"imageCount":2,"declaredImageCount":3}""",
+            """{"identity":"content:7276638706021240125","album":true,"caption":"相册","media":["https://sf6-cdn-tos.douyinstatic.com/obj/ies-music/a.mp3"],"images":["https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img1~tplv-dy-aweme-images:q75.jpeg","https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img2~tplv-dy-aweme-images:q75.jpeg"],"imageCount":2,"declaredImageCount":3}""",
             RequestContext.CreateEmpty(), CancellationToken.None);
         await detector.CompleteAsync(CancellationToken.None);
         Assert.Null(last);
 
         await detector.ProcessNetworkAsync(Evt(page,
-            "https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img3.jpeg") with
+            "https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img3~tplv-dy-aweme-images:q75.jpeg") with
         {
             ResourceType = "Image", StatusCode = 200, ContentLength = 80_000, MimeType = "image/jpeg"
         }, CancellationToken.None);
@@ -916,7 +969,7 @@ public class ExclusiveSiteDetectionTests
         var page = new Uri("https://www.douyin.com/note/7276638706021240125");
         detector.BeginSession(page, Guid.NewGuid());
         await detector.ProcessPageObservationAsync(page, "相册",
-            """{"identity":"content:7276638706021240125","album":true,"caption":"相册","media":["https://sf6-cdn-tos.douyinstatic.com/obj/ies-music/a.mp3"],"images":["https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img1.jpeg","https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img2.jpeg"],"imageCount":2}""",
+            """{"identity":"content:7276638706021240125","album":true,"caption":"相册","media":["https://sf6-cdn-tos.douyinstatic.com/obj/ies-music/a.mp3"],"images":["https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img1~tplv-dy-aweme-images:q75.jpeg","https://p3-pc-sign.douyinpic.com/tos-cn-i-0813c001/img2~tplv-dy-aweme-images:q75.jpeg"],"imageCount":2}""",
             RequestContext.CreateEmpty(), CancellationToken.None);
         await detector.CompleteAsync(CancellationToken.None);
         Assert.NotNull(last);

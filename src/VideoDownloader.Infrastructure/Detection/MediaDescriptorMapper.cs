@@ -65,6 +65,7 @@ public static class MediaDescriptorMapper
             ProbeSource.SiteAdapter)
         {
             SessionId = sessionId,
+            IsLive = descriptor.IsLive,
             Availability = variants.Count > 0
                 ? MediaAvailabilityKind.Complete
                 : MediaAvailabilityKind.Unavailable,

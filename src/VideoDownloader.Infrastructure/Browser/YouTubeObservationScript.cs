@@ -2,7 +2,7 @@ namespace VideoDownloader.Infrastructure.Browser;
 
 internal static class YouTubeObservationScript
 {
-    internal const string Body = """
+    internal const string Body = YouTubeLivePlaybackScript.Definition + "\n" + """
           const visible = el => {
             const r = el.getBoundingClientRect();
             return Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0)) *
@@ -21,7 +21,7 @@ internal static class YouTubeObservationScript
             const media=[];
             if(active){ for(const u of [active.currentSrc,active.src]) if(/^https?:/i.test(u||'')) media.push(u); }
             const durationSec=(active&&Number.isFinite(active.duration)&&active.duration>0)?active.duration:null;
-            return { type:'vd-video-identity', identity:location.host+':content:youtube:'+v, caption, author, href:location.href, media:[...new Set(media)], durationSec };
+            return { type:'vd-video-identity', identity:location.host+':content:youtube:'+v, caption, author, href:location.href, media:[...new Set(media)], durationSec, isLive:__vdYouTubeIsLive() };
           };
           window.__vdProbe=()=>window.__vdObserve();
           let scheduled=false;

@@ -39,6 +39,11 @@ public interface IExclusiveSiteMediaDetector
         RequestContext context,
         CancellationToken ct);
 
+    /// <summary>Browser observations must not implicitly launch an external process.</summary>
+    Task ProcessPageObservationAsync(Uri pageUrl, string? pageTitle, string? pageScriptJson,
+        RequestContext context, CancellationToken ct, bool runExternal) =>
+        ProcessPageObservationAsync(pageUrl, pageTitle, pageScriptJson, context, ct);
+
     Task CompleteAsync(CancellationToken ct);
 
     bool Failed { get; }

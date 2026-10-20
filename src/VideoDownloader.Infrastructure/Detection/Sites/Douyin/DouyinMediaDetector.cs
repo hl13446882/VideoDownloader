@@ -19,6 +19,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 {
     private readonly ILogger<DouyinMediaDetector> _logger;
     private readonly IProbeMethodStats _probeStats;
+    private long _probeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
     private readonly DouyinDetectionSession _session = new();
     private readonly object _gate = new();
     private bool _failed;
@@ -27,6 +28,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
     private bool _observationSealed;
     /// <summary>Last BuildDescriptor returned null solely because the best pick was fragile unverified.</summary>
     private bool _lastDeferFragile;
+    private bool _successCounted;
 
     public DouyinMediaDetector(ILogger<DouyinMediaDetector> logger, IProbeMethodStats probeStats)
     {
@@ -59,12 +61,17 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 
     private void BeginSessionUnlocked(Uri pageUrl, Guid sessionId)
     {
+        _probeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
         // 1–6: cancel/wipe old session. 7–9: open the only active run on this singleton.
         DestroySessionUnlocked();
         _session.SessionId = sessionId;
         _session.PageUrl = pageUrl;
         var id = DouyinIdentity.ExtractAwemeId(pageUrl);
         _session.SwitchContent(id, DouyinContentMode.Unknown);
+        var leading = pageUrl.AbsolutePath.Contains("/note/", StringComparison.OrdinalIgnoreCase)
+            ? ProbeMethods.Album
+            : ProbeMethodRanking.Order(_probeStats, SiteIds.Douyin).FirstOrDefault() ?? ProbeMethods.AwemeDetail;
+        _probeStats.ReportMethod(SiteIds.Douyin, leading);
         _logger.LogInformation(
             "[DetectionRouter] Site=Douyin Detector={Detector} Exclusive=true GenericPipeline=Bypassed session={Session} page={Path}",
             Name, sessionId, pageUrl.AbsolutePath);
@@ -90,6 +97,15 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         _failureReason = null;
         _observationSealed = false;
         _lastDeferFragile = false;
+        _successCounted = false;
+    }
+
+    private void CountSuccess(string? method)
+    {
+        if (_successCounted || string.IsNullOrWhiteSpace(method))
+            return;
+        _successCounted = true;
+        _probeStats.RecordTimed(SiteIds.Douyin, method, true, System.Diagnostics.Stopwatch.GetElapsedTime(_probeStarted));
     }
 
     private bool IsCurrentSession(Guid eventSessionId) =>
@@ -263,8 +279,10 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 _session.SwitchContent(_session.CurrentContentId, DouyinContentMode.Video);
 
             // After a deferred fragile Complete, emit as soon as durable/verified progressive arrives.
+            // An unidentified preload (no aweme id yet) must not seal by itself.
             if (!isMse &&
                 track.Kind == MediaTrackKind.Combined &&
+                _session.CurrentContentId is not null &&
                 !DouyinPlayEvidence.IsFragileUnverifiedProgressive(track))
             {
                 var late = BuildDescriptor();
@@ -277,7 +295,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                     if (late.MediaId is { Length: > 0 } mediaId && late.Video is not null)
                         RememberProgressiveOwner(late.Video.SourceUrl, mediaId);
                     var win = late.Video?.ProbeMethod ?? ProbeMethods.NetworkMedia;
-                    _probeStats.Record(SiteIds.Douyin, win, true);
+                    CountSuccess(win);
                     _logger.LogInformation(
                         "[DouyinSelect] session={Session} selected={Host}{Path} kind={Kind} formats={Formats} method={Method} reason=late_progressive owner={Owner}",
                         _session.SessionId,
@@ -309,6 +327,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
         RequestContext context,
         CancellationToken ct)
     {
+        MediaDescriptor? early = null;
         lock (_gate)
         {
             if (_session.PageUrl is null)
@@ -372,6 +391,10 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 _failed = false;
                 _failureReason = null;
                 _observationSealed = false;
+                if (idChanged)
+                    _successCounted = false;
+                if (mode == DouyinContentMode.Album)
+                    _probeStats.ReportMethod(SiteIds.Douyin, ProbeMethods.Album);
             }
             else if (contentId is not null)
                 _session.CurrentContentId ??= contentId;
@@ -402,8 +425,19 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                 _session.CurrentContentId, _session.CurrentMode,
                 _session.VideoCandidates.Count, _session.AudioCandidates.Count,
                 _session.AlbumImages.Count, _session.ExpectedAlbumImageCount);
+
+            // Publish a complete, owned result immediately; never mark an empty poll failed.
+            early = BuildDescriptor();
+            if (early is not null)
+            {
+                _failed = false;
+                _failureReason = null;
+                CountSuccess(early.ContentType == MediaContentType.Album ? ProbeMethods.Album :
+                    early.Video?.ProbeMethod ?? ProbeMethods.NetworkMedia);
+            }
         }
 
+        if (early is not null) DescriptorsReady?.Invoke(this, [early]);
         return Task.CompletedTask;
     }
 
@@ -500,7 +534,7 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                               ? ProbeMethods.RouterData
                               : ProbeMethods.NetworkMedia)
                       : ProbeMethods.NetworkMedia);
-            _probeStats.Record(SiteIds.Douyin, win, true);
+            CountSuccess(win);
             _logger.LogInformation(
                 "[DouyinSelect] session={Session} selected={Host}{Path} kind={Kind} formats={Formats} method={Method} reason=progressive_muxed owner={Owner}",
                 _session.SessionId,
@@ -689,9 +723,20 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
 
         // Prefer known large objects over unknown-length crumbs when both exist.
         var sized = progressive.Where(t => t.ContentLength is >= MediaResourceSizeFilter.MinProgressiveVideoBytes).ToList();
-        if (sized.Count > 0)
-            return sized[0];
-        return progressive.FirstOrDefault();
+        var pool = sized.Count > 0 ? sized : progressive;
+        var bestMethod = ProbeMethodRanking.BestPresent(
+            ProbeMethodRanking.Order(_probeStats, SiteIds.Douyin),
+            pool.Select(t => t.ProbeMethod));
+        if (bestMethod is not null)
+        {
+            var preferred = pool
+                .Where(t => string.Equals(t.ProbeMethod, bestMethod, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (preferred.Count > 0)
+                return preferred[0];
+        }
+
+        return pool.FirstOrDefault();
     }
 
     private static int ScoreTrack(MediaTrack t, bool hasAudioPair = true)
@@ -884,16 +929,18 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
                         // Merge: keep observation order, then append network-only URLs not in this payload.
                         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         var merged = new List<AlbumImageItem>();
-                        foreach (var img in list.DistinctBy(i => i.Url.GetLeftPart(UriPartial.Path), StringComparer.OrdinalIgnoreCase))
+                        foreach (var img in list)
                         {
-                            var key = img.Url.GetLeftPart(UriPartial.Path);
+                            var key = AlbumStillIdentity(img.Url);
                             if (!seen.Add(key)) continue;
                             merged.Add(img with { Index = merged.Count });
                         }
 
                         foreach (var existing in _session.AlbumImages)
                         {
-                            var key = existing.Url.GetLeftPart(UriPartial.Path);
+                            if (!IsLikelyAlbumImage(existing.Url, null) || IsExcludedAlbumImage(existing.Url))
+                                continue;
+                            var key = AlbumStillIdentity(existing.Url);
                             if (!seen.Add(key)) continue;
                             merged.Add(existing with { Index = merged.Count });
                         }
@@ -997,11 +1044,9 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             declaredCap > 0 &&
             _session.AlbumImages.Count >= declaredCap)
             return;
+        var still = AlbumStillIdentity(e.Url);
         if (_session.AlbumImages.Any(i =>
-                string.Equals(
-                    i.Url.GetLeftPart(UriPartial.Path),
-                    e.Url.GetLeftPart(UriPartial.Path),
-                    StringComparison.OrdinalIgnoreCase)))
+                string.Equals(AlbumStillIdentity(i.Url), still, StringComparison.OrdinalIgnoreCase)))
             return;
 
         _session.AlbumImages.Add(new AlbumImageItem(
@@ -1347,6 +1392,12 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
     {
         if (url.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase)) return "hls";
         if (url.AbsolutePath.EndsWith(".mpd", StringComparison.OrdinalIgnoreCase)) return "dash";
+        if (url.AbsolutePath.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase) ||
+            mime?.Contains("mpeg", StringComparison.OrdinalIgnoreCase) == true ||
+            mime?.Contains("mp3", StringComparison.OrdinalIgnoreCase) == true)
+            return "mp3";
+        if (url.AbsolutePath.EndsWith(".aac", StringComparison.OrdinalIgnoreCase)) return "aac";
+        if (url.AbsolutePath.EndsWith(".m4a", StringComparison.OrdinalIgnoreCase)) return "m4a";
         if (mime?.Contains("webm", StringComparison.OrdinalIgnoreCase) == true) return "webm";
         if (mime?.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) == true) return "m4a";
         return "mp4";
@@ -1363,18 +1414,27 @@ public sealed class DouyinMediaDetector : IExclusiveSiteMediaDetector
             !url.Host.Contains("byteimg", StringComparison.OrdinalIgnoreCase))
             return false;
         var full = url.AbsoluteUri;
-        if (Regex.IsMatch(full, @"aweme-images|biz_tag=aweme_images|/tos-cn-i-", RegexOptions.IgnoreCase))
-            return true;
-        if (mime?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) == true)
-            return true;
-        return Regex.IsMatch(url.AbsolutePath, @"\.(?:jpg|jpeg|png|webp|heic|avif)(?:$|\?)", RegexOptions.IgnoreCase);
+        return full.Contains("aweme-images", StringComparison.OrdinalIgnoreCase) ||
+               full.Contains("biz_tag=aweme_images", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Same slide across webp/jpeg and <c>~noop</c> copies. The id is the path token before <c>~</c>.</summary>
+    private static string AlbumStillIdentity(Uri url)
+    {
+        var name = Path.GetFileName(url.AbsolutePath);
+        var cut = name.IndexOf('~');
+        if (cut > 0)
+            name = name[..cut];
+        return name;
     }
 
     private static bool IsExcludedAlbumImage(Uri url)
     {
+        if (url.Host.Contains("weboff", StringComparison.OrdinalIgnoreCase))
+            return true;
         var full = url.AbsoluteUri;
         return Regex.IsMatch(full,
-            @"avatar|emoji|emoticon|badge|logo|sprite|icon|favicon|cover_thumb|(?:^|[?&_/])thumbnail(?:[?&_/]|$)|aweme-image-basic|lf-douyin-pc-web",
+            @"avatar|emoji|emoticon|badge|logo|sprite|icon|favicon|emblem|cover_thumb|(?:^|[?&_/])thumbnail(?:[?&_/]|$)|aweme-image-basic|lf-douyin-pc-web|cropcenter|image-cut-tos|resize-origshort|~noop\.|tsj2vxp0zn",
             RegexOptions.IgnoreCase);
     }
 

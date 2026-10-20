@@ -78,6 +78,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
     public event EventHandler<PageIdentityChangedEventArgs>? PageIdentityChanged;
     public event EventHandler<string>? OpenInNewTabRequested;
     public event EventHandler<MediaSessionChangedEventArgs>? MediaSessionChanged;
+    public event EventHandler? MediaSessionChanging;
     public event EventHandler<bool>? LocalPlayerFullscreenRequested;
     public event EventHandler? LocalFolderImportRequested;
     public event EventHandler<bool>? TabAudibleChanged;
@@ -111,8 +112,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
     }
 
     /// <summary>
-    /// Try feed-next shortcuts without site-specific logic: ArrowDown, Shift+N, then ].
-    /// Pages that accept any will advance; others no-op until idle timeout.
+    /// Send one feed-next shortcut. Never broadcast several shortcuts or duplicate a bubbling key.
     /// </summary>
     public Task SendFeedNextAsync(CancellationToken ct = default)
     {
@@ -121,29 +121,22 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         const string script =
             """
             (() => {
-              const fire = (target, init) => {
-                try { target.dispatchEvent(new KeyboardEvent('keydown', init)); } catch (e) {}
-                try { target.dispatchEvent(new KeyboardEvent('keyup', init)); } catch (e) {}
-              };
               const t = document.activeElement && document.activeElement !== document.body
                 ? document.activeElement : (document.body || document.documentElement);
               const down = { key:'ArrowDown', code:'ArrowDown', keyCode:40, which:40, bubbles:true, cancelable:true };
               const shiftN = { key:'N', code:'KeyN', keyCode:78, which:78, shiftKey:true, bubbles:true, cancelable:true };
               const bracket = { key:']', code:'BracketRight', keyCode:221, which:221, bubbles:true, cancelable:true };
-              fire(t, down);
-              fire(window, down);
-              fire(t, shiftN);
-              fire(window, shiftN);
-              fire(t, bracket);
-              fire(window, bracket);
-              try {
-                const scroller = document.scrollingElement || document.documentElement;
-                if (scroller) scroller.scrollBy(0, Math.max(240, Math.floor(window.innerHeight * 0.85)));
-              } catch (e) {}
+              const host = location.hostname.toLowerCase();
+              const isHost = name => host === name || host.endsWith('.' + name);
+              const next = isHost('youtube.com') || isHost('youtu.be') ? shiftN
+                : isHost('bilibili.com') ? bracket : down;
+              // The event bubbles to window already. Another window dispatch can skip a second video.
+              t.dispatchEvent(new KeyboardEvent('keydown', next));
+              t.dispatchEvent(new KeyboardEvent('keyup', next));
               return true;
             })()
             """;
-        return _core.ExecuteScriptAsync(script).WaitAsync(ct);
+        return _core.ExecuteScriptAsync(script).WaitAsync(TimeSpan.FromSeconds(2), ct);
     }
 
     /// <summary>
@@ -158,7 +151,9 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         try
         {
             var page = CurrentPageUrl;
-            if (page is not null && LooksLikeLivePageUrl(page))
+            if (page is not null &&
+                !VideoDownloader.Infrastructure.Detection.Sites.YouTube.YouTubeLiveMedia.IsYouTubePage(page) &&
+                LooksLikeLivePageUrl(page))
                 return true;
 
             const string script =
@@ -202,7 +197,9 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
                   return pool.some(isLiveMedia);
                 })()
                 """;
-            var raw = await _core.ExecuteScriptAsync(script).WaitAsync(ct);
+            var raw = await _core.ExecuteScriptAsync("(() => {" + YouTubeLivePlaybackScript.Definition +
+                "if (/(^|\\.)(youtube\\.com|youtube-nocookie\\.com|youtu\\.be)$/i.test(location.hostname)) return __vdYouTubeIsLive();" +
+                "return (" + script + ");})()").WaitAsync(ct);
             if (string.IsNullOrWhiteSpace(raw))
                 return false;
             using var doc = JsonDocument.Parse(raw);
@@ -457,41 +454,30 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         _lastDocumentUrl = page;
         var normalized = NormalizeMediaSessionKey(key);
         CancellationTokenSource debounce;
-        bool durationRevision;
+        bool forceRestart;
+        bool changing;
         lock (_mediaSessionLock)
         {
-            durationRevision = IsSignificantDurationChange(_mediaDurationSec, durationSec) &&
-                               string.Equals(NormalizeMediaSessionKey(_mediaSessionKey ?? string.Empty), normalized, StringComparison.Ordinal);
-            if (durationSec is > 0)
-                _mediaDurationSec = durationSec;
-
-            if (durationRevision)
-            {
-                // Same content id but reliable duration jump ⇒ treat as a new work; force restart.
-                _mediaSessionDebounceCts?.Cancel();
-                _mediaSessionDebounceCts?.Dispose();
-                _pendingMediaSessionKey = null;
-                debounce = _mediaSessionDebounceCts = new();
-                _ = CommitMediaSessionAsync(normalized, key, "duration-revision", debounce.Token, forceRestart: true);
-                return;
-            }
-
-            if (normalized == NormalizeMediaSessionKey(_mediaSessionKey ?? string.Empty) &&
-                _mediaSessionKey is not null)
-            {
-                _mediaSessionDebounceCts?.Cancel();
-                _pendingMediaSessionKey = null;
-                return;
-            }
-            if (normalized == NormalizeMediaSessionKey(_pendingMediaSessionKey ?? string.Empty) &&
-                _pendingMediaSessionKey is not null)
-                return;
+            var same = _mediaSessionKey is not null &&
+                normalized == NormalizeMediaSessionKey(_mediaSessionKey);
+            var durationRevision = same && IsSignificantDurationChange(_mediaDurationSec, durationSec);
+            if (durationSec is > 0) _mediaDurationSec = durationSec;
+            // If a quick swipe returns to the old work, it needs a fresh session too:
+            // the old displayed result has already been retired by MediaSessionChanging.
+            var reverted = same && _pendingMediaSessionKey is not null && _pendingMediaSessionKey != normalized;
+            if (same && !durationRevision && !reverted) return;
+            if (!durationRevision && !reverted && _pendingMediaSessionKey == normalized) return;
+            forceRestart = durationRevision || reverted;
+            changing = _mediaSessionKey is not null;
             _pendingMediaSessionKey = normalized;
             _mediaSessionDebounceCts?.Cancel();
             _mediaSessionDebounceCts?.Dispose();
             debounce = _mediaSessionDebounceCts = new();
         }
-        _ = CommitMediaSessionAsync(normalized, key, "dom-identity", debounce.Token);
+        // Clear discoveries before the debounce and before any queued old publication.
+        if (changing) MediaSessionChanging?.Invoke(this, EventArgs.Empty);
+        _ = CommitMediaSessionAsync(normalized, key, forceRestart ? "identity-revision" : "dom-identity",
+            debounce.Token, forceRestart);
     }
 
     private async Task CommitMediaSessionAsync(
@@ -505,7 +491,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         {
             // Settle ABR / multi-CDN bursts before committing a session switch.
             // Duration revisions are already debounced by the player; keep a short settle.
-            await Task.Delay(forceRestart ? TimeSpan.FromMilliseconds(400) : TimeSpan.FromSeconds(1.5), token);
+            await Task.Delay(forceRestart ? TimeSpan.FromMilliseconds(400) : TimeSpan.FromMilliseconds(250), token);
         }
         catch (OperationCanceledException)
         {

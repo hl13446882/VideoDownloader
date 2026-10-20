@@ -50,6 +50,7 @@ public sealed record MediaDescriptor(
     string? Author = null)
 {
     public Guid SessionId { get; init; }
+    public bool IsLive { get; init; }
 
     /// <summary>
     /// Pre-built format ladder (e.g. yt-dlp heights). When set, mapper prefers these over Video/Audio.

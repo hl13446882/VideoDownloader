@@ -1,7 +1,9 @@
+using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using VideoDownloader.Core.Contracts;
+using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Infrastructure.Detection;
 
@@ -24,7 +26,10 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
     private readonly List<MediaVariant> _formats = [];
     private bool _failed;
     private string? _failureReason;
+    private CancellationTokenSource _lifetime = new();
+    private long _probeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
     private bool _externalAttempted;
+    private bool _successCounted;
 
     public BilibiliMediaDetector(
         ILogger<BilibiliMediaDetector> logger,
@@ -82,9 +87,7 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
                          full.Contains("/upos", StringComparison.OrdinalIgnoreCase);
             if (!isBili && !isDash && !IsBrowserPlay(e)) return Task.CompletedTask;
 
-            var audio = e.MimeType?.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) == true ||
-                        full.Contains("audio", StringComparison.OrdinalIgnoreCase) &&
-                        url.AbsolutePath.EndsWith(".m4s", StringComparison.OrdinalIgnoreCase);
+            var audio = IsAudioTrack(e.MimeType, url);
             Upsert(new MediaTrack(
                 audio ? "audio" : "video",
                 audio ? MediaTrackKind.Audio : MediaTrackKind.Video,
@@ -92,7 +95,7 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
                 null,
                 url.AbsolutePath.EndsWith(".mpd", StringComparison.OrdinalIgnoreCase) ? "dash" : "mp4",
                 null,
-                e.ContentLength,
+                ResolveObjectLength(e),
                 Enrich(e.RequestContext))
             {
                 BrowserObserved = IsBrowserPlay(e),
@@ -107,15 +110,23 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
                 _failureReason = null;
             }
         }
+        PublishAvailable();
         return Task.CompletedTask;
     }
 
+    public Task ProcessPageObservationAsync(
+        Uri pageUrl, string? pageTitle, string? pageScriptJson, RequestContext context, CancellationToken ct) =>
+        ProcessPageObservationAsync(pageUrl, pageTitle, pageScriptJson, context, ct, runExternal: true);
+
     public async Task ProcessPageObservationAsync(
-        Uri pageUrl, string? pageTitle, string? pageScriptJson, RequestContext context, CancellationToken ct)
+        Uri pageUrl, string? pageTitle, string? pageScriptJson, RequestContext context, CancellationToken ct,
+        bool runExternal)
     {
         string? contentId;
         Uri resolveUrl;
         RequestContext enriched;
+        Guid session;
+        CancellationToken lifetime;
         lock (_gate)
         {
             if (_pageUrl is null) BeginSession(pageUrl, _sessionId == Guid.Empty ? Guid.NewGuid() : _sessionId);
@@ -125,6 +136,10 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
             if (!string.IsNullOrWhiteSpace(contentId) &&
                 !string.Equals(_contentId, contentId, StringComparison.OrdinalIgnoreCase))
             {
+                _lifetime.Cancel();
+                _lifetime.Dispose();
+                _lifetime = new();
+                _probeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 _contentId = contentId;
                 _formats.Clear();
                 _tracks.Clear();
@@ -132,6 +147,7 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
                 _failed = false;
                 _failureReason = null;
                 _externalAttempted = false;
+                _successCounted = false;
             }
             else
                 _contentId ??= contentId;
@@ -140,26 +156,46 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
             ApplyJson(pageScriptJson);
             resolveUrl = _pageUrl;
             enriched = _context;
+            session = _sessionId;
+            lifetime = _lifetime.Token;
         }
 
-        if (string.IsNullOrWhiteSpace(contentId))
+        PublishAvailable();
+        if (!runExternal || string.IsNullOrWhiteSpace(contentId))
             return;
 
-        var hasCookies = enriched.Cookies.Count > 0;
+        if (NetworkPairLeads())
+        {
+            _probeStats.ReportMethod(SiteIds.Bilibili, ProbeMethods.NetworkPlayurl);
+            return;
+        }
+
+        using var resolveCancellation = CancellationTokenSource.CreateLinkedTokenSource(ct, lifetime);
+        var resolveToken = resolveCancellation.Token;
         lock (_gate)
         {
-            if (!_ytdlp.IsAvailable || _externalAttempted)
+            resolveToken.ThrowIfCancellationRequested();
+            if (session != _sessionId || !_ytdlp.IsAvailable || _externalAttempted)
                 return;
             _externalAttempted = true;
         }
 
+        _probeStats.ReportMethod(SiteIds.Bilibili, ProbeMethods.YtDlp);
+        var attemptStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+
         try
         {
-            var videos = await _ytdlp.ResolveAsync(resolveUrl, enriched, ct);
+            var videos = await _ytdlp.ResolveAsync(resolveUrl, enriched, resolveToken);
             lock (_gate)
             {
-                if (videos.Count == 0 && !hasCookies)
+                resolveToken.ThrowIfCancellationRequested();
+                if (session != _sessionId || contentId != _contentId) return;
+                if (videos.Count == 0)
+                {
                     _externalAttempted = false;
+                    _probeStats.RecordTimed(SiteIds.Bilibili, ProbeMethods.YtDlp, false,
+                        System.Diagnostics.Stopwatch.GetElapsedTime(attemptStarted));
+                }
 
                 foreach (var v in videos)
                 {
@@ -195,15 +231,39 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
                 }
             }
         }
+        catch (OperationCanceledException)
+        {
+            lock (_gate)
+                if (session == _sessionId) _externalAttempted = false;
+            throw;
+        }
         catch (Exception ex)
         {
             _logger.LogInformation(ex, "Bilibili exclusive external resolve failed (no Generic fallback)");
             lock (_gate)
             {
-                if (!hasCookies)
-                    _externalAttempted = false;
+                if (session == _sessionId) _externalAttempted = false;
             }
         }
+        if (session == _sessionId && !resolveToken.IsCancellationRequested) PublishAvailable();
+    }
+
+    private void PublishAvailable()
+    {
+        MediaDescriptor? descriptor;
+        lock (_gate)
+        {
+            descriptor = Build(out var method);
+            if (descriptor is null) return;
+            if (descriptor.Formats.Count == 0 && descriptor.Video?.Kind == MediaTrackKind.Video &&
+                descriptor.Audio is null) return;
+            var mapped = MediaDescriptorMapper.ToDetectedVideo(descriptor, _sessionId);
+            if (!descriptor.IsLive && !VideoDownloader.Core.Detection.DetectionReadiness.IsUsable(mapped)) return;
+            _failed = false;
+            _failureReason = null;
+            CountSuccess(method);
+        }
+        DescriptorsReady?.Invoke(this, [descriptor]);
     }
 
     public Task CompleteAsync(CancellationToken ct)
@@ -227,8 +287,7 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
 
             _failed = false;
             _failureReason = null;
-            if (!string.IsNullOrWhiteSpace(winMethod))
-                _probeStats.Record(SiteIds.Bilibili, winMethod!, true);
+            CountSuccess(winMethod);
         }
         DescriptorsReady?.Invoke(this, [d]);
         return Task.CompletedTask;
@@ -240,6 +299,13 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
     {
         winningMethod = null;
         if (_pageUrl is null) return null;
+        if (NetworkPairLeads())
+        {
+            var network = BuildFromNetwork(out winningMethod);
+            if (network is not null)
+                return network;
+        }
+
         if (_formats.Count > 0)
         {
             var formats = _formats.Select(PreferDurableCdn).ToArray();
@@ -261,7 +327,16 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
             };
         }
 
-        var video = PickBestTrack(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined);
+        return BuildFromNetwork(out winningMethod);
+    }
+
+    private MediaDescriptor? BuildFromNetwork(out string? winningMethod)
+    {
+        winningMethod = null;
+        if (_pageUrl is null) return null;
+        var video = PickBestTrack(t =>
+            t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined &&
+            IsUsableVideoLength(t.ContentLength));
         var audio = PickBestTrack(t => t.Kind == MediaTrackKind.Audio);
         if (video is null && audio is null) return null;
         winningMethod = ProbeMethods.NetworkPlayurl;
@@ -337,7 +412,7 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
                     if (!Uri.TryCreate(item.GetString(), UriKind.Absolute, out var url)) continue;
                     if (!IsBiliHost(url) && !url.AbsoluteUri.Contains("playurl", StringComparison.OrdinalIgnoreCase))
                         continue;
-                    var audio = url.AbsolutePath.Contains("audio", StringComparison.OrdinalIgnoreCase);
+                    var audio = IsAudioTrack(null, url);
                     Upsert(new MediaTrack(audio ? "audio" : "video",
                         audio ? MediaTrackKind.Audio : MediaTrackKind.Video,
                         url, null, "mp4", null, null, _context)
@@ -367,8 +442,62 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
         _tracks.Add(track);
     }
 
+    private bool NetworkLeads()
+    {
+        var ordered = ProbeMethodRanking.Order(_probeStats, SiteIds.Bilibili);
+        return ProbeMethodRanking.Outranks(ordered, ProbeMethods.NetworkPlayurl, ProbeMethods.YtDlp);
+    }
+
+    /// <summary>
+    /// A video-only DASH object such as AV1 <c>100026</c> must not outrank yt-dlp until the
+    /// matching <c>302xx</c> audio object is also in hand.
+    /// </summary>
+    private bool NetworkPairLeads() =>
+        NetworkLeads() && HasUsableNetworkVideo() &&
+        _tracks.Any(t => t.Kind == MediaTrackKind.Audio);
+
+    private static bool IsAudioTrack(string? mimeType, Uri url) =>
+        mimeType?.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) == true ||
+        BilibiliCdnPreference.IsDashAudio(url) ||
+        (url.AbsoluteUri.Contains("audio", StringComparison.OrdinalIgnoreCase) &&
+         url.AbsolutePath.EndsWith(".m4s", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// A Range window of a few hundred KB is not a Bilibili title. Only a known object
+    /// at least <see cref="MediaResourceSizeFilter.MinProgressiveVideoBytes"/> may outrank yt-dlp.
+    /// </summary>
+    private bool HasUsableNetworkVideo() =>
+        _tracks.Any(t =>
+            t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined &&
+            IsUsableVideoLength(t.ContentLength));
+
+    /// <summary>Unknown length may be a full playurl object. A known sub-512KB length is a Range crumb.</summary>
+    private static bool IsUsableVideoLength(long? length) =>
+        length is null or >= MediaResourceSizeFilter.MinProgressiveVideoBytes;
+
+    private static long? ResolveObjectLength(NormalizedNetworkEvent e)
+    {
+        var range = e.ResponseHeaders.FirstOrDefault(h =>
+            h.Key.Equals("Content-Range", StringComparison.OrdinalIgnoreCase)).Value;
+        if (ContentRangeHeaderValue.TryParse(range, out var parsed) && parsed.Length is > 0)
+            return parsed.Length.Value;
+        return e.ContentLength is > 0 ? e.ContentLength : null;
+    }
+
+    private void CountSuccess(string? method)
+    {
+        if (_successCounted || string.IsNullOrWhiteSpace(method))
+            return;
+        _successCounted = true;
+        _probeStats.RecordTimed(SiteIds.Bilibili, method, true, System.Diagnostics.Stopwatch.GetElapsedTime(_probeStarted));
+    }
+
     private void ClearUnlocked()
     {
+        _lifetime.Cancel();
+        _lifetime.Dispose();
+        _lifetime = new();
+        _probeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
         _sessionId = Guid.Empty;
         _pageUrl = null;
         _contentId = null;
@@ -380,6 +509,7 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
         _failed = false;
         _failureReason = null;
         _externalAttempted = false;
+        _successCounted = false;
     }
 
     private RequestContext Enrich(RequestContext ctx) =>

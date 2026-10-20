@@ -20,8 +20,6 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
     private readonly ILogger<YouTubeYtDlpExtractor> _logger;
     private readonly IProbeMethodStats _probeStats;
     private bool? _available;
-    /// <summary>null = unknown; false = last YouTube win did not use browser cookies.</summary>
-    private bool? _lastWinUsedCookies;
 
     public YouTubeYtDlpExtractor(
         IOptions<AppOptions> options,
@@ -106,46 +104,26 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                 ProbeMethods.YouTubeExtractorArgs(ProbeMethods.YtDlpDefault),
                 ProbeMethods.YouTubeExtractorArgs(ProbeMethods.YtDlpWebEmbedded)
             ];
-            var clientAttempts = _probeStats.OrderBySuccessRate(
+            var rankedClients = _probeStats.OrderBySuccessCount(
                 SiteIds.YouTube,
                 clientAttemptsDefault,
-                ProbeMethods.YouTubeClientMethod).ToList();
-            // Recent successful probes are ytdlp.default. Pin that method (or the last win)
-            // to the front; other clients still run if it fails.
-            var winning = _probeStats.LastWinningMethod(SiteIds.YouTube);
-            if (!string.IsNullOrWhiteSpace(winning))
-            {
-                var winIndex = clientAttempts.FindIndex(args =>
-                    string.Equals(ProbeMethods.YouTubeClientMethod(args), winning, StringComparison.Ordinal));
-                if (winIndex > 0)
-                {
-                    var winner = clientAttempts[winIndex];
-                    clientAttempts.RemoveAt(winIndex);
-                    clientAttempts.Insert(0, winner);
-                }
-            }
-
-            // Browser-cookie use is opt-in. When it is enabled, retry YouTube without
-            // the captured session too because stale sessions can prevent extraction.
-            // Recent wins landed on the cookieless default pass, so try that slot first
-            // when the last recorded win did not need cookies. The other slot still runs.
-            var preferCookielessFirst = cookieFile is not null &&
-                _lastWinUsedCookies != true &&
-                string.Equals(winning ?? ProbeMethods.YtDlpDefault, ProbeMethods.YtDlpDefault, StringComparison.Ordinal);
-            string?[] cookieAttempts = cookieFile is null || siteId is not SiteIds.YouTube
-                ? [cookieFile]
-                : preferCookielessFirst
-                    ? [null, cookieFile]
-                    : [cookieFile, null];
+                ProbeMethods.YouTubeClientMethod);
+            var clientAttempts = (rankedClients is { Count: > 0 } ? rankedClients : clientAttemptsDefault).ToList();
+            // Session conditions do not override the success-rate order of methods.
+            string?[] cookieAttempts = cookieFile is null ? [null] : [cookieFile, null];
 
             try
             {
                 string? authenticatedError = null;
-                foreach (var cookies in cookieAttempts)
+                foreach (var extractorArgs in clientAttempts)
                 {
-                    foreach (var extractorArgs in clientAttempts)
+                    ct.ThrowIfCancellationRequested();
+                    var method = ProbeMethods.YouTubeClientMethod(extractorArgs);
+                    _probeStats.ReportMethod(SiteIds.YouTube, method);
+                    var attemptStarted = Stopwatch.GetTimestamp();
+                    foreach (var cookies in cookieAttempts)
                     {
-                        var method = ProbeMethods.YouTubeClientMethod(extractorArgs);
+                        ct.ThrowIfCancellationRequested();
                         var videos = await RunYtDlpOnceAsync(
                             path,
                             resolveUrl,
@@ -155,32 +133,30 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                             cookies,
                             extractorArgs,
                             ct);
-                        if (videos.Count > 0)
+                        ct.ThrowIfCancellationRequested();
+                        if (videos.Any(v => v.IsLive || DetectionReadiness.IsUsable(v)))
                         {
+                            _probeStats.RecordTimed(SiteIds.YouTube, method, true, Stopwatch.GetElapsedTime(attemptStarted));
                             LastError = null;
                             LastFailureIsHumanVerification = false;
                             LastProbeMethod = method;
-                            _lastWinUsedCookies = cookies is not null;
-                            _probeStats.Record(SiteIds.YouTube, method, true);
                             return videos;
                         }
-
-                        _probeStats.Record(SiteIds.YouTube, method, false);
 
                         if (LastFailureIsHumanVerification)
                         {
                             _logger.LogInformation(
-                                "yt-dlp stopped client polling after human-verification for {SiteId}",
+                                "yt-dlp session requires human verification for {SiteId}; trying the next session condition",
                                 siteId);
-                            goto Done;
                         }
 
                         if (cookies is not null && !string.IsNullOrWhiteSpace(LastError))
                             authenticatedError ??= LastError;
                     }
+                    ct.ThrowIfCancellationRequested();
+                    _probeStats.RecordTimed(SiteIds.YouTube, method, false, Stopwatch.GetElapsedTime(attemptStarted));
                 }
 
-            Done:
                 LastError = authenticatedError ?? LastError;
                 return [];
             }
@@ -371,6 +347,7 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
         {
             try { process.Kill(entireProcessTree: true); } catch { /* ignore */ }
             try { await Task.WhenAny(errorTask, Task.Delay(200)); } catch { /* ignore */ }
+            ct.ThrowIfCancellationRequested();
             LastError = $"yt-dlp 单次解析超时（{attemptTimeoutSeconds} 秒）";
             return [];
         }
@@ -457,6 +434,10 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
         var title = root.TryGetProperty("title", out var t) ? t.GetString() ?? "Video" : "Video";
         var id = root.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
         var metadata = ExtractMetadata(root);
+        if (IsLiveMetadata(root))
+            return [new DetectedVideo(DeterministicGuid($"yt-dlp:{siteId}:{id ?? pageUrl.AbsoluteUri}"),
+                siteId, id, title, pageUrl, MediaFamily.Hls, [], false, ProbeSource.SiteAdapter,
+                "YouTube live — skip download", metadata) { IsLive = true }];
         var durationSec = JsonNumber.TryDoubleProp(root, "duration", out var dur) && dur > 0
             ? dur
             : (double?)null;
@@ -641,6 +622,11 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
             }
         ];
     }
+
+    internal static bool IsLiveMetadata(JsonElement root) =>
+        (root.TryGetProperty("is_live", out var live) && live.ValueKind == JsonValueKind.True) ||
+        (root.TryGetProperty("live_status", out var status) && status.ValueKind == JsonValueKind.String &&
+         status.GetString() is "is_live" or "is_upcoming");
 
     private static IReadOnlyDictionary<string, string> ExtractMetadata(JsonElement root)
     {

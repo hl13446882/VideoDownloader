@@ -43,6 +43,9 @@ public sealed class SqliteLibraryKindCatalog : ILibraryKindCatalog
             CREATE INDEX IF NOT EXISTS ix_library_kinds_sort ON library_kinds(sort_order, label);
             """);
 
+        await TryAddColumnAsync(conn, "is_private", "INTEGER NOT NULL DEFAULT 0");
+        await TryAddColumnAsync(conn, "password_hash", "TEXT NULL");
+
         var now = DateTimeOffset.UtcNow.ToString("O");
         for (var i = 0; i < LibraryVideoKinds.Seed.Count; i++)
         {
@@ -61,6 +64,18 @@ public sealed class SqliteLibraryKindCatalog : ILibraryKindCatalog
         }
 
         await ReloadCacheAsync(conn);
+    }
+
+    private static async Task TryAddColumnAsync(SqliteConnection conn, string name, string definition)
+    {
+        try
+        {
+            await conn.ExecuteAsync($"ALTER TABLE library_kinds ADD COLUMN {name} {definition}");
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+        {
+            // duplicate column
+        }
     }
 
     public IReadOnlyList<LibraryKindEntry> GetAll()
@@ -109,13 +124,15 @@ public sealed class SqliteLibraryKindCatalog : ILibraryKindCatalog
             return _cache.Any(k => string.Equals(k.Value, v, StringComparison.Ordinal));
     }
 
-    public async Task<LibraryKindEntry> AddAsync(string label, CancellationToken ct = default)
+    public async Task<LibraryKindEntry> AddAsync(string label, bool isPrivate = false, string? password = null, CancellationToken ct = default)
     {
         var trimmed = (label ?? string.Empty).Trim();
         if (trimmed.Length is < 1 or > 32)
             throw new InvalidOperationException("分类名称长度须为 1–32 个字符。");
         if (string.Equals(trimmed, LibraryVideoKinds.UnspecifiedLabel, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("不能使用保留名称「未分类」。");
+        if (isPrivate && string.IsNullOrWhiteSpace(password))
+            throw new InvalidOperationException("隐私分类必须设置密码。");
 
         lock (_gate)
         {
@@ -131,19 +148,22 @@ public sealed class SqliteLibraryKindCatalog : ILibraryKindCatalog
                 sortOrder = Math.Max(1000, _cache.Max(k => k.SortOrder) + 1);
         }
 
-        var entry = new LibraryKindEntry(value, trimmed, sortOrder, IsSeed: false);
+        var passwordHash = isPrivate ? HashPassword(password!) : null;
+        var entry = new LibraryKindEntry(value, trimmed, sortOrder, IsSeed: false, IsPrivate: isPrivate);
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync(ct);
         try
         {
             await conn.ExecuteAsync("""
-                INSERT INTO library_kinds(value, label, sort_order, is_seed, created_at)
-                VALUES (@Value, @Label, @SortOrder, 0, @CreatedAt);
+                INSERT INTO library_kinds(value, label, sort_order, is_seed, is_private, password_hash, created_at)
+                VALUES (@Value, @Label, @SortOrder, 0, @IsPrivate, @PasswordHash, @CreatedAt);
                 """, new
             {
                 entry.Value,
                 entry.Label,
                 entry.SortOrder,
+                IsPrivate = isPrivate ? 1 : 0,
+                PasswordHash = passwordHash,
                 CreatedAt = DateTimeOffset.UtcNow.ToString("O")
             });
         }
@@ -154,6 +174,57 @@ public sealed class SqliteLibraryKindCatalog : ILibraryKindCatalog
 
         await ReloadCacheAsync(conn);
         return entry;
+    }
+
+    public async Task<bool> VerifyPasswordAsync(string kindValue, string password, CancellationToken ct = default)
+    {
+        var normalized = Normalize(kindValue);
+        if (normalized == LibraryVideoKinds.Unspecified)
+            return false;
+
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        var row = await conn.QueryFirstOrDefaultAsync<KindRow>(
+            "SELECT is_private, password_hash FROM library_kinds WHERE value = @Value",
+            new { Value = normalized });
+
+        if (row is null || row.is_private == 0)
+            return false;
+
+        var hash = HashPassword(password);
+        return string.Equals(row.password_hash, hash, StringComparison.Ordinal);
+    }
+
+    public async Task RemovePrivacyAsync(string kindValue, string password, CancellationToken ct = default)
+    {
+        var normalized = Normalize(kindValue);
+        if (normalized == LibraryVideoKinds.Unspecified)
+            throw new InvalidOperationException("分类不存在。");
+
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        var row = await conn.QueryFirstOrDefaultAsync<KindRow>(
+            "SELECT is_private, password_hash FROM library_kinds WHERE value = @Value",
+            new { Value = normalized });
+
+        if (row is null || row.is_private == 0)
+            return;
+
+        var hash = HashPassword(password);
+        if (!string.Equals(row.password_hash, hash, StringComparison.Ordinal))
+            throw new InvalidOperationException("密码错误。");
+
+        await conn.ExecuteAsync(
+            "UPDATE library_kinds SET is_private = 0, password_hash = NULL WHERE value = @Value",
+            new { Value = normalized });
+
+        await ReloadCacheAsync(conn);
+    }
+
+    private static string HashPassword(string password)
+    {
+        var bytes = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(password));
+        return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 
     private string AllocateValue(string label)
@@ -189,7 +260,7 @@ public sealed class SqliteLibraryKindCatalog : ILibraryKindCatalog
     private async Task ReloadCacheAsync(SqliteConnection conn)
     {
         var rows = (await conn.QueryAsync<KindRow>("""
-            SELECT value, label, sort_order, is_seed
+            SELECT value, label, sort_order, is_seed, is_private
             FROM library_kinds
             ORDER BY sort_order ASC, label COLLATE NOCASE ASC
             """)).ToList();
@@ -198,7 +269,8 @@ public sealed class SqliteLibraryKindCatalog : ILibraryKindCatalog
             r.value,
             r.label,
             r.sort_order,
-            r.is_seed != 0)).ToList();
+            r.is_seed != 0,
+            r.is_private != 0)).ToList();
 
         lock (_gate)
             _cache = list;
@@ -210,5 +282,7 @@ public sealed class SqliteLibraryKindCatalog : ILibraryKindCatalog
         public string label { get; set; } = string.Empty;
         public int sort_order { get; set; }
         public int is_seed { get; set; }
+        public int is_private { get; set; }
+        public string? password_hash { get; set; }
     }
 }

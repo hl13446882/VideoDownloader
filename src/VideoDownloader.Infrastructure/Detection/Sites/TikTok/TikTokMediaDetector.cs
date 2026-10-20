@@ -21,6 +21,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
     private readonly ILogger<TikTokMediaDetector> _logger;
     private readonly TikTokYtDlpExtractor _ytdlp;
     private readonly IProbeMethodStats _probeStats;
+    private long _probeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
     private readonly object _gate = new();
     private Guid _sessionId;
     private Uri? _pageUrl;
@@ -40,6 +41,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
     private string? _failureReason;
     private bool _externalAttempted;
     private bool _externalFinished;
+    private bool _externalFailureCounted;
+    private bool _successCounted;
     private Task? _resolveTask;
     private CancellationTokenSource _lifetime = new();
 
@@ -92,6 +95,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         catch (ObjectDisposedException) { }
         _lifetime.Dispose();
         _lifetime = new CancellationTokenSource();
+        _probeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
         _sessionId = Guid.Empty;
         _pageUrl = null;
         _contentId = null;
@@ -110,7 +114,17 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         _failureReason = null;
         _externalAttempted = false;
         _externalFinished = false;
+        _externalFailureCounted = false;
         _resolveTask = null;
+        _successCounted = false;
+    }
+
+    private void CountSuccess(string? method)
+    {
+        if (_successCounted || string.IsNullOrWhiteSpace(method))
+            return;
+        _successCounted = true;
+        _probeStats.RecordTimed(SiteIds.TikTok, method, true, System.Diagnostics.Stopwatch.GetElapsedTime(_probeStarted));
     }
 
     public Task ProcessNetworkAsync(NormalizedNetworkEvent e, CancellationToken ct)
@@ -179,15 +193,19 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
 
         if (emit is not null)
         {
-            if (!string.IsNullOrWhiteSpace(winMethod))
-                _probeStats.Record(SiteIds.TikTok, winMethod, true);
+            CountSuccess(winMethod);
             DescriptorsReady?.Invoke(this, [emit]);
         }
         return Task.CompletedTask;
     }
 
+    public Task ProcessPageObservationAsync(
+        Uri pageUrl, string? pageTitle, string? pageScriptJson, RequestContext context, CancellationToken ct) =>
+        ProcessPageObservationAsync(pageUrl, pageTitle, pageScriptJson, context, ct, runExternal: true);
+
     public async Task ProcessPageObservationAsync(
-        Uri pageUrl, string? pageTitle, string? pageScriptJson, RequestContext context, CancellationToken ct)
+        Uri pageUrl, string? pageTitle, string? pageScriptJson, RequestContext context, CancellationToken ct,
+        bool runExternal)
     {
         string? contentId;
         RequestContext enriched;
@@ -219,7 +237,9 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 _contentId = id;
                 _externalAttempted = false;
                 _externalFinished = false;
+                _externalFailureCounted = false;
                 _resolveTask = null;
+                _successCounted = false;
             }
             _contentId ??= id;
             contentId = _contentId;
@@ -234,22 +254,28 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
 
         if (early is not null)
         {
-            if (!string.IsNullOrWhiteSpace(winMethod))
-                _probeStats.Record(SiteIds.TikTok, winMethod, true);
+            CountSuccess(winMethod);
             DescriptorsReady?.Invoke(this, [early]);
         }
 
-        if (string.IsNullOrWhiteSpace(contentId))
+        if (!runExternal || string.IsNullOrWhiteSpace(contentId))
             return;
 
         Task? resolve;
         lock (_gate)
         {
             if (!_ytdlp.IsAvailable)
+            {
+                if (HasDurableObservedVideoUnlocked())
+                    _probeStats.ReportMethod(SiteIds.TikTok, ProbeMethods.WebData);
                 return;
-            // Only skip yt-dlp when the active player's hydration already named a durable CDN.
+            }
+            // Skip yt-dlp only when an already-held passive method outranks it.
             if (HasDurableObservedVideoUnlocked())
+            {
+                _probeStats.ReportMethod(SiteIds.TikTok, ProbeMethods.WebData);
                 return;
+            }
             // One yt-dlp pass per work. Observation tracks are allowed alongside, but do not relaunch.
             if (_formats.Count > 0)
                 return;
@@ -261,18 +287,23 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
             {
                 _externalAttempted = true;
                 _externalFinished = false;
+                _probeStats.ReportMethod(SiteIds.TikTok, ProbeMethods.YtDlp);
                 var token = _lifetime.Token;
-                resolve = ResolveExternalAsync(contentId, enriched, token);
+                resolve = ResolveExternalAsync(contentId, enriched, token, ct);
                 _resolveTask = resolve;
             }
         }
 
         try { await resolve.WaitAsync(ct); }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
     }
 
-    private async Task ResolveExternalAsync(string contentId, RequestContext enriched, CancellationToken ct)
+    private async Task ResolveExternalAsync(string contentId, RequestContext enriched, CancellationToken lifetime, CancellationToken caller)
     {
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime, caller);
+        var ct = cancellation.Token;
+        var session = _sessionId;
+        var attemptStarted = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
             // Prefer /@tiktok/video/{id}: embed/v2 is often "Unsupported URL" on current yt-dlp.
@@ -294,6 +325,14 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
             string? winMethod = null;
             lock (_gate)
             {
+                ct.ThrowIfCancellationRequested();
+                if (session != _sessionId || contentId != _contentId) return;
+                if (videos.Count == 0)
+                {
+                    _externalFailureCounted = true;
+                    _probeStats.RecordTimed(SiteIds.TikTok, ProbeMethods.YtDlp, false,
+                        System.Diagnostics.Stopwatch.GetElapsedTime(attemptStarted));
+                }
                 foreach (var v in videos.Where(v =>
                              string.IsNullOrWhiteSpace(_contentId) ||
                              string.Equals(v.SiteContentId, _contentId, StringComparison.OrdinalIgnoreCase) ||
@@ -334,8 +373,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                     _failed = false;
                     _failureReason = null;
                     emit = Build(out winMethod);
-                    if (emit is not null && !string.IsNullOrWhiteSpace(winMethod))
-                        _probeStats.Record(SiteIds.TikTok, winMethod!, true);
+                    if (emit is not null)
+                        CountSuccess(winMethod);
                 }
             }
 
@@ -353,7 +392,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
         finally
         {
             lock (_gate)
-                _externalFinished = true;
+                if (session == _sessionId) _externalFinished = true;
         }
     }
 
@@ -379,15 +418,17 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 _failed = true;
                 _failureReason = _album ? "tiktok_album_no_images" : "tiktok_no_media";
                 _logger.LogWarning("TikTokMediaDetector Failed reason={Reason} (no Generic fallback)", _failureReason);
-                if (_externalAttempted)
+                if (_externalAttempted && !_externalFailureCounted)
+                {
+                    _externalFailureCounted = true;
                     _probeStats.Record(SiteIds.TikTok, ProbeMethods.YtDlp, false);
+                }
                 return;
             }
 
             _failed = false;
             _failureReason = null;
-            if (!string.IsNullOrWhiteSpace(winMethod))
-                _probeStats.Record(SiteIds.TikTok, winMethod!, true);
+            CountSuccess(winMethod);
         }
         DescriptorsReady?.Invoke(this, [d]);
     }
@@ -414,9 +455,12 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                 .OrderByDescending(v => ScoreVariant(v))
                 .FirstOrDefault();
             var network = Best(_videos);
+            var networkMethod = string.IsNullOrWhiteSpace(network?.ProbeMethod)
+                ? ProbeMethods.NetworkMedia
+                : network!.ProbeMethod;
+            var ordered = ProbeMethodRanking.Order(_probeStats, SiteIds.TikTok);
             if (best is not null &&
-                (network is null || !TikTokCdn.IsDurablePlayHost(network.SourceUrl) ||
-                 TikTokCdn.PlayHostScore(best.SourceUrl) >= TikTokCdn.PlayHostScore(network.SourceUrl)))
+                (network is null || !ProbeMethodRanking.Outranks(ordered, networkMethod, ProbeMethods.YtDlp)))
             {
                 winningMethod = ProbeMethods.YtDlp;
                 return new MediaDescriptor(SiteIds.TikTok, _pageUrl, _contentId, MediaContentType.Video,

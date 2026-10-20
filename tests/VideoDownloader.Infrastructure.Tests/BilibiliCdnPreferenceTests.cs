@@ -5,6 +5,7 @@ using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Infrastructure.Configuration;
+using VideoDownloader.Infrastructure.Detection;
 using VideoDownloader.Infrastructure.Detection.Sites.Bilibili;
 using VideoDownloader.Infrastructure.Download;
 
@@ -485,6 +486,111 @@ public class BilibiliCdnPreferenceTests
             RecoveryPageUrl = new Uri("https://www.bilibili.com/video/BV1y6Y76yE4Q/")
         };
         Assert.Contains(videos[0].Variants, v => BilibiliCdnPreference.SameDashObjects(previous, v));
+    }
+
+    [Fact]
+    public async Task Detector_Does_Not_Seal_Range_Window_When_Network_Leads()
+    {
+        var ledger = Path.Combine(Path.GetTempPath(), "vd-bili-rank-" + Guid.NewGuid().ToString("N") + ".json");
+        try
+        {
+            var stats = new ProbeMethodStatsStore(NullLogger.Instance, ledger);
+            stats.Record(SiteIds.Bilibili, ProbeMethods.NetworkPlayurl, true);
+            stats.Record(SiteIds.Bilibili, ProbeMethods.NetworkPlayurl, true);
+            var detector = new BilibiliMediaDetector(
+                NullLogger<BilibiliMediaDetector>.Instance,
+                new BilibiliYtDlpExtractor(
+                    Options.Create(new AppOptions { ExternalResolvers = new() { Enabled = false } }),
+                    NullLogger<BilibiliYtDlpExtractor>.Instance),
+                stats);
+            MediaDescriptor? last = null;
+            detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+            var page = new Uri("https://www.bilibili.com/video/BV1xx411c7mD");
+            detector.BeginSession(page, Guid.NewGuid());
+            await detector.ProcessNetworkAsync(
+                Evt(page, "https://upos-sz-mirrorbos.bilivideo.com/upgcxcode/a/b/1/1-1-30032.m4s", 269 * 1024, observed: true),
+                CancellationToken.None);
+            await detector.ProcessPageObservationAsync(page, "标题", null, RequestContext.CreateEmpty(), CancellationToken.None);
+            await detector.CompleteAsync(CancellationToken.None);
+            Assert.Null(last);
+            Assert.True(detector.Failed);
+        }
+        finally
+        {
+            if (File.Exists(ledger))
+                File.Delete(ledger);
+        }
+    }
+
+    [Fact]
+    public void Dash_Audio_Qn_Is_302xx_Not_Av1_Or_Avc()
+    {
+        Assert.True(BilibiliCdnPreference.IsDashAudio(new Uri("https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/44/07/41573220744/41573220744-1-30280.m4s")));
+        Assert.True(BilibiliCdnPreference.IsDashAudio(new Uri("https://upos-sz-mirrorbos.bilivideo.com/a/41573220744-1-30216.m4s?deadline=1")));
+        Assert.False(BilibiliCdnPreference.IsDashAudio(new Uri("https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/44/07/41573220744/41573220744-1-100026.m4s")));
+        Assert.False(BilibiliCdnPreference.IsDashAudio(new Uri("https://upos-sz-mirrorbos.bilivideo.com/a/40909144282_t6-1-30080.m4s")));
+    }
+
+    [Fact]
+    public async Task Detector_Pairs_Av1_Video_With_30280_When_Mime_Is_Video()
+    {
+        var ledger = Path.Combine(Path.GetTempPath(), "vd-bili-audio-" + Guid.NewGuid().ToString("N") + ".json");
+        try
+        {
+            var stats = new ProbeMethodStatsStore(NullLogger.Instance, ledger);
+            stats.Record(SiteIds.Bilibili, ProbeMethods.NetworkPlayurl, true);
+            stats.Record(SiteIds.Bilibili, ProbeMethods.NetworkPlayurl, true);
+            var detector = new BilibiliMediaDetector(
+                NullLogger<BilibiliMediaDetector>.Instance,
+                new BilibiliYtDlpExtractor(
+                    Options.Create(new AppOptions { ExternalResolvers = new() { Enabled = false } }),
+                    NullLogger<BilibiliYtDlpExtractor>.Instance),
+                stats);
+            MediaDescriptor? last = null;
+            detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+            var page = new Uri("https://www.bilibili.com/video/BV1PXti6DESY");
+            detector.BeginSession(page, Guid.NewGuid());
+            await detector.ProcessNetworkAsync(
+                Evt(page, "https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/44/07/41573220744/41573220744-1-100026.m4s", 229_670_438, observed: true),
+                CancellationToken.None);
+            await detector.ProcessNetworkAsync(
+                Evt(page, "https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/44/07/41573220744/41573220744-1-30280.m4s", 8_192_000, observed: true),
+                CancellationToken.None);
+            await detector.CompleteAsync(CancellationToken.None);
+            Assert.NotNull(last?.Video);
+            Assert.NotNull(last!.Audio);
+            Assert.Contains("100026.m4s", last.Video!.SourceUrl.AbsolutePath);
+            Assert.Contains("30280.m4s", last.Audio!.SourceUrl.AbsolutePath);
+            Assert.Equal(MediaTrackKind.Audio, last.Audio.Kind);
+        }
+        finally
+        {
+            if (File.Exists(ledger))
+                File.Delete(ledger);
+        }
+    }
+
+    [Fact]
+    public async Task Detector_Uses_ContentRange_Total_Not_Window()
+    {
+        var detector = new BilibiliMediaDetector(
+            NullLogger<BilibiliMediaDetector>.Instance,
+            new BilibiliYtDlpExtractor(
+                Options.Create(new AppOptions { ExternalResolvers = new() { Enabled = false } }),
+                NullLogger<BilibiliYtDlpExtractor>.Instance),
+            Substitute.For<IProbeMethodStats>());
+        MediaDescriptor? last = null;
+        detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
+        var page = new Uri("https://www.bilibili.com/video/BV1xx411c7mD");
+        detector.BeginSession(page, Guid.NewGuid());
+        var evt = Evt(page, "https://upos-sz-mirrorbos.bilivideo.com/upgcxcode/a/b/1/1-1-30080.m4s", 269 * 1024, observed: true) with
+        {
+            ResponseHeaders = new Dictionary<string, string> { ["Content-Range"] = "bytes 0-275455/18000000" }
+        };
+        await detector.ProcessNetworkAsync(evt, CancellationToken.None);
+        await detector.CompleteAsync(CancellationToken.None);
+        Assert.NotNull(last);
+        Assert.Equal(18_000_000, last!.Video!.ContentLength);
     }
 
     private static NormalizedNetworkEvent Evt(Uri page, string mediaUrl, long length, bool observed) =>

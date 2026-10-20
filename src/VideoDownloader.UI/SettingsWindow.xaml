@@ -29,6 +29,7 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
                     <Grid.ColumnDefinitions>
@@ -104,6 +105,9 @@
 
                     <TextBlock Grid.Row="10" Grid.Column="0" Text="{Binding L.SettingsCopyright}" VerticalAlignment="Center" Margin="0,0,8,8"/>
                     <TextBlock Grid.Row="10" Grid.Column="1" Text="刘志东" VerticalAlignment="Center" Margin="0,0,0,8"/>
+
+                    <TextBlock Grid.Row="11" Grid.Column="0" Text="{Binding L.SettingsMachineId}" VerticalAlignment="Center" Margin="0,0,8,8"/>
+                    <TextBlock Grid.Row="11" Grid.Column="1" Text="{Binding MachineIdText}" VerticalAlignment="Center" Margin="0,0,0,8" TextWrapping="Wrap"/>
                 </Grid>
             </TabItem>
 
