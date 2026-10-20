@@ -5,3 +5,6 @@
 **/bin/
 **/obj/
 /artifacts
+
+/userdata/
+/userdata.migrating-*/

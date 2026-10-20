@@ -55,7 +55,7 @@ dotnet run --project src/VideoDownloader.UI
 
 ## 设置
 
-主界面「设置」按钮，或编辑 `%LOCALAPPDATA%\VideoDownloader\settings.json`：
+主界面「设置」按钮，或编辑 `<安装根目录>\userdata\settings.json`：
 
 - 保存目录、最大并发、重试次数
 - FFmpeg 路径
@@ -65,10 +65,10 @@ dotnet run --project src/VideoDownloader.UI
 
 ## 数据目录
 
-- 浏览器数据：`%LOCALAPPDATA%\VideoDownloader\WebView2Data`
-- 用户设置：`%LOCALAPPDATA%\VideoDownloader\settings.json`
-- 下载数据库：`%LOCALAPPDATA%\VideoDownloader\data\downloads.db`
-- 日志：`%LOCALAPPDATA%\VideoDownloader\logs\`
+- 浏览器数据：`<安装根目录>\userdata\browser`
+- 用户设置：`<安装根目录>\userdata\settings.json`
+- 下载数据库：`<安装根目录>\userdata\data\downloads.db`
+- 日志：`<安装根目录>\userdata\logs\`
 
 Cookie/Authorization 等敏感字段在 SQLite 中以 DPAPI 加密存储；日志输出经脱敏处理。
 
@@ -93,3 +93,5 @@ TestMediaServer 覆盖 T01–T20 场景（见规范第 15 章）。
 Beta 版本仅供测试。第三方组件（WebView2、FFmpeg、Serilog 等）遵循各自许可证。
 
 详细规范见 `DOCS/VideoDownloader_完整开发设计与验收规范.docx`。
+
+用户数据统一保存在启动器旁的 `userdata/`，更新不覆盖此目录。首次启动会在客户端退出后复制旧 AppData 数据并校验，原数据保留用于回退。安装目录必须可写；视频文件继续保存在用户设置的下载目录。

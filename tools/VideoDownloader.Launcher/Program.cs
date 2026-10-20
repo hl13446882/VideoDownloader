@@ -218,22 +218,24 @@ internal static class Program
     private static string PendingUpdatePath()
     {
         return Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VideoDownloader",
+            Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "userdata"),
             "pending-update.json");
     }
 
     private static string UpdateErrorLogPath()
     {
         return Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VideoDownloader",
+            Directory.Exists(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "userdata"))
+                ? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "userdata")
+                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VideoDownloader"),
             "update-error.log");
     }
 
     private static bool TryApplyPendingUpdate(string launcherDir, LoadingForm splash)
     {
         var pendingPath = PendingUpdatePath();
+        if (!Directory.Exists(Path.Combine(launcherDir, "userdata")))
+            pendingPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VideoDownloader", "pending-update.json");
         if (!File.Exists(pendingPath))
             return true;
 
@@ -265,8 +267,7 @@ internal static class Program
             Thread.Sleep(400);
 
             var staging = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "VideoDownloader",
+                Path.GetDirectoryName(pendingPath),
                 "updates",
                 "staging-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(staging);
@@ -322,7 +323,8 @@ internal static class Program
             {
                 foreach (var relative in pending.Deletes)
                 {
-                    if (string.IsNullOrWhiteSpace(relative) || relative.IndexOf("..", StringComparison.Ordinal) >= 0)
+                    if (string.IsNullOrWhiteSpace(relative) || relative.IndexOf("..", StringComparison.Ordinal) >= 0 ||
+                        Path.IsPathRooted(relative) || IsUserDataPath(relative))
                         continue;
                     var target = Path.Combine(installRoot, relative.Replace('/', Path.DirectorySeparatorChar));
                     DeleteFileWithRetry(target);
@@ -400,6 +402,12 @@ internal static class Program
         }
     }
 
+    private static bool IsUserDataPath(string relative)
+    {
+        var first = relative.Replace('\\', '/').TrimStart('/').Split('/')[0].TrimEnd(' ', '.');
+        return first.Equals("userdata", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static void ExtractZipSafe(string zipPath, string staging)
     {
         using (var archive = ZipFile.OpenRead(zipPath))
@@ -409,7 +417,7 @@ internal static class Program
                 if (string.IsNullOrEmpty(entry.Name) && entry.FullName.EndsWith("/"))
                     continue;
                 var relative = entry.FullName.Replace('\\', '/').TrimStart('/');
-                if (relative.Contains("..") || Path.IsPathRooted(relative))
+                if (relative.Contains("..") || Path.IsPathRooted(relative) || IsUserDataPath(relative))
                     throw new InvalidDataException("Unsafe zip entry: " + entry.FullName);
                 var dest = Path.Combine(staging, relative.Replace('/', Path.DirectorySeparatorChar));
                 Directory.CreateDirectory(Path.GetDirectoryName(dest));

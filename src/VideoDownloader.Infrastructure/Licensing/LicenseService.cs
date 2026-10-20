@@ -163,7 +163,7 @@ public sealed class LicenseService
 
     private static string CachePath()
     {
-        var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VideoDownloader");
+        var folder = Path.Combine(UserDataPaths.Root);
         Directory.CreateDirectory(folder);
         return Path.Combine(folder, CacheFileName);
     }

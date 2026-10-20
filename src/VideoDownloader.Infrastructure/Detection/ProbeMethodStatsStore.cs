@@ -1,3 +1,4 @@
+using VideoDownloader.Infrastructure.Configuration;
 using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
@@ -43,8 +44,7 @@ public sealed class ProbeMethodStatsStore : IProbeMethodStats
 
     public static string DefaultLedgerPath() =>
         Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VideoDownloader",
+            UserDataPaths.Root,
             "probe-method-stats.json");
 
     public void Record(string detectorId, string method, bool success) =>
@@ -239,7 +239,7 @@ public sealed class ProbeMethodStatsStore : IProbeMethodStats
         sb.AppendLine();
         sb.AppendLine($"- 最近一轮：`{runId}`");
         sb.AppendLine($"- 更新时间：{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}");
-        sb.AppendLine($"- 机器账本：`%LOCALAPPDATA%\\\\VideoDownloader\\\\probe-method-stats.json`（键 = detectorId + method）");
+        sb.AppendLine($"- 机器账本：`userdata\\probe-method-stats.json`（键 = detectorId + method）");
         sb.AppendLine();
 
         var detectorIds = ProbeDetectors.All
@@ -468,8 +468,7 @@ public sealed class ProbeMethodStatsStore : IProbeMethodStats
             dir = Path.GetDirectoryName(dir);
         }
         return Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VideoDownloader",
+            UserDataPaths.Root,
             "probe-method-stats.md");
     }
 

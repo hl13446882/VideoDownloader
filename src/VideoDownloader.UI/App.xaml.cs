@@ -86,6 +86,7 @@ public partial class App : Application
 
         try
         {
+            VideoDownloader.Infrastructure.Configuration.UserDataPaths.EnsureMigrated();
             _services = AppServiceComposition.Build();
             await _services.InitializeInfrastructureAsync();
 

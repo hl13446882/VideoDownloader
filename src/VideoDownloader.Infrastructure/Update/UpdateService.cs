@@ -38,20 +38,17 @@ public sealed class UpdateService
 
     public static string UpdatesRoot =>
         Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VideoDownloader",
+            UserDataPaths.Root,
             "updates");
 
     public static string PendingPath =>
         Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VideoDownloader",
+            UserDataPaths.Root,
             "pending-update.json");
 
     public static string HostedFilesCachePath =>
         Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VideoDownloader",
+            UserDataPaths.Root,
             "update-hosted-files.json");
 
     public static string InstallRoot => PathExpander.ResolveInstallRoot();
@@ -414,7 +411,8 @@ public sealed class UpdateService
         if (string.IsNullOrWhiteSpace(path))
             return null;
         var normalized = path.Replace('\\', '/').Trim().TrimStart('/');
-        if (normalized.Contains("..", StringComparison.Ordinal) ||
+        if (normalized.Split('/')[0].TrimEnd(' ', '.').Equals("userdata", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Contains("..", StringComparison.Ordinal) ||
             Path.IsPathRooted(path) ||
             normalized.StartsWith("~/"))
             return null;

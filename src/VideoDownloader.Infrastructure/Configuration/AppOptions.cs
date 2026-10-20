@@ -111,9 +111,8 @@ public sealed class BrowserOptions
 {
     public string UserDataFolder { get; set; } =
         Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VideoDownloader",
-            "WebView2Data");
+            UserDataPaths.Root,
+            "browser");
 
     // Kept opt-in: normal detection does not need to read browser session cookies.
     public bool CaptureCookies { get; set; } = false;
@@ -130,8 +129,7 @@ public sealed class DatabaseOptions
 
     public static string DefaultPath =>
         System.IO.Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VideoDownloader",
+            UserDataPaths.Root,
             "data",
             "downloads.db");
 }
@@ -144,8 +142,7 @@ public sealed class LoggingOptions
     public string MinimumLevel { get; set; } = "Information";
     public string LogPath { get; set; } =
         Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VideoDownloader",
+            UserDataPaths.Root,
             "logs",
             "app.log");
 }
@@ -220,10 +217,11 @@ public static class PathExpander
     public static string Expand(string path)
     {
         var appDir = ResolveAppDirectory();
-        return path
+        return UserDataPaths.RelocateLegacyPath(path
+            .Replace("%USERDATA%", UserDataPaths.Root, StringComparison.OrdinalIgnoreCase)
             .Replace("%APPDIR%", appDir, StringComparison.OrdinalIgnoreCase)
             .Replace("%USERPROFILE%", Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StringComparison.OrdinalIgnoreCase)
-            .Replace("%LOCALAPPDATA%", Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), StringComparison.OrdinalIgnoreCase);
+            .Replace("%LOCALAPPDATA%", Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>

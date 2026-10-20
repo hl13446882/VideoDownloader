@@ -1,5 +1,5 @@
 #define AppName "Video Downloader"
-#define AppVersion "1.1.40"
+#define AppVersion "1.1.41"
 #define Publisher "VideoDownloader"
 #define PublishDir "..\publish"
 
@@ -8,11 +8,11 @@ AppId={{5B9E9ED5-6D2C-4C57-8C0E-61D1C02BA9A1}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#Publisher}
-DefaultDirName={autopf}\VideoDownloader
+DefaultDirName={localappdata}\Programs\VideoDownloader
 DefaultGroupName=Video Downloader
 DisableProgramGroupPage=yes
 OutputDir=..\publish\installer
-OutputBaseFilename=VideoDownloader-1.1.40-win-x64-setup
+OutputBaseFilename=VideoDownloader-1.1.41-win-x64-setup
 Compression=lzma2
 SolidCompression=yes
 ArchitecturesAllowed=x64
@@ -24,7 +24,7 @@ UninstallDisplayIcon={app}\VideoBrowser.exe
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-Source: "{#PublishDir}\VideoDownload\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\VideoDownload\*"; DestDir: "{app}"; Excludes: "userdata\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\Video Downloader"; Filename: "{app}\VideoBrowser.exe"

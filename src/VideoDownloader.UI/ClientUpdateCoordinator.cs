@@ -312,8 +312,7 @@ internal static class ClientUpdateCoordinator
         try
         {
             var path = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "VideoDownloader",
+                UserDataPaths.Root,
                 "update-error.log");
             if (!File.Exists(path))
                 return;

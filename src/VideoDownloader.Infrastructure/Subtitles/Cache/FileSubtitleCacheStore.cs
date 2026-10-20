@@ -1,3 +1,4 @@
+using VideoDownloader.Infrastructure.Configuration;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -20,8 +21,7 @@ public sealed class FileSubtitleCacheStore : ISubtitleCacheStore
         RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     private readonly string _root = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "VideoDownloader",
+        UserDataPaths.Root,
         "subtitles");
     private readonly SemaphoreSlim _gate = new(1, 1);
 

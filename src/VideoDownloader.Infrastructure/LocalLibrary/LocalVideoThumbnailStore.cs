@@ -1,3 +1,4 @@
+using VideoDownloader.Infrastructure.Configuration;
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using VideoDownloader.Core.Contracts;
@@ -5,7 +6,7 @@ using VideoDownloader.Core.Contracts;
 namespace VideoDownloader.Infrastructure.LocalLibrary;
 
 /// <summary>
-/// Persistent JPEG posters under %LOCALAPPDATA%\VideoDownloader\thumbs\{jobId}.jpg.
+/// Persistent JPEG posters under userdata\thumbs\{jobId}.jpg.
 /// Generate once; reuse forever until the file is deleted.
 /// </summary>
 public sealed class LocalVideoThumbnailStore
@@ -21,8 +22,7 @@ public sealed class LocalVideoThumbnailStore
         _ffmpeg = ffmpeg;
         _logger = logger;
         _root = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VideoDownloader",
+            UserDataPaths.Root,
             "thumbs");
         Directory.CreateDirectory(_root);
     }

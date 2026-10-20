@@ -8,11 +8,7 @@ public sealed class PathExpanderTests
     public void Expand_replaces_localappdata_placeholder()
     {
         var expanded = PathExpander.Expand("%LOCALAPPDATA%\\VideoDownloader\\models\\x.bin");
-        var expected = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VideoDownloader",
-            "models",
-            "x.bin");
+        var expected = Path.Combine(UserDataPaths.Root, "models", "x.bin");
         Assert.Equal(expected, expanded);
     }
 

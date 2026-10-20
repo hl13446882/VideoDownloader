@@ -15,8 +15,7 @@ public sealed class UserSettingsStore
 
     public static string SettingsPath =>
         Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VideoDownloader",
+            UserDataPaths.Root,
             "settings.json");
 
     public AppOptions Load(AppOptions defaults)
@@ -71,6 +70,9 @@ public sealed class UserSettingsStore
 
     private static void Sanitize(AppOptions options)
     {
+        options.Browser.UserDataFolder = "%USERDATA%\\browser";
+        options.Database.Path = "%USERDATA%\\data\\downloads.db";
+        options.Logging.LogPath = "%USERDATA%\\logs\\app.log";
         options.Download.MaxConcurrentDownloads =
             Math.Clamp(options.Download.MaxConcurrentDownloads, 1, 5);
         if (options.Ui.AutoModeIdleMinutes < 0)

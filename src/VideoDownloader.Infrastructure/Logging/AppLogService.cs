@@ -25,8 +25,7 @@ public sealed class AppLogService
             var path = PathExpander.Expand(_options.Logging.LogPath);
             return Path.GetDirectoryName(path)
                    ?? Path.Combine(
-                       Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                       "VideoDownloader",
+                       UserDataPaths.Root,
                        "logs");
         }
     }

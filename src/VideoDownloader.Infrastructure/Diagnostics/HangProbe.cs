@@ -63,29 +63,6 @@ public static class HangProbe
 
     private static string[] ResolvePaths()
     {
-        var list = new List<string>
-        {
-            Path.Combine(Path.GetTempPath(), "vd-hang-probe.log")
-        };
-
-        try
-        {
-            var dir = new DirectoryInfo(AppContext.BaseDirectory);
-            for (var i = 0; i < 8 && dir is not null; i++, dir = dir.Parent)
-            {
-                var artifacts = Path.Combine(dir.FullName, "artifacts");
-                if (Directory.Exists(artifacts) || File.Exists(Path.Combine(dir.FullName, "VideoDownloader.sln")))
-                {
-                    list.Add(Path.Combine(artifacts, "hang-probe.log"));
-                    break;
-                }
-            }
-        }
-        catch
-        {
-            // temp path alone is enough
-        }
-
-        return list.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        return [Path.Combine(Configuration.UserDataPaths.Root, "logs", "hang-probe.log")];
     }
 }
