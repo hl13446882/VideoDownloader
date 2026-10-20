@@ -19,6 +19,7 @@ internal static class YouTubeObservationScript
             const author=(document.querySelector('#channel-name a,#upload-info ytd-channel-name a,#owner #channel-name')?.textContent
               || document.querySelector('ytd-channel-name a')?.textContent || '').trim();
             const media=[];
+            const combinedMedia=[];
             if(active){ for(const u of [active.currentSrc,active.src]) if(/^https?:/i.test(u||'')) media.push(u); }
             // A blob: video element hides MSE addresses. Read only the active player's
             // response; playlist preload responses must never belong to this video.
@@ -28,11 +29,16 @@ internal static class YouTubeObservationScript
             if(response?.videoDetails?.videoId===v){
               const data=response.streamingData;
               for(const format of [...(data?.formats||[]),...(data?.adaptiveFormats||[])]){
-                if(/^https?:/i.test(format.url||'')) media.push(format.url);
+                if(/^https?:/i.test(format.url||'')) {
+                  media.push(format.url);
+                  if((format.mimeType||'').startsWith('video/') &&
+                     (format.audioQuality || format.audioChannels>0 || /mp4a|opus|vorbis/i.test(format.mimeType||'')))
+                    combinedMedia.push(format.url);
+                }
               }
             }
             const durationSec=(active&&Number.isFinite(active.duration)&&active.duration>0)?active.duration:null;
-            return { type:'vd-video-identity', identity:location.host+':content:youtube:'+v, caption, author, href:location.href, media:[...new Set(media)], durationSec, isLive:__vdYouTubeIsLive() };
+            return { type:'vd-video-identity', identity:location.host+':content:youtube:'+v, caption, author, href:location.href, media:[...new Set(media)], combinedMedia:[...new Set(combinedMedia)], durationSec, isLive:__vdYouTubeIsLive() };
           };
           window.__vdProbe=()=>window.__vdObserve();
           let scheduled=false;

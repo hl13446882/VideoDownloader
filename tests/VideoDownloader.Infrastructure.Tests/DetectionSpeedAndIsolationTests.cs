@@ -98,6 +98,25 @@ public sealed class DetectionSpeedAndIsolationTests
     }
 
     [Fact]
+    public async Task YouTubePlayerCombinedFormat_IsUsableWithoutSeparateAudio()
+    {
+        var stats = Substitute.For<IProbeMethodStats>();
+        var detector = new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance,
+            new YouTubeYtDlpExtractor(Options.Create(new AppOptions()), NullLogger<YouTubeYtDlpExtractor>.Instance, stats), stats);
+        var page = new Uri("https://www.youtube.com/watch?v=current");
+        detector.BeginSession(page, Guid.NewGuid());
+        var results = new List<MediaDescriptor>();
+        detector.DescriptorsReady += (_, rows) => results.AddRange(rows);
+        await detector.ProcessPageObservationAsync(page, "current",
+            """{"media":["https://rr.googlevideo.com/videoplayback?itag=18&mime=video"],"combinedMedia":["https://rr.googlevideo.com/videoplayback?itag=18&mime=video"]}""",
+            RequestContext.CreateEmpty(), default, runExternal: false);
+        Assert.Single(results);
+        Assert.Equal(MediaTrackKind.Combined, results[0].Video!.Kind);
+        Assert.True(VideoDownloader.Core.Detection.DetectionReadiness.IsUsable(
+            MediaDescriptorMapper.ToDetectedVideo(results[0], results[0].SessionId)));
+    }
+
+    [Fact]
     public async Task YouTubeNetworkPair_IsPublishedWithoutWaitingForFinalCompletion()
     {
         var options = Options.Create(new AppOptions());

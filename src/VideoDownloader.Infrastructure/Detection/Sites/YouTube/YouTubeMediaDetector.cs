@@ -353,6 +353,11 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
             if (doc.RootElement.TryGetProperty("caption", out var c) && c.ValueKind == JsonValueKind.String)
                 _caption = c.GetString()?.Trim() ?? _caption;
             _author = ExclusiveAuthorHints.Merge(_author, ExclusiveAuthorHints.ReadFromObservationJson(json));
+            var combinedUrls = new HashSet<string>(StringComparer.Ordinal);
+            if (doc.RootElement.TryGetProperty("combinedMedia", out var combined) && combined.ValueKind == JsonValueKind.Array)
+                foreach (var value in combined.EnumerateArray())
+                    if (value.ValueKind == JsonValueKind.String && value.GetString() is { } address)
+                        combinedUrls.Add(address);
             if (doc.RootElement.TryGetProperty("media", out var media) && media.ValueKind == JsonValueKind.Array)
             {
                 foreach (var item in media.EnumerateArray())
@@ -363,8 +368,10 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
                         !url.AbsolutePath.Contains("/videoplayback", StringComparison.OrdinalIgnoreCase))
                         continue;
                     var audio = url.AbsoluteUri.Contains("mime=audio", StringComparison.OrdinalIgnoreCase);
+                    var kind = combinedUrls.Contains(url.AbsoluteUri) ? MediaTrackKind.Combined :
+                        audio ? MediaTrackKind.Audio : MediaTrackKind.Video;
                     Upsert(new MediaTrack(audio ? "audio" : "video",
-                        audio ? MediaTrackKind.Audio : MediaTrackKind.Video,
+                        kind,
                         url, null, "mp4", null, null, _context)
                     {
                         IsValidated = true,
