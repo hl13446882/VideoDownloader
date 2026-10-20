@@ -1,0 +1,14 @@
+{
+  "youtube": {
+    "yt-dlp": {
+      "version": "2026.10.10.233141",
+      "url": "https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/download/2026.10.10.233141/yt-dlp.exe",
+      "sha256": "e7cafc44db8aa433da8dd78303b9157f2c1dd509c4cbfcd8418081b7e1d26a7a"
+    },
+    "deno": {
+      "version": "2.9.7",
+      "url": "https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-pc-windows-msvc.zip",
+      "archiveSha256": "a0c3101b4158d1dfb7d6a78a7bf0f3de80c96bb423c152beec8beb22786f2238"
+    }
+  }
+}

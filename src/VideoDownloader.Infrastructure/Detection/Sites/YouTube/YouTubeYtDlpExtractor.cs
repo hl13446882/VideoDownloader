@@ -201,6 +201,14 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
         psi.ArgumentList.Add("-J");
         psi.ArgumentList.Add("--no-playlist");
         psi.ArgumentList.Add("--no-warnings");
+        var runtime = FindJavaScriptRuntime(path);
+        if (runtime is not null)
+        {
+            psi.ArgumentList.Add("--js-runtimes");
+            psi.ArgumentList.Add(runtime);
+        }
+        _logger.LogInformation("YouTube probe method={Method} cookies={Cookies} runtime={Runtime}",
+            ProbeMethods.YouTubeClientMethod(extractorArgs), cookieFile is not null, runtime ?? "auto");
         if (!string.IsNullOrWhiteSpace(extractorArgs))
         {
             psi.ArgumentList.Add("--extractor-args");
@@ -389,6 +397,17 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
             SanitizedLogger.SanitizeUrl(resolveUrl));
 
         return videos;
+    }
+
+    internal static string? FindJavaScriptRuntime(string resolverPath)
+    {
+        var directory = Path.GetDirectoryName(Path.GetFullPath(resolverPath))!;
+        foreach (var name in new[] { "deno", "node" })
+        {
+            var bundled = Path.Combine(directory, name + ".exe");
+            if (File.Exists(bundled)) return name + ":" + bundled;
+        }
+        return null; // yt-dlp retains its own supported PATH discovery.
     }
 
     private static string CanonicalizePageUrl(Uri pageUrl)

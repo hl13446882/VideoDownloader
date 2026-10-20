@@ -132,6 +132,9 @@ $ytDlpSrc = Join-Path $root 'tools\external\yt-dlp.exe'
 if (-not (Test-Path -LiteralPath $ytDlpSrc)) { throw "Missing resolver: $ytDlpSrc" }
 New-Item -ItemType Directory -Path $toolsDir -Force | Out-Null
 Copy-Item -LiteralPath $ytDlpSrc -Destination (Join-Path $toolsDir 'yt-dlp.exe') -Force
+$denoSrc = Join-Path $root 'tools\external\deno.exe'
+if (-not (Test-Path -LiteralPath $denoSrc)) { throw "Missing YouTube JavaScript runtime: $denoSrc" }
+Copy-Item -LiteralPath $denoSrc -Destination (Join-Path $toolsDir 'deno.exe') -Force
 
 Copy-Item -LiteralPath (Join-Path $m3u8Cache 'N_m3u8DL-RE.exe') -Destination (Join-Path $m3u8Dir 'N_m3u8DL-RE.exe') -Force
 $license = Join-Path $root 'N_m3u8DL-RE-main\LICENSE'

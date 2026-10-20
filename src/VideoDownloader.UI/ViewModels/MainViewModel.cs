@@ -1749,7 +1749,7 @@ public sealed partial class MainViewModel : ObservableObject
                 hasUsableResult: Ready,
                 shouldStop: Stop,
                 externalDelay: TimeSpan.FromMilliseconds(preferExternal ? 0 : 700),
-                budget: TimeSpan.FromSeconds(isAlbum ? 35 : siteId == SiteIds.YouTube ? 28 : 20),
+                budget: TimeSpan.FromSeconds(isAlbum ? 35 : siteId == SiteIds.YouTube ? 100 : 20),
                 enrichFormats: false,
                 ct: token);
             if (!Current()) return;
