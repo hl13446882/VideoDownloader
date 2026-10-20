@@ -629,6 +629,16 @@ public sealed class LocalLibraryHost : IAsyncDisposable
             return IsUnlocked(i.VideoKind);
         }).ToList();
 
+        var authorFilter = ctx.Request.QueryString["author"];
+        if (authorFilter is not null)
+        {
+            // Apply privacy checks first, including when the URL also requests kind groups.
+            var visible = filteredItems.Where(i => !IsPrivateKind(i.VideoKind) || IsUnlocked(i.VideoKind));
+            await WriteJsonAsync(ctx, LocalLibraryOrdering.ForAuthor(visible, authorFilter,
+                i => i.Author, i => i.TitleHead).ToArray());
+            return;
+        }
+
         var timeOrdered = filteredItems.OrderByDescending(i => i.DownloadedAt).ToList();
 
         object payload = groupMode switch

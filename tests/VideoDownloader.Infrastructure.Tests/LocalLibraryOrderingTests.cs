@@ -7,6 +7,24 @@ public sealed class LocalLibraryOrderingTests
     private sealed record Item(string? Author, DateTimeOffset At);
 
     [Fact]
+    public void AuthorFilter_UsesExactAuthorAndNaturalEpisodeOrder()
+    {
+        var rows = new[] { (Author: "A", Name: "剧集 10"), (Author: "a", Name: "剧集 2"),
+            (Author: "AB", Name: "剧集 1"), (Author: " A ", Name: "剧集 01") };
+        var result = LocalLibraryOrdering.ForAuthor(rows, "A", x => x.Author, x => x.Name).ToArray();
+        Assert.Equal(new[] { "剧集 01", "剧集 2", "剧集 10" }, result.Select(x => x.Name));
+    }
+
+    [Fact]
+    public void UnknownAuthor_DoesNotMatchNamedAuthors()
+    {
+        var rows = new[] { (Author: (string?)null, Name: "Episode 12"), (Author: "", Name: "Episode 3"),
+            (Author: "A", Name: "Episode 1") };
+        Assert.Equal(new[] { "Episode 3", "Episode 12" },
+            LocalLibraryOrdering.ForAuthor(rows, "", x => x.Author, x => x.Name).Select(x => x.Name));
+    }
+
+    [Fact]
     public void OrderByAuthorThenDownloadedAtDesc_GroupsByAuthorThenNewest()
     {
         var items = new[]

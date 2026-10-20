@@ -36,7 +36,8 @@ internal static class LocalLibraryPages
   .meta { padding:10px 12px 12px; display:flex; flex-direction:column; gap:4px; min-height:96px; }
   .row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
   .time { color:var(--muted); font-size:12px; line-height:1.2; }
-  .author { color:#64748b; font-size:11px; }
+  .author { color:#64748b; font-size:11px; text-decoration:none; }
+  a.author:hover { color:var(--accent); text-decoration:underline; }
   .author-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
   .sub-ready { color:#4ade80; font-size:11px; font-weight:600; }
   button.edit { background:transparent; border:0; color:var(--accent); font-size:12px; line-height:1.2; padding:0; cursor:pointer; }
@@ -82,6 +83,7 @@ internal static class LocalLibraryPages
     <button id="btnKind" class="tool" type="button">按类型分组</button>
   </div>
 </header>
+<div id="authorFilter" style="padding:0 20px"></div>
 <main id="root"><div class="empty">加载中…</div></main>
 <dialog id="editDlg">
   <form class="dlg" method="dialog" id="editForm">
@@ -153,7 +155,8 @@ function readSavedMode(){
 function saveMode(m){
   try { localStorage.setItem(MODE_KEY, m); } catch (_) {}
 }
-let mode = readSavedMode();
+const authorFilter = new URLSearchParams(location.search).get('author');
+let mode = authorFilter === null ? readSavedMode() : 'time';
 saveMode(mode);
 let editingId = null;
 let kinds = [{ value:'', label:'未分类' }];
@@ -225,6 +228,7 @@ document.getElementById('privacyForm').onsubmit = async (e) => {
   privacyDlg.close();
 };
 function setMode(m){
+  if(authorFilter !== null){ location.href='/?group='+encodeURIComponent(m); return; }
   mode = m;
   saveMode(mode);
   try {
@@ -240,7 +244,8 @@ function setMode(m){
 function playHref(item){
   const base = (item.playUrl || '').split('?')[0];
   if(!base) return base;
-  return base + '?group=' + encodeURIComponent(mode === 'site' || mode === 'kind' ? mode : 'time');
+  return base + '?group=' + encodeURIComponent(mode === 'site' || mode === 'kind' ? mode : 'time')
+    + (authorFilter === null ? '' : '&author=' + encodeURIComponent(authorFilter));
 }
 function esc(s){ return String(s??'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function kindOptions(selected){
@@ -278,7 +283,7 @@ function card(item){
         <select class="kind" data-kind="${esc(item.id)}" title="视频类型">${kindOptions(item.videoKind)}</select>
       </div>
       <div class="author-row">
-        <span class="author">${esc(item.authorDisplay || '作者：未知')}</span>
+        <a class="author" href="/?group=time&amp;author=${esc(encodeURIComponent((item.author || '').trim()))}" title="只显示该作者的视频，按名称排序">${esc(item.authorDisplay || '作者：未知')}</a>
         ${item.subtitleRecognized ? '<span class="sub-ready">已识别</span>' : ''}
       </div>
       <div class="name">${esc(item.titleHead)}<span class="meta-sfx">${esc(meta)}${esc(ext)}</span></div>
@@ -505,7 +510,8 @@ function initThumbLazyLoad(scope){
 }
 async function load(){
   root.innerHTML = '<div class="empty">加载中…</div>';
-  const q = mode==='site' ? '?group=site' : (mode==='kind' ? '?group=kind' : '');
+  const q = authorFilter !== null ? '?author='+encodeURIComponent(authorFilter)
+    : mode==='site' ? '?group=site' : (mode==='kind' ? '?group=kind' : '');
   const [videosRes, kindsRes] = await Promise.allSettled([
     fetch('/api/videos'+q).then(r => r.json()),
     fetchKinds()
@@ -572,6 +578,9 @@ async function load(){
   }
   bindCardEvents(root);
   initThumbLazyLoad(root);
+}
+if(authorFilter !== null){
+  document.getElementById('authorFilter').innerHTML = `作者：${esc(authorFilter || '未知')} · 按名称排序 <a href="/?group=time">显示全部视频</a>`;
 }
 document.getElementById('btnTime').classList.toggle('active', mode==='time');
 document.getElementById('btnSite').classList.toggle('active', mode==='site');
@@ -663,7 +672,7 @@ load();
 </head>
 <body>
 <header>
-  <a href="/">← 本地视频</a>
+  <a id="galleryBack" href="/">← 本地视频</a>
   <strong id="title">播放</strong>
   <button type="button" class="tool" id="btnFs" title="全屏 (F)">全屏</button>
   <span class="nav-hint">滚轮或 ← → 切换 · F 全屏 · Esc 退出</span>
@@ -769,7 +778,10 @@ function itemId(item){
   return norm(last.split('?')[0]);
 }
 
+document.getElementById('galleryBack').href = '/?'+new URLSearchParams(location.search).toString();
+
 function galleryMode(){
+  if(new URLSearchParams(location.search).has('author')) return 'time';
   const q = new URLSearchParams(location.search).get('group');
   if(q==='site' || q==='kind') return q;
   if(q==='time') return 'time';
@@ -781,6 +793,8 @@ function galleryMode(){
 }
 
 function videosApiUrl(mode){
+  const author = new URLSearchParams(location.search).get('author');
+  if(author !== null) return '/api/videos?author='+encodeURIComponent(author);
   if(mode==='site' || mode==='kind') return '/api/videos?group=' + encodeURIComponent(mode);
   return '/api/videos';
 }
@@ -802,7 +816,8 @@ function playHref(item, mode){
   const base = (item?.playUrl || (item?.id ? ('/play/' + norm(item.id)) : '')).split('?')[0];
   if(!base) return base;
   const g = (mode==='site' || mode==='kind') ? mode : 'time';
-  return base + '?group=' + encodeURIComponent(g);
+  const author = new URLSearchParams(location.search).get('author');
+  return base + '?group=' + encodeURIComponent(g) + (author === null ? '' : '&author='+encodeURIComponent(author));
 }
 
 function setMediaReady(ready){

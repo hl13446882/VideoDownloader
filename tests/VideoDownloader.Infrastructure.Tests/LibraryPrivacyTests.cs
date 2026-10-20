@@ -41,6 +41,7 @@ public sealed class LibraryPrivacyTests
         await File.WriteAllBytesAsync(encrypted, legacy);
         File.Delete(f.OriginalPath);
         f.Job.VideoKind = "private-a";
+        f.Job.Author = "Series author";
         f.Job.DownloadedBytes = f.Bytes.Length;
         f.Kinds.LabelOf("private-a").Returns("隐私A");
         f.Kinds.VerifyPasswordAsync("private-a", "correct", Arg.Any<CancellationToken>()).Returns(true);
@@ -73,6 +74,11 @@ public sealed class LibraryPrivacyTests
         }
         using (var locked = await Groups())
             Assert.Empty(locked.RootElement[0].GetProperty("items").EnumerateArray());
+        using (var authorResponse = await Send("/api/videos?group=kind&author=Series%20author"))
+        {
+            using var authorData = System.Text.Json.JsonDocument.Parse(await authorResponse.Content.ReadAsStringAsync());
+            Assert.Empty(authorData.RootElement.EnumerateArray());
+        }
         using (var wrong = await Send("/api/privacy/unlock", """{"kindValue":"private-a","password":"wrong"}"""))
             Assert.Equal(System.Net.HttpStatusCode.Forbidden, wrong.StatusCode);
         string oldCookie;
@@ -80,6 +86,11 @@ public sealed class LibraryPrivacyTests
         {
             unlock.EnsureSuccessStatusCode();
             oldCookie = unlock.Headers.GetValues("Set-Cookie").Single().Split(';')[0];
+        }
+        using (var authorResponse = await Send("/api/videos?author=Series%20author"))
+        {
+            using var authorData = System.Text.Json.JsonDocument.Parse(await authorResponse.Content.ReadAsStringAsync());
+            Assert.Single(authorData.RootElement.EnumerateArray());
         }
         using (var shown = await Groups())
         {
