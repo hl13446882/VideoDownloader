@@ -273,7 +273,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
             if (descriptor.Formats.Count == 0 && descriptor.Video?.Kind == MediaTrackKind.Video &&
                 descriptor.Audio is null) return;
             var mapped = MediaDescriptorMapper.ToDetectedVideo(descriptor, _sessionId);
-            if (!descriptor.IsLive && !VideoDownloader.Core.Detection.DetectionReadiness.IsUsable(mapped with { IsFormatDiscoveryPending = false })) return;
+            if (!descriptor.IsLive && !VideoDownloader.Core.Detection.DetectionReadiness.IsUsable(mapped)) return;
             var signature = string.Join("|", mapped.Variants.Select(v =>
                 $"{mapped.IsFormatDiscoveryPending}:{v.VariantId}:{v.Width}:{v.Height}:{v.Bandwidth}:{v.TotalContentLength}:" +
                 string.Join(",", v.Tracks.Select(t => $"{t.Kind}:{t.SourceUrl}"))));
@@ -311,6 +311,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
             {
                 _failed = true;
                 _failureReason = "youtube_high_resolution_unresolved";
+                return Task.CompletedTask;
             }
         }
         DescriptorsReady?.Invoke(this, [d]);

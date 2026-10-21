@@ -20,6 +20,7 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
     private readonly ILogger<YouTubeYtDlpExtractor> _logger;
     private readonly IProbeMethodStats _probeStats;
     private bool? _available;
+    private readonly YouTubeSessionConditions _sessionConditions = new();
 
     public YouTubeYtDlpExtractor(
         IOptions<AppOptions> options,
@@ -110,7 +111,6 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                 ProbeMethods.YouTubeClientMethod);
             var clientAttempts = (rankedClients is { Count: > 0 } ? rankedClients : clientAttemptsDefault).ToList();
             // Session conditions do not override the success-rate order of methods.
-            string?[] cookieAttempts = cookieFile is null ? [null] : [cookieFile, null];
 
             try
             {
@@ -121,7 +121,7 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                     var method = ProbeMethods.YouTubeClientMethod(extractorArgs);
                     _probeStats.ReportMethod(SiteIds.YouTube, method);
                     var attemptStarted = Stopwatch.GetTimestamp();
-                    foreach (var cookies in cookieAttempts)
+                    foreach (var cookies in _sessionConditions.Order(method, cookieFile))
                     {
                         ct.ThrowIfCancellationRequested();
                         var videos = await RunYtDlpOnceAsync(
@@ -140,6 +140,7 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                             LastError = null;
                             LastFailureIsHumanVerification = false;
                             LastProbeMethod = method;
+                            _sessionConditions.RecordSuccess(method, cookies is not null);
                             return videos;
                         }
 
@@ -201,6 +202,13 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
         psi.ArgumentList.Add("-J");
         psi.ArgumentList.Add("--no-playlist");
         psi.ArgumentList.Add("--no-warnings");
+        // A bounded ranked chain owns retries; do not multiply it with hidden network retries.
+        psi.ArgumentList.Add("--socket-timeout");
+        psi.ArgumentList.Add("6");
+        psi.ArgumentList.Add("--retries");
+        psi.ArgumentList.Add("0");
+        psi.ArgumentList.Add("--extractor-retries");
+        psi.ArgumentList.Add("0");
         var runtime = FindJavaScriptRuntime(path);
         if (runtime is not null)
         {

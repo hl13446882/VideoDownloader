@@ -3013,7 +3013,7 @@ public sealed partial class MainViewModel : ObservableObject
         _ = Application.Current.Dispatcher.InvokeAsync(() =>
         {
             var relevant = videos
-                .Where(v => v.Variants.Count > 0 || v.IsLive)
+                .Where(v => !v.IsFormatDiscoveryPending && (v.Variants.Count > 0 || v.IsLive))
                 .Where(v => _feedDisplayState.CanPublish(displayEpoch, v.SessionId, _pipeline.SessionId))
                 .Where(IsVideoRelevantToCurrentPage)
                 .ToArray();
@@ -3051,6 +3051,7 @@ public sealed partial class MainViewModel : ObservableObject
 
     private void UpsertDetectedVideo(DetectedVideo video, bool focus)
     {
+        if (video.IsFormatDiscoveryPending) return;
         if (_videoMap.TryGetValue(video.VideoId, out var existing))
         {
             var force = _forceReplaceResults;

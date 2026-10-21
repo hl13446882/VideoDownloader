@@ -61,9 +61,10 @@ public class YouTubeQualityDetectionTests
         detector.DescriptorsReady += (_, list) => descriptors.AddRange(list);
         var partial = Low.Replace("\"duration\":120", "\"duration\":120,\"availableHeights\":[360,1080]");
         await detector.ProcessPageObservationAsync(Page, null, partial, RequestContext.CreateEmpty(), default, false);
-        var provisional = MediaDescriptorMapper.ToDetectedVideo(descriptors.Last(), Guid.NewGuid());
-        Assert.True(provisional.IsFormatDiscoveryPending);
-        Assert.False(VideoDownloader.Core.Detection.DetectionReadiness.IsUsable(provisional));
+        Assert.Empty(descriptors);
+        await detector.CompleteAsync(default);
+        Assert.Empty(descriptors);
+        Assert.True(detector.Failed);
         await detector.ProcessPageObservationAsync(Page, null, Ladder, RequestContext.CreateEmpty(), default, false);
         var complete = MediaDescriptorMapper.ToDetectedVideo(descriptors.Last(), Guid.NewGuid());
         Assert.False(complete.IsFormatDiscoveryPending);
