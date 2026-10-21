@@ -41,9 +41,6 @@ public sealed class AutoModeAdvanceGate(DateTimeOffset itemStartedAt)
             jobStatus is DownloadStatus.Downloading or DownloadStatus.Muxing or DownloadStatus.Completed)
             DownloadStartedAt = now;
 
-        if (jobStatus is not (DownloadStatus.Downloading or DownloadStatus.Muxing or DownloadStatus.Completed))
-            DownloadStartedAt = null;
-
         if (DownloadStartedAt is { } started)
             return now - started >= DownloadSwitchDelay
                 ? AutoModeAdvanceReason.DownloadStarted

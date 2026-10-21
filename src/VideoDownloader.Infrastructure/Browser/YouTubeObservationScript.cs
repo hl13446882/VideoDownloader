@@ -13,20 +13,13 @@ internal static class YouTubeObservationScript
               || (location.pathname.match(/\/shorts\/([^/?#]+)/)||[])[1]
               || (location.hostname.includes('youtu.be') ? location.pathname.replace(/^\//,'') : null);
             if(!v) return null;
-            const player=document.getElementById('movie_player');
-            let playerData;
-            try { playerData=player?.getVideoData?.(); } catch {}
-            // URL, DOM titles and the media element update at different times during playlist navigation.
-            if(!playerData?.video_id || playerData.video_id!==v) return null;
             const active=[...document.querySelectorAll('video')].filter(e=>visible(e)>0).sort((a,b)=>visible(b)-visible(a))[0];
-            const caption=(playerData.title || document.querySelector('h1.ytd-watch-metadata yt-formatted-string,h1.title')?.textContent
+            const caption=(document.querySelector('h1.ytd-watch-metadata yt-formatted-string,h1.title')?.textContent
               || document.title || '').replace(/\s*-\s*YouTube\s*$/i,'').trim();
-            const author=(playerData.author || document.querySelector('#channel-name a,#upload-info ytd-channel-name a,#owner #channel-name')?.textContent
+            const author=(document.querySelector('#channel-name a,#upload-info ytd-channel-name a,#owner #channel-name')?.textContent
               || document.querySelector('ytd-channel-name a')?.textContent || '').trim();
             const media=[];
             const combinedMedia=[];
-            const formats=[];
-            const availableHeights=[];
             if(active){ for(const u of [active.currentSrc,active.src]) if(/^https?:/i.test(u||'')) media.push(u); }
             // A blob: video element hides MSE addresses. Read only the active player's
             // response; playlist preload responses must never belong to this video.
@@ -36,19 +29,8 @@ internal static class YouTubeObservationScript
             if(response?.videoDetails?.videoId===v){
               const data=response.streamingData;
               for(const format of [...(data?.formats||[]),...(data?.adaptiveFormats||[])]){
-                if(format.height>0) availableHeights.push(format.height);
                 if(/^https?:/i.test(format.url||'')) {
                   media.push(format.url);
-                  const mime=format.mimeType||'';
-                  const codecs=(mime.match(/codecs="([^"]+)"/)?.[1]||'').split(',').map(c=>c.trim()).filter(Boolean);
-                  const audioOnly=mime.startsWith('audio/');
-                  const audioCodec=codecs.find(c=>/^(mp4a|opus|vorbis|aac|ac-3|ec-3)/i.test(c));
-                  const videoCodec=codecs.find(c=>!/^(mp4a|opus|vorbis|aac|ac-3|ec-3)/i.test(c));
-                  const hasAudio=audioOnly || !!audioCodec || !!format.audioQuality || format.audioChannels>0;
-                  formats.push({url:format.url,format_id:String(format.itag),width:format.width,height:format.height,
-                    tbr:format.bitrate>0?format.bitrate/1000:undefined,filesize:format.contentLength?Number(format.contentLength):undefined,
-                    ext:mime.includes('webm')?'webm':audioOnly?'m4a':'mp4',
-                    vcodec:audioOnly?'none':videoCodec||'unknown',acodec:hasAudio?audioCodec||'unknown':'none',protocol:'https'});
                   if((format.mimeType||'').startsWith('video/') &&
                      (format.audioQuality || format.audioChannels>0 || /mp4a|opus|vorbis/i.test(format.mimeType||'')))
                     combinedMedia.push(format.url);
@@ -56,7 +38,7 @@ internal static class YouTubeObservationScript
               }
             }
             const durationSec=(active&&Number.isFinite(active.duration)&&active.duration>0)?active.duration:null;
-            return { type:'vd-video-identity', identity:location.host+':content:youtube:'+v, id:v, title:caption, formats, availableHeights:[...new Set(availableHeights)], duration:durationSec, caption, author, href:location.href, media:[...new Set(media)], combinedMedia:[...new Set(combinedMedia)], durationSec, isLive:__vdYouTubeIsLive() };
+            return { type:'vd-video-identity', identity:location.host+':content:youtube:'+v, caption, author, href:location.href, media:[...new Set(media)], combinedMedia:[...new Set(combinedMedia)], durationSec, isLive:__vdYouTubeIsLive() };
           };
           window.__vdProbe=()=>window.__vdObserve();
           let scheduled=false;

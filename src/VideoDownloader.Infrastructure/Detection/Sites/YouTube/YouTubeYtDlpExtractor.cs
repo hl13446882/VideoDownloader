@@ -20,7 +20,6 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
     private readonly ILogger<YouTubeYtDlpExtractor> _logger;
     private readonly IProbeMethodStats _probeStats;
     private bool? _available;
-    private readonly YouTubeSessionConditions _sessionConditions = new();
 
     public YouTubeYtDlpExtractor(
         IOptions<AppOptions> options,
@@ -111,6 +110,7 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                 ProbeMethods.YouTubeClientMethod);
             var clientAttempts = (rankedClients is { Count: > 0 } ? rankedClients : clientAttemptsDefault).ToList();
             // Session conditions do not override the success-rate order of methods.
+            string?[] cookieAttempts = cookieFile is null ? [null] : [cookieFile, null];
 
             try
             {
@@ -121,7 +121,7 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                     var method = ProbeMethods.YouTubeClientMethod(extractorArgs);
                     _probeStats.ReportMethod(SiteIds.YouTube, method);
                     var attemptStarted = Stopwatch.GetTimestamp();
-                    foreach (var cookies in _sessionConditions.Order(method, cookieFile))
+                    foreach (var cookies in cookieAttempts)
                     {
                         ct.ThrowIfCancellationRequested();
                         var videos = await RunYtDlpOnceAsync(
@@ -140,7 +140,6 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                             LastError = null;
                             LastFailureIsHumanVerification = false;
                             LastProbeMethod = method;
-                            _sessionConditions.RecordSuccess(method, cookies is not null);
                             return videos;
                         }
 
@@ -544,7 +543,7 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                         height,
                         null,
                         vTrack.Container,
-                        [vTrack]));
+                        [vTrack with { TrackId = "combined", Kind = MediaTrackKind.Combined, Codec = vcodec }]));
                 }
             }
         }

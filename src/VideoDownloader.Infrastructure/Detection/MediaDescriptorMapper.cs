@@ -66,7 +66,6 @@ public static class MediaDescriptorMapper
         {
             SessionId = sessionId,
             IsLive = descriptor.IsLive,
-            IsFormatDiscoveryPending = descriptor.IsFormatDiscoveryPending,
             Availability = variants.Count > 0
                 ? MediaAvailabilityKind.Complete
                 : MediaAvailabilityKind.Unavailable,

@@ -52,9 +52,6 @@ public sealed record MediaDescriptor(
     public Guid SessionId { get; init; }
     public bool IsLive { get; init; }
 
-    /// <summary>A lower-quality address exists, but advertised higher qualities are still being resolved.</summary>
-    public bool IsFormatDiscoveryPending { get; init; }
-
     /// <summary>
     /// Pre-built format ladder (e.g. yt-dlp heights). When set, mapper prefers these over Video/Audio.
     /// </summary>

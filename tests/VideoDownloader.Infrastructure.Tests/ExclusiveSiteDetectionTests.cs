@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NSubstitute;
 using VideoDownloader.Core.Contracts;
@@ -1140,13 +1140,6 @@ public class ExclusiveSiteDetectionTests
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var page = new Uri("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
         detector.BeginSession(page, Guid.NewGuid());
-        // CDN traffic during SPA navigation is unowned until the player confirms its content ID.
-        await detector.ProcessNetworkAsync(Evt(page,
-            "https://rr1---sn-abc.googlevideo.com/videoplayback?mime=video%2Fmp4&itag=137"), CancellationToken.None);
-        Assert.Null(last);
-        await detector.ProcessPageObservationAsync(page, "Current video",
-            """{"identity":"content:youtube:dQw4w9WgXcQ","caption":"Current video"}""",
-            RequestContext.CreateEmpty(), CancellationToken.None);
         await detector.ProcessNetworkAsync(Evt(page,
             "https://rr1---sn-abc.googlevideo.com/videoplayback?mime=video%2Fmp4&itag=137"), CancellationToken.None);
         await detector.CompleteAsync(CancellationToken.None);

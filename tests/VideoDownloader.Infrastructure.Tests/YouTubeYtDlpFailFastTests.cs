@@ -5,19 +5,6 @@ namespace VideoDownloader.Infrastructure.Tests;
 public sealed class YouTubeYtDlpFailFastTests
 {
     [Fact]
-    public void SessionRetriesUseRecentSuccessWithoutReorderingAddressMethods()
-    {
-        var conditions = new YouTubeSessionConditions();
-        Assert.Equal(new string?[] { null, "cookie-file" }, conditions.Order("first", "cookie-file"));
-        conditions.RecordSuccess("first", true);
-        Assert.Equal(new string?[] { "cookie-file", null }, conditions.Order("first", "cookie-file"));
-        Assert.Equal(new string?[] { null, "cookie-file" }, conditions.Order("second", "cookie-file"));
-        conditions.RecordSuccess("first", false);
-        Assert.Equal(new string?[] { null, "cookie-file" }, conditions.Order("first", "cookie-file"));
-        Assert.Equal(new string?[] { null }, conditions.Order("first", null));
-    }
-
-    [Fact]
     public void BundledRuntime_IsResolvedIndependentlyOfProcessPath()
     {
         var dir = Path.Combine(Path.GetTempPath(), "vd-runtime-" + Guid.NewGuid().ToString("N"));
