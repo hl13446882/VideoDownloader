@@ -7,6 +7,17 @@ public sealed class AutoModeAdvanceGateTests
 {
     private static readonly DateTimeOffset Start = new(2026, 10, 15, 0, 0, 0, TimeSpan.Zero);
 
+    [Fact]
+    public void FailedTransferCannotUsePreviousStartTimerToAdvance()
+    {
+        var gate = new AutoModeAdvanceGate(Start);
+        gate.Observe(Start, false, DownloadStatus.Downloading);
+        Assert.Equal(AutoModeAdvanceReason.None, gate.Observe(Start.AddSeconds(6), false, DownloadStatus.Failed));
+        Assert.Null(gate.DownloadStartedAt);
+        Assert.Equal(AutoModeAdvanceReason.None, gate.Observe(Start.AddSeconds(7), false, DownloadStatus.Downloading));
+        Assert.Equal(AutoModeAdvanceReason.DownloadStarted, gate.Observe(Start.AddSeconds(12), false, DownloadStatus.Downloading));
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData(DownloadStatus.Pending)]

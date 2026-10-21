@@ -13,10 +13,15 @@ internal static class YouTubeObservationScript
               || (location.pathname.match(/\/shorts\/([^/?#]+)/)||[])[1]
               || (location.hostname.includes('youtu.be') ? location.pathname.replace(/^\//,'') : null);
             if(!v) return null;
+            const player=document.getElementById('movie_player');
+            let playerData;
+            try { playerData=player?.getVideoData?.(); } catch {}
+            // URL, DOM titles and the media element update at different times during playlist navigation.
+            if(!playerData?.video_id || playerData.video_id!==v) return null;
             const active=[...document.querySelectorAll('video')].filter(e=>visible(e)>0).sort((a,b)=>visible(b)-visible(a))[0];
-            const caption=(document.querySelector('h1.ytd-watch-metadata yt-formatted-string,h1.title')?.textContent
+            const caption=(playerData.title || document.querySelector('h1.ytd-watch-metadata yt-formatted-string,h1.title')?.textContent
               || document.title || '').replace(/\s*-\s*YouTube\s*$/i,'').trim();
-            const author=(document.querySelector('#channel-name a,#upload-info ytd-channel-name a,#owner #channel-name')?.textContent
+            const author=(playerData.author || document.querySelector('#channel-name a,#upload-info ytd-channel-name a,#owner #channel-name')?.textContent
               || document.querySelector('ytd-channel-name a')?.textContent || '').trim();
             const media=[];
             const combinedMedia=[];

@@ -13,6 +13,21 @@ namespace VideoDownloader.Infrastructure.Tests;
 
 public class YouTubeLiveDetectionTests
 {
+    [Fact]
+    public async Task PreviousVideosObservationCannotContaminateCurrentSession()
+    {
+        var detector = new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance, Extractor(), Substitute.For<IProbeMethodStats>());
+        var page = new Uri("https://www.youtube.com/watch?v=current-id");
+        var results = new List<MediaDescriptor>();
+        detector.DescriptorsReady += (_, descriptors) => results.AddRange(descriptors);
+        detector.BeginSession(page, Guid.NewGuid());
+        await detector.ProcessPageObservationAsync(page, "Current",
+            """{"identity":"content:youtube:previous-id","caption":"Previous","isLive":true,"media":["https://rr1.googlevideo.com/videoplayback?mime=video/mp4"]}""",
+            RequestContext.CreateEmpty(), default);
+        await detector.CompleteAsync(default);
+        Assert.Empty(results);
+    }
+
     [Theory]
     [InlineData("https://manifest.googlevideo.com/api/manifest/hls_playlist/source/yt_live_broadcast/live/1/playlist_type/DVR/index.m3u8", true)]
     [InlineData("https://manifest.googlevideo.com/api/manifest/hls_playlist/source/yt_live_broadcast/live/0/index.m3u8", false)]

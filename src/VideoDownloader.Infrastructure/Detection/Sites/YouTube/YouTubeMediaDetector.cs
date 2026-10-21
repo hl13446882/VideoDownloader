@@ -29,6 +29,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
     private bool _externalAttempted;
     private bool _successCounted;
     private bool _isLive;
+    private bool _hasMatchingObservation;
 
     public YouTubeMediaDetector(
         ILogger<YouTubeMediaDetector> logger,
@@ -75,7 +76,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         lock (_gate)
         {
             // Do not drop late CDN after a failed Complete — late-retry must still accept media.
-            if (_pageUrl is null || _successCounted) return Task.CompletedTask;
+            if (_pageUrl is null || _successCounted || !_hasMatchingObservation) return Task.CompletedTask;
             var url = e.Url.AbsoluteUri;
             if (url.Contains("sabr=1", StringComparison.OrdinalIgnoreCase) &&
                 !url.Contains("mime=video", StringComparison.OrdinalIgnoreCase) &&
@@ -152,6 +153,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
                 _externalAttempted = false;
                 _successCounted = false;
                 _isLive = false;
+                _hasMatchingObservation = false;
             }
             else
                 _contentId ??= contentId;
@@ -196,7 +198,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
                              string.IsNullOrWhiteSpace(v.SiteContentId)))
                 {
                     _isLive |= v.IsLive;
-                    if (string.IsNullOrWhiteSpace(_caption) && !string.IsNullOrWhiteSpace(v.DisplayTitle))
+                    if (!string.IsNullOrWhiteSpace(v.DisplayTitle))
                         _caption = v.DisplayTitle;
                     _author = ExclusiveAuthorHints.MergeFromMetadata(_author, v.Metadata, _pageUrl);
                     foreach (var variant in v.Variants)
@@ -348,10 +350,18 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         try
         {
             using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("identity", out var identity) &&
+                identity.ValueKind == JsonValueKind.String && _contentId is not null &&
+                !string.Equals(identity.GetString()?.Split("youtube:").LastOrDefault(), _contentId, StringComparison.Ordinal))
+                return;
             if (doc.RootElement.TryGetProperty("isLive", out var live) && live.ValueKind == JsonValueKind.True)
                 _isLive = true;
             if (doc.RootElement.TryGetProperty("caption", out var c) && c.ValueKind == JsonValueKind.String)
                 _caption = c.GetString()?.Trim() ?? _caption;
+            if (doc.RootElement.TryGetProperty("identity", out var matchingIdentity) &&
+                matchingIdentity.ValueKind == JsonValueKind.String && _contentId is not null &&
+                matchingIdentity.GetString()?.EndsWith("youtube:" + _contentId, StringComparison.Ordinal) == true)
+                _hasMatchingObservation = true;
             _author = ExclusiveAuthorHints.Merge(_author, ExclusiveAuthorHints.ReadFromObservationJson(json));
             var combinedUrls = new HashSet<string>(StringComparer.Ordinal);
             if (doc.RootElement.TryGetProperty("combinedMedia", out var combined) && combined.ValueKind == JsonValueKind.Array)
@@ -409,6 +419,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         _pageUrl = null;
         _contentId = null;
         _caption = null;
+        _hasMatchingObservation = false;
         _author = null;
         _context = RequestContext.CreateEmpty();
         _tracks.Clear();

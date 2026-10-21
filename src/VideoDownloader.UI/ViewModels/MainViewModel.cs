@@ -2145,6 +2145,9 @@ public sealed partial class MainViewModel : ObservableObject
                     break;
                 }
 
+                if (probe.Identity is not null && CaptureAutoPlaybackIdentity() != probe.Identity)
+                    continue;
+
                 if (probe.SkipLive || probe.AdvanceNoAddress)
                 {
                     if (probe.SkipLive)
@@ -2300,11 +2303,27 @@ public sealed partial class MainViewModel : ObservableObject
     private async Task<AutoProbeResult> TryAutoEnqueueUntilAsync(DateTime sessionEndUtc, CancellationToken token)
     {
         var gate = new AutoModeAdvanceGate(_autoItemStartedAt);
+        var itemIdentity = CaptureAutoPlaybackIdentity();
         Guid? enqueuedJobId = null;
         var wasAlreadyCompleted = false;
 
         while (!token.IsCancellationRequested && DateTime.UtcNow < sessionEndUtc)
         {
+            var observedIdentity = CaptureAutoPlaybackIdentity();
+            if (observedIdentity is null)
+            {
+                await Task.Delay(200, token);
+                continue;
+            }
+            if (!string.IsNullOrEmpty(observedIdentity) && observedIdentity != itemIdentity)
+            {
+                // Natural playlist advancement must not inherit the previous video's switch timer.
+                itemIdentity = observedIdentity;
+                _autoItemStartedAt = DateTimeOffset.UtcNow;
+                gate = new AutoModeAdvanceGate(_autoItemStartedAt);
+                enqueuedJobId = null;
+                wasAlreadyCompleted = false;
+            }
             var live = await IsCurrentPlaybackLiveAsync(token);
             DetectedVideoViewModel? candidate = null;
             await Application.Current.Dispatcher.InvokeAsync(() => candidate = FindAutoDownloadCandidate());
@@ -2319,13 +2338,14 @@ public sealed partial class MainViewModel : ObservableObject
             var waitingForSlot = !wasAlreadyCompleted &&
                 (job?.Status == DownloadStatus.Pending ||
                  enqueuedJobId is null && _downloadEngine.FreeDownloadSlots <= 0);
-            var reason = gate.Observe(DateTimeOffset.UtcNow, live, job?.Status, wasAlreadyCompleted, waitingForSlot);
+            var reason = gate.Observe(DateTimeOffset.UtcNow, live, job?.Status == DownloadStatus.Downloading && job.DownloadedBytes == 0
+                ? DownloadStatus.Preparing : job?.Status, wasAlreadyCompleted, waitingForSlot);
             if (reason == AutoModeAdvanceReason.Live)
-                return new AutoProbeResult(null, SkipLive: true);
+                return new AutoProbeResult(null, SkipLive: true, Identity: itemIdentity);
             if (reason == AutoModeAdvanceReason.AddressTimeout)
-                return new AutoProbeResult(null, SkipLive: false, AdvanceNoAddress: true);
+                return new AutoProbeResult(null, SkipLive: false, AdvanceNoAddress: true, Identity: itemIdentity);
             if (reason == AutoModeAdvanceReason.DownloadStarted)
-                return new AutoProbeResult(enqueuedJobId, SkipLive: false);
+                return new AutoProbeResult(enqueuedJobId, SkipLive: false, Identity: itemIdentity);
 
             if (gate.DownloadStartedAt is { } started)
             {
@@ -2343,24 +2363,32 @@ public sealed partial class MainViewModel : ObservableObject
                         return (Guid?)null;
 
                     var current = FindAutoDownloadCandidate();
-                    if (!IsAutoCandidateDownloadable(current))
+                    if (!IsAutoCandidateDownloadable(current) ||
+                        (ExtractStableContentKey(null, current!.Video.PageUrl) is not null &&
+                         BuildAutoContentFingerprint(current!) != CaptureAutoPlaybackIdentity()))
                         return null;
                     var fingerprint = BuildAutoContentFingerprint(current!);
-                    if (IsSameAsLastAutoEnqueue(fingerprint) ||
-                        (!string.IsNullOrEmpty(fingerprint) &&
-                         string.Equals(fingerprint, _autoFailedFingerprint, StringComparison.Ordinal)))
+                    var existing = _downloadEngine.GetActiveJobs().FirstOrDefault(j =>
+                        ExtractStableContentKey(null, j.PageUrl) is { } existingKey && existingKey == fingerprint &&
+                        (j.Status is DownloadStatus.Pending or DownloadStatus.Preparing or DownloadStatus.Downloading or DownloadStatus.Muxing ||
+                         j.Status == DownloadStatus.Completed && System.IO.File.Exists(j.TargetPath) && new System.IO.FileInfo(j.TargetPath).Length > 0));
+                    if (existing is not null)
+                    {
+                        wasAlreadyCompleted = false;
+                        return (Guid?)existing.Id;
+                    }
+                    if (!string.IsNullOrEmpty(fingerprint) &&
+                        string.Equals(fingerprint, _autoFailedFingerprint, StringComparison.Ordinal))
                         return null;
 
                     // An address is applied immediately. The five-second delay belongs AFTER transfer starts.
-                    var completedBeforeEnqueue = _downloadEngine.GetActiveJobs()
-                        .Where(j => j.Status == DownloadStatus.Completed).Select(j => j.Id).ToHashSet();
                     var id = await TryStartDownloadQuietAsync(current!.Video, current.SelectedVariant!.Variant,
                         cancellationToken: token);
                     if (token.IsCancellationRequested || _autoCts?.Token != token)
                         return null;
                     if (id is not null)
                     {
-                        wasAlreadyCompleted = completedBeforeEnqueue.Contains(id.Value);
+                        wasAlreadyCompleted = false;
                         _autoLastEnqueuedFingerprint = fingerprint;
                         _autoFailedFingerprint = null;
                     }
@@ -2387,7 +2415,7 @@ public sealed partial class MainViewModel : ObservableObject
         return new AutoProbeResult(null, SkipLive: false);
     }
 
-    private readonly record struct AutoProbeResult(Guid? JobId, bool SkipLive, bool AdvanceNoAddress = false);
+    private readonly record struct AutoProbeResult(Guid? JobId, bool SkipLive, bool AdvanceNoAddress = false, string? Identity = null);
 
     private async Task<bool> WaitForContentSwitchAsync(string? beforeIdentity, bool previousWasLive,
         DateTime sessionEndUtc, CancellationToken token)
@@ -2416,21 +2444,25 @@ public sealed partial class MainViewModel : ObservableObject
     {
         var tab = SelectedTab;
         var key = tab?.Host.CurrentMediaSessionKey;
-        // Prefer the player's identity. Clearing/repopulating the detected-card UI is not a playback switch.
-        return !string.IsNullOrEmpty(key)
-            ? (tab?.Host.CurrentPageUrl?.AbsoluteUri ?? string.Empty) + "\n" + key
-            : FindAutoDownloadCandidate() is { } candidate ? BuildAutoContentFingerprint(candidate) : null;
+        var pageKey = ExtractStableContentKey(null, tab?.Host.CurrentPageUrl);
+        var playerKey = ExtractStableContentKey(key, null);
+        // During SPA navigation the URL changes before the player. Do not call this a confirmed switch.
+        if (pageKey is not null && playerKey is not null && pageKey != playerKey)
+            return null;
+        return playerKey ?? pageKey ?? key ??
+            (FindAutoDownloadCandidate() is { } candidate ? BuildAutoContentFingerprint(candidate) : null);
     }
     private static string? BuildAutoContentFingerprint(DetectedVideoViewModel item) =>
+        ExtractStableContentKey(null, item.Video.PageUrl) ??
         BuildAutoContentFingerprint(item.Video.PageUrl.AbsoluteUri, item.Video.DisplayTitle);
 
     private static string? BuildAutoContentFingerprint(string? pageUrl, string? caption)
     {
+        if (Uri.TryCreate(pageUrl, UriKind.Absolute, out var page) && ExtractStableContentKey(null, page) is { } stable)
+            return stable;
         var url = (pageUrl ?? string.Empty).Trim();
         var text = NormalizeAutoCaption(caption);
-        if (url.Length == 0 && text.Length == 0)
-            return null;
-        return url + "\n" + text;
+        return url.Length == 0 && text.Length == 0 ? null : url + "\n" + text;
     }
 
     private static string NormalizeAutoCaption(string? caption)
