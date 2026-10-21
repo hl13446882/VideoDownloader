@@ -460,7 +460,8 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         {
             var same = _mediaSessionKey is not null &&
                 normalized == NormalizeMediaSessionKey(_mediaSessionKey);
-            var durationRevision = same && IsSignificantDurationChange(_mediaDurationSec, durationSec);
+            var durationRevision = same && !normalized.StartsWith("content:youtube:", StringComparison.Ordinal) &&
+                IsSignificantDurationChange(_mediaDurationSec, durationSec);
             if (durationSec is > 0) _mediaDurationSec = durationSec;
             // If a quick swipe returns to the old work, it needs a fresh session too:
             // the old displayed result has already been retired by MediaSessionChanging.

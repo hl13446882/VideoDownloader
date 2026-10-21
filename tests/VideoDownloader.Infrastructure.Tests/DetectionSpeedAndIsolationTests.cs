@@ -14,6 +14,28 @@ namespace VideoDownloader.Infrastructure.Tests;
 public sealed class DetectionSpeedAndIsolationTests
 {
     [Fact]
+    public async Task SameYouTubeIdWithDurationJitterDoesNotRetireOrRestartTheProbe()
+    {
+        var pipeline = new UnifiedMediaPipeline(Substitute.For<IRequestMessageFactory>(), [], Options.Create(new AppOptions()));
+        using var host = new WebView2Host(Options.Create(new AppOptions()), Substitute.For<INetworkEventNormalizer>(), pipeline, NullLogger<WebView2Host>.Instance);
+        var page = new Uri("https://www.youtube.com/watch?v=abcdefghijk");
+        host.ObserveVideoIdentity("www.youtube.com:content:youtube:abcdefghijk", page, 30);
+        await Task.Delay(450);
+        var changing = 0;
+        var restarted = 0;
+        host.MediaSessionChanging += (_, _) => changing++;
+        host.MediaSessionChanged += (_, _) => restarted++;
+        host.ObserveVideoIdentity("content:youtube:abcdefghijk", page, 90);
+        await Task.Delay(450);
+        Assert.Equal(0, changing);
+        Assert.Equal(0, restarted);
+        host.ObserveVideoIdentity("content:youtube:lmnopqrstuv", new Uri("https://www.youtube.com/watch?v=lmnopqrstuv"), 90);
+        await Task.Delay(450);
+        Assert.Equal(1, changing);
+        Assert.Equal(1, restarted);
+    }
+
+    [Fact]
     public async Task GenericValidatedVideo_IsPublishedBeforeFinalPageResult()
     {
         var pipeline = new UnifiedMediaPipeline(Substitute.For<IRequestMessageFactory>(), [], Options.Create(new AppOptions()));

@@ -202,13 +202,6 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
         psi.ArgumentList.Add("-J");
         psi.ArgumentList.Add("--no-playlist");
         psi.ArgumentList.Add("--no-warnings");
-        // A bounded ranked chain owns retries; do not multiply it with hidden network retries.
-        psi.ArgumentList.Add("--socket-timeout");
-        psi.ArgumentList.Add("6");
-        psi.ArgumentList.Add("--retries");
-        psi.ArgumentList.Add("0");
-        psi.ArgumentList.Add("--extractor-retries");
-        psi.ArgumentList.Add("0");
         var runtime = FindJavaScriptRuntime(path);
         if (runtime is not null)
         {

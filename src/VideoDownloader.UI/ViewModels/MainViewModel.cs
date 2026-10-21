@@ -446,6 +446,7 @@ public sealed partial class MainViewModel : ObservableObject
     private long _pageGeneration;
     private readonly FeedDetectionDisplayState _feedDisplayState = new();
     private bool _detectionRunning;
+    private DetectionResultBuffer? _detectionResults;
     private bool _probeMethodVisible;
     private bool _forceReplaceResults;
     private string? _statusKey;
@@ -969,7 +970,7 @@ public sealed partial class MainViewModel : ObservableObject
                     HangProbe.Mark("vm.navStarted", $"{page.Host}{page.AbsolutePath}");
                     if (IsAppFullscreen && !LocalLibraryHost.IsLocalPlayerUrl(page))
                         SetAppFullscreen(false);
-                    RestartDetectionForPageChange(page, null, mediaSessionKey: null);
+                    RestartDetectionForPageChange(page, null, mediaSessionKey: null, forceRestart: true);
                 }
             };
             tab.Host.LocalPlayerFullscreenRequested += (_, active) =>
@@ -1449,13 +1450,12 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         // Manual probe: singleton destroy + full re-probe (same entry as auto navigation/SPA/session).
-        _feedDisplayState.BeginSession();
         ClearStatus();
         SetStatusKey("status.probeManual");
         RestartDetectionForPageChange(
             pageUrl,
             tab?.Title,
-            mediaSessionKey: tab?.Host.CurrentMediaSessionKey);
+            mediaSessionKey: tab?.Host.CurrentMediaSessionKey, forceRestart: true);
     }
 
     /// <summary>
@@ -1478,17 +1478,18 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         if (!forceRestart && !_feedDisplayState.CanBeginSession(BuildPageIdentity(pageUrl).Split('\n')[0],
-                ExtractStableContentKey(mediaSessionKey, pageUrl), mediaSessionKey))
+                ExtractStableContentKey(null, pageUrl) ?? ExtractStableContentKey(mediaSessionKey, null), mediaSessionKey))
             return;
 
         lock (_pageSync)
         {
-            if (_detectionRunning && !forceRestart)
+            if (!forceRestart)
             {
-                var incomingStable = ExtractStableContentKey(mediaSessionKey, pageUrl);
+                var incomingStable = ExtractStableContentKey(null, pageUrl) ?? ExtractStableContentKey(mediaSessionKey, null);
                 var currentStable = ExtractStableContentKeyFromIdentity(_currentPageIdentity);
-                if (incomingStable is not null && currentStable is not null &&
-                    string.Equals(incomingStable, currentStable, StringComparison.Ordinal))
+                // Duplicate browser notifications cannot restart either a running or finished run.
+                if ((incomingStable is not null && incomingStable == currentStable) ||
+                    (incomingStable is null && _currentPageIdentity == BuildPageIdentity(pageUrl, mediaSessionKey)))
                 {
                     HangProbe.Mark("vm.restart.blocked", $"stable={incomingStable}");
                     return;
@@ -1499,15 +1500,7 @@ public sealed partial class MainViewModel : ObservableObject
         RefreshSidePanelVisibility(pageUrl);
 
         var enriched = EnrichPageUrlWithContentId(pageUrl, mediaSessionKey);
-        StartPageDetectionSession(
-            enriched,
-            pageTitle,
-            clearUi: true,
-            forceReplace: true,
-            mediaSessionKey: mediaSessionKey,
-            resetMediaSession: true,
-            forceFullRestart: true,
-            destroySameContent: true);
+        StartPageDetectionSession(enriched, pageTitle, mediaSessionKey);
     }
 
     private void EnterLocalLibraryMode(Uri pageUrl)
@@ -1515,7 +1508,9 @@ public sealed partial class MainViewModel : ObservableObject
         StopAutoMode(announce: false);
         lock (_pageSync)
         {
+            _pageGeneration++;
             _probeCts.Cancel();
+            _detectionResults?.Cancel();
             _detectionRunning = false;
             _currentPageIdentity = BuildPageIdentity(pageUrl);
             _lastNavigatedPageUrl = _currentPageIdentity;
@@ -1610,7 +1605,9 @@ public sealed partial class MainViewModel : ObservableObject
         {
             _pageGeneration++;
             _probeCts.Cancel();
+            _detectionResults?.Cancel();
             _detectionRunning = false;
+            _currentPageIdentity = null;
         }
         DetectedVideos.Clear();
         _videoMap.Clear();
@@ -1637,84 +1634,41 @@ public sealed partial class MainViewModel : ObservableObject
     /// One stable page session per document or confirmed player-content switch. Network activity
     /// may enrich the current result, but never schedules additional timed re-probes.
     /// </summary>
-    private void StartPageDetectionSession(
-        Uri pageUrl,
-        string? pageTitle,
-        bool clearUi,
-        bool forceReplace = false,
-        string? mediaSessionKey = null,
-        bool resetMediaSession = true,
-        bool forceFullRestart = false,
-        bool destroySameContent = false)
+    private void StartPageDetectionSession(Uri pageUrl, string? pageTitle, string? mediaSessionKey)
     {
         long generation;
         CancellationToken token;
         lock (_pageSync)
         {
-            var pageKey = BuildPageIdentity(pageUrl, mediaSessionKey);
-            var stableIncoming = ExtractStableContentKey(mediaSessionKey, pageUrl);
-            var stableCurrent = ExtractStableContentKeyFromIdentity(_currentPageIdentity);
-            // Same aweme already running: keep the only singleton session unless Probe / ForceRestart.
-            if (!destroySameContent &&
-                _detectionRunning &&
-                stableIncoming is not null &&
-                string.Equals(stableIncoming, stableCurrent, StringComparison.Ordinal))
-            {
-                return;
-            }
-
-            // Same document already being probed — ignore duplicate NavigationStarted/PageIdentity.
-            if (!forceFullRestart &&
-                clearUi &&
-                !forceReplace &&
-                _detectionRunning &&
-                string.Equals(_currentPageIdentity, pageKey, StringComparison.Ordinal))
-            {
-                return;
-            }
-
-            _currentPageIdentity = pageKey;
+            _detectionResults?.Cancel();
+            _currentPageIdentity = BuildPageIdentity(pageUrl, mediaSessionKey);
             _lastNavigatedPageUrl = BuildPageIdentity(pageUrl);
-            _forceReplaceResults = forceReplace || clearUi || forceFullRestart;
+            _forceReplaceResults = true;
             _detectionRunning = true;
-            _pageGeneration++;
-            generation = _pageGeneration;
+            generation = ++_pageGeneration;
             _probeCts.Cancel();
             _probeCts.Dispose();
             _probeCts = new CancellationTokenSource();
             token = _probeCts.Token;
         }
 
-        if (clearUi || forceFullRestart)
-        {
-            _feedDisplayState.BeginSession();
-            DetectedVideos.Clear();
-            _videoMap.Clear();
-            SelectedDetectedVideo = null;
-        }
-
-        // Fresh singleton entry: destroy previous detector session, BeginSession once.
-        if (forceFullRestart)
-        {
-            _aggregator.Clear();
-            if (_pipeline is RoutedMediaDetectionPipeline routed)
-                routed.Reenter(pageUrl);
-            else
-                HardResetDetectionPipeline();
-        }
-        else
-            ResetDetectionPipeline();
-
-        if (resetMediaSession)
-            SelectedTab?.Host.ResetDetectionSession();
-        _ = RunStableDetectionSessionAsync(pageUrl, pageTitle, token, generation);
+        _feedDisplayState.BeginSession();
+        DetectedVideos.Clear();
+        _videoMap.Clear();
+        SelectedDetectedVideo = null;
+        _aggregator.Clear();
+        if (_pipeline is RoutedMediaDetectionPipeline routed) routed.Reenter(pageUrl);
+        else HardResetDetectionPipeline();
+        SelectedTab?.Host.ResetDetectionSession();
+        var results = _detectionResults = new DetectionResultBuffer(_pipeline.SessionId);
+        _ = RunStableDetectionSessionAsync(pageUrl, pageTitle, token, generation, results);
     }
 
     private async Task RunStableDetectionSessionAsync(
         Uri pageUrl,
         string? pageTitle,
         CancellationToken token,
-        long generation)
+        long generation, DetectionResultBuffer results)
     {
         try
         {
@@ -1739,8 +1693,8 @@ public sealed partial class MainViewModel : ObservableObject
             var preferExternal = stats?.PreferYtdlpFirst(scope) ?? siteId != SiteIds.Douyin;
             var isAlbum = siteId == SiteIds.Douyin && pageUrl.AbsolutePath.Contains("/note/", StringComparison.OrdinalIgnoreCase);
             bool Current() => generation == _pageGeneration && !token.IsCancellationRequested;
-            bool Ready() => Current() && DetectedVideos.Any(v => DetectionReadiness.IsUsable(v.Video));
-            bool Stop() => !Current() || DetectedVideos.Any(v => v.Video.IsLive);
+            bool Ready() => Current() && results.HasUsableResult;
+            bool Stop() => !Current() || results.HasLiveResult;
 
             // Observe first without external processes; then race one extraction with continuing
             // browser observations. No second full round and no restarting the same singleton.
@@ -1757,7 +1711,7 @@ public sealed partial class MainViewModel : ObservableObject
             if (!Current()) return;
 
             // Seal once, after the external process has completed or been cancelled and joined.
-            // Already displayed good results never wait on this final bookkeeping step.
+            // All entry points publish only after extraction cleanup and sealing finish.
             using (var sealing = CancellationTokenSource.CreateLinkedTokenSource(token))
             {
                 sealing.CancelAfter(TimeSpan.FromSeconds(2));
@@ -1773,8 +1727,13 @@ public sealed partial class MainViewModel : ObservableObject
 
             await Application.Current.Dispatcher.InvokeAsync(() =>
             {
-                if (generation != _pageGeneration)
+                if (generation != _pageGeneration || token.IsCancellationRequested)
                     return;
+                foreach (var video in results.Complete())
+                    if (IsVideoRelevantToCurrentPage(video)) UpsertDetectedVideo(video, focus: false);
+                if (SelectedDetectedVideo is null && DetectedVideos.Count > 0)
+                    FocusLargestVideoVariant(DetectedVideos[0]);
+                _forceReplaceResults = false;
                 if (DetectedVideos.Count > 0)
                 {
                     SetStatusKey("status.probeDone", DetectedVideos.Count);
@@ -1806,6 +1765,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
         finally
         {
+            results.Cancel();
             lock (_pageSync)
             {
                 if (generation == _pageGeneration)
@@ -2100,6 +2060,7 @@ public sealed partial class MainViewModel : ObservableObject
         {
             _pageGeneration++;
             _probeCts.Cancel();
+            _detectionResults?.Cancel();
             _detectionRunning = false;
         }
         DetectedVideos.Clear();
@@ -2117,11 +2078,6 @@ public sealed partial class MainViewModel : ObservableObject
         try
         {
             ct.ThrowIfCancellationRequested();
-            await Application.Current.Dispatcher.InvokeAsync(() =>
-            {
-                ct.ThrowIfCancellationRequested();
-                SuspendDetectedResults(tab);
-            });
             await tab.Host.SendFeedNextAsync(ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
@@ -2308,6 +2264,7 @@ public sealed partial class MainViewModel : ObservableObject
         var itemIdentity = CaptureAutoPlaybackIdentity();
         Guid? enqueuedJobId = null;
         var wasAlreadyCompleted = false;
+        var waitedForProbe = false;
 
         while (!token.IsCancellationRequested && DateTime.UtcNow < sessionEndUtc)
         {
@@ -2325,6 +2282,25 @@ public sealed partial class MainViewModel : ObservableObject
                 gate = new AutoModeAdvanceGate(_autoItemStartedAt);
                 enqueuedJobId = null;
                 wasAlreadyCompleted = false;
+            }
+            // Automatic playback consumes the common probe's final result; its own address
+            // deadline must never cancel/skip a still-running manual/navigation probe.
+            if (_detectionRunning)
+            {
+                waitedForProbe = true;
+                await Task.Delay(200, token);
+                continue;
+            }
+            if (waitedForProbe)
+            {
+                waitedForProbe = false;
+                if (DetectedVideos.Count == 0)
+                    return new AutoProbeResult(null, SkipLive: false, AdvanceNoAddress: true, Identity: itemIdentity);
+                if (enqueuedJobId is null)
+                {
+                    _autoItemStartedAt = DateTimeOffset.UtcNow;
+                    gate = new AutoModeAdvanceGate(_autoItemStartedAt);
+                }
             }
             var live = await IsCurrentPlaybackLiveAsync(token);
             DetectedVideoViewModel? candidate = null;
@@ -2992,61 +2968,14 @@ public sealed partial class MainViewModel : ObservableObject
 
     private void OnVideoDetected(object? sender, DetectedVideo video)
     {
-        var displayEpoch = _feedDisplayState.Epoch;
-        _ = Application.Current.Dispatcher.InvokeAsync(() =>
-        {
-            if (!_feedDisplayState.CanPublish(displayEpoch, video.SessionId, _pipeline.SessionId)) return;
-            if (!IsVideoRelevantToCurrentPage(video))
-                return;
-
-            // Ignore empty publishes — they must not wipe a sticky last-good result.
-            if (video.Variants.Count == 0 && !video.IsLive)
-                return;
-
-            UpsertDetectedVideo(video, focus: SelectedDetectedVideo is null);
-        }, System.Windows.Threading.DispatcherPriority.Background);
+        // Transport/DOM events stage only. The shared session exit is the sole UI publisher.
+        if (video.SessionId != _pipeline.SessionId || !IsVideoRelevantToCurrentPage(video)) return;
+        _detectionResults?.Stage(video);
     }
 
     private void OnPageProbed(object? sender, IReadOnlyList<DetectedVideo> videos)
     {
-        var displayEpoch = _feedDisplayState.Epoch;
-        _ = Application.Current.Dispatcher.InvokeAsync(() =>
-        {
-            var relevant = videos
-                .Where(v => !v.IsFormatDiscoveryPending && (v.Variants.Count > 0 || v.IsLive))
-                .Where(v => _feedDisplayState.CanPublish(displayEpoch, v.SessionId, _pipeline.SessionId))
-                .Where(IsVideoRelevantToCurrentPage)
-                .ToArray();
-            if (relevant.Length == 0)
-                return;
-
-            var pageKey = BuildPageIdentity(relevant[0].PageUrl);
-            var keepIds = relevant.Select(v => v.VideoId).ToHashSet();
-
-            // Drop stale cards for this page that are no longer in the final probe set.
-            for (var i = DetectedVideos.Count - 1; i >= 0; i--)
-            {
-                var item = DetectedVideos[i];
-                if (!string.Equals(BuildPageIdentity(item.Video.PageUrl), pageKey, StringComparison.OrdinalIgnoreCase))
-                    continue;
-                if (keepIds.Contains(item.Video.VideoId))
-                    continue;
-
-                DetectedVideos.RemoveAt(i);
-                _videoMap.Remove(item.Video.VideoId);
-                if (ReferenceEquals(SelectedDetectedVideo, item))
-                    SelectedDetectedVideo = null;
-            }
-
-            foreach (var video in relevant)
-                UpsertDetectedVideo(video, focus: false);
-
-            if (SelectedDetectedVideo is null && DetectedVideos.Count > 0)
-                FocusLargestVideoVariant(DetectedVideos[0]);
-
-            _forceReplaceResults = false;
-            SetStatusKey(_pipeline.IsCompleted ? "status.probeDone" : "status.probeFound", DetectedVideos.Count);
-        }, System.Windows.Threading.DispatcherPriority.Background);
+        foreach (var video in videos) OnVideoDetected(sender, video);
     }
 
     private void UpsertDetectedVideo(DetectedVideo video, bool focus)
@@ -3252,6 +3181,11 @@ public sealed partial class MainViewModel : ObservableObject
         var currentPage = current.Split('\n')[0];
         var videoIdentity = BuildPageIdentity(video.PageUrl);
         var videoPage = videoIdentity.Split('\n')[0];
+        var currentContent = ExtractStableContentKeyFromIdentity(current);
+        var incomingContent = ExtractStableContentKeyFromIdentity(videoIdentity);
+        if (currentContent is not null && incomingContent is not null)
+            return string.Equals(currentContent, incomingContent, StringComparison.Ordinal);
+
         if (string.Equals(currentPage, videoPage, StringComparison.OrdinalIgnoreCase))
             return true;
 
@@ -3270,15 +3204,12 @@ public sealed partial class MainViewModel : ObservableObject
             string.Equals(currentStable, videoStable, StringComparison.Ordinal))
             return true;
 
-        // Exclusive-site feed soft-nav: same host accepts the exclusive card.
-        // Douyin/TikTok paths kept; YouTube/Bilibili added so content-keyed identities are not dropped.
+        // Only id-less Douyin/TikTok feed roots may use a host fallback.
+        // Concrete YouTube/Bilibili content mismatches must never cross video boundaries.
         if (Uri.TryCreate(currentPage, UriKind.Absolute, out var cur) &&
             (cur.Host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
              cur.Host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase) ||
-             cur.Host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase) ||
-             cur.Host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
-             cur.Host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase) ||
-             cur.Host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase)) &&
+             cur.Host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase)) &&
             string.Equals(cur.Host, video.PageUrl.Host, StringComparison.OrdinalIgnoreCase))
             return true;
 
@@ -3289,7 +3220,7 @@ public sealed partial class MainViewModel : ObservableObject
     {
         var builder = new UriBuilder(pageUrl) { Fragment = string.Empty };
         var page = builder.Uri.AbsoluteUri.TrimEnd('/');
-        var stable = ExtractStableContentKey(mediaSessionKey, pageUrl);
+        var stable = ExtractStableContentKey(null, pageUrl) ?? ExtractStableContentKey(mediaSessionKey, null);
         if (!string.IsNullOrWhiteSpace(stable))
             return page + "\n" + stable;
         if (string.IsNullOrWhiteSpace(mediaSessionKey))
