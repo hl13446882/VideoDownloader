@@ -543,7 +543,7 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
                         height,
                         null,
                         vTrack.Container,
-                        [vTrack with { TrackId = "combined", Kind = MediaTrackKind.Combined, Codec = vcodec }]));
+                        [vTrack]));
                 }
             }
         }

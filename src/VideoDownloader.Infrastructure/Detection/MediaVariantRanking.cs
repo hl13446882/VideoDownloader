@@ -31,7 +31,7 @@ public static class MediaVariantRanking
         variant.Tracks.Any(t => t.Kind is MediaTrackKind.Audio or MediaTrackKind.Combined);
 
     /// <summary>
-    /// Rank for UI dropdown / default selection: largest file size first (after excluding junk classes).
+    /// Rank for UI dropdown / default selection: highest resolution first (after excluding incomplete or unusable media).
     /// </summary>
     public static IReadOnlyList<MediaVariant> Rank(IEnumerable<MediaVariant> variants) =>
         variants
@@ -45,10 +45,10 @@ public static class MediaVariantRanking
             .ThenByDescending(v => MediaVariantReconciler.HasCompleteAudio(v) ? 1 : 0)
             .ThenBy(v => v.Tracks.Any(t =>
                 UnifiedMediaPipeline.IsInsufficientByteDanceDownloadObject(t.SourceUrl, t.ContentLength)) ? 1 : 0)
-            // Primary: known file size (largest first). Bandwidth / height only break ties.
-            .ThenByDescending(v => MediaResourceSizeFilter.EffectiveSize(v))
-            .ThenByDescending(v => v.Bandwidth ?? 0)
             .ThenByDescending(v => v.Height ?? 0)
+            .ThenByDescending(v => v.Width ?? 0)
+            .ThenByDescending(v => v.Bandwidth ?? 0)
+            .ThenByDescending(v => MediaResourceSizeFilter.EffectiveSize(v))
             .ToArray();
 
     public static bool IsMseOrPartialVariant(MediaVariant variant) =>

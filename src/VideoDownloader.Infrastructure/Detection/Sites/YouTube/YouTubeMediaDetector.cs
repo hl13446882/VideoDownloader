@@ -30,6 +30,11 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
     private bool _successCounted;
     private bool _isLive;
     private bool _hasMatchingObservation;
+    private string? _formatProbeMethod;
+    private string? _publishedFormats;
+    private double? _durationSec;
+    private int _expectedVideoHeight;
+    private string? _observedFormatSummary;
 
     public YouTubeMediaDetector(
         ILogger<YouTubeMediaDetector> logger,
@@ -76,7 +81,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         lock (_gate)
         {
             // Do not drop late CDN after a failed Complete — late-retry must still accept media.
-            if (_pageUrl is null || _successCounted || !_hasMatchingObservation) return Task.CompletedTask;
+            if (_pageUrl is null || !_hasMatchingObservation) return Task.CompletedTask;
             var url = e.Url.AbsoluteUri;
             if (url.Contains("sabr=1", StringComparison.OrdinalIgnoreCase) &&
                 !url.Contains("mime=video", StringComparison.OrdinalIgnoreCase) &&
@@ -146,6 +151,11 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
                 _probeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 _contentId = contentId;
                 _formats.Clear();
+                _formatProbeMethod = null;
+                _publishedFormats = null;
+                _durationSec = null;
+                _expectedVideoHeight = 0;
+                _observedFormatSummary = null;
                 _tracks.Clear();
                 _author = null;
                 _failed = false;
@@ -201,6 +211,8 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
                     if (!string.IsNullOrWhiteSpace(v.DisplayTitle))
                         _caption = v.DisplayTitle;
                     _author = ExclusiveAuthorHints.MergeFromMetadata(_author, v.Metadata, _pageUrl);
+                    _formatProbeMethod = _ytdlp.LastProbeMethod ?? ProbeMethods.YtDlpDefault;
+                    _durationSec = v.DurationSec ?? _durationSec;
                     foreach (var variant in v.Variants)
                     {
                         if (variant.Tracks.Any(t => t.Kind == MediaTrackKind.Combined) &&
@@ -256,16 +268,20 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         MediaDescriptor? descriptor;
         lock (_gate)
         {
-            if (_successCounted) return;
             descriptor = Build(out var method);
             if (descriptor is null) return;
             if (descriptor.Formats.Count == 0 && descriptor.Video?.Kind == MediaTrackKind.Video &&
                 descriptor.Audio is null) return;
             var mapped = MediaDescriptorMapper.ToDetectedVideo(descriptor, _sessionId);
-            if (!descriptor.IsLive && !VideoDownloader.Core.Detection.DetectionReadiness.IsUsable(mapped)) return;
+            if (!descriptor.IsLive && !VideoDownloader.Core.Detection.DetectionReadiness.IsUsable(mapped with { IsFormatDiscoveryPending = false })) return;
+            var signature = string.Join("|", mapped.Variants.Select(v =>
+                $"{mapped.IsFormatDiscoveryPending}:{v.VariantId}:{v.Width}:{v.Height}:{v.Bandwidth}:{v.TotalContentLength}:" +
+                string.Join(",", v.Tracks.Select(t => $"{t.Kind}:{t.SourceUrl}"))));
+            if (_publishedFormats == signature) return;
+            _publishedFormats = signature;
             _failed = false;
             _failureReason = null;
-            CountSuccess(method);
+            if (!mapped.IsFormatDiscoveryPending) CountSuccess(method);
         }
         DescriptorsReady?.Invoke(this, [descriptor]);
     }
@@ -290,7 +306,12 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
 
             _failed = false;
             _failureReason = null;
-            CountSuccess(winMethod);
+            if (!d.IsFormatDiscoveryPending) CountSuccess(winMethod);
+            else
+            {
+                _failed = true;
+                _failureReason = "youtube_high_resolution_unresolved";
+            }
         }
         DescriptorsReady?.Invoke(this, [d]);
         return Task.CompletedTask;
@@ -313,14 +334,17 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
                 .OrderByDescending(v => v.Height ?? 0)
                 .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
                 .FirstOrDefault();
-            winningMethod = _ytdlp.LastProbeMethod ?? ProbeMethods.YtDlpDefault;
+            winningMethod = _formatProbeMethod ?? _ytdlp.LastProbeMethod ?? ProbeMethods.YtDlpDefault;
             return new MediaDescriptor(SiteIds.YouTube, _pageUrl, _contentId, MediaContentType.Video,
                 best?.Tracks.FirstOrDefault(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined),
                 best?.Tracks.FirstOrDefault(t => t.Kind == MediaTrackKind.Audio),
                 [], _context, 0.95, _caption, _author)
             {
                 SessionId = _sessionId,
-                Formats = _formats.ToArray()
+                Formats = _formats.ToArray(),
+                DurationSec = _durationSec,
+                IsFormatDiscoveryPending = _expectedVideoHeight > _formats
+                    .Where(MediaVariantReconciler.HasCompleteAudio).Select(f => f.Height ?? 0).DefaultIfEmpty().Max()
             };
         }
 
@@ -341,7 +365,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         return new MediaDescriptor(SiteIds.YouTube, _pageUrl, _contentId, MediaContentType.Video,
             video,
             video.Kind == MediaTrackKind.Combined ? null : audio,
-            [], _context, video.BrowserObserved ? 0.95 : 0.8, _caption, _author) { SessionId = _sessionId };
+            [], _context, video.BrowserObserved ? 0.95 : 0.8, _caption, _author) { SessionId = _sessionId, IsFormatDiscoveryPending = _expectedVideoHeight > 0 };
     }
 
     private void ApplyMediaJson(string? json)
@@ -363,6 +387,46 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
                 matchingIdentity.GetString()?.EndsWith("youtube:" + _contentId, StringComparison.Ordinal) == true)
                 _hasMatchingObservation = true;
             _author = ExclusiveAuthorHints.Merge(_author, ExclusiveAuthorHints.ReadFromObservationJson(json));
+            if (doc.RootElement.TryGetProperty("availableHeights", out var availableHeights) && availableHeights.ValueKind == JsonValueKind.Array)
+                _expectedVideoHeight = Math.Max(_expectedVideoHeight, availableHeights.EnumerateArray()
+                    .Where(h => h.TryGetInt32(out _)).Select(h => h.GetInt32()).DefaultIfEmpty().Max());
+            if (_hasMatchingObservation && _pageUrl is not null &&
+                doc.RootElement.TryGetProperty("formats", out var observedFormats) && observedFormats.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var video in _ytdlp.ParseJson(json, _pageUrl, _context, SiteIds.YouTube))
+                {
+                    _durationSec = video.DurationSec ?? _durationSec;
+                    foreach (var variant in video.Variants)
+                    {
+                        // Preserve every quality from this successful browser method, including adaptive A/V pairs.
+                        var observed = variant with
+                        {
+                            ContentIdentity = "id:" + _contentId,
+                            RecoveryPageUrl = _pageUrl,
+                            Tracks = variant.Tracks.Select(t => t with
+                            {
+                                ContentIdentity = "id:" + _contentId,
+                                IsValidated = true,
+                                Evidence = MediaEvidence.DomObserved,
+                                ProbeMethod = ProbeMethods.NetworkMedia
+                            }).ToArray()
+                        };
+                        var index = _formats.FindIndex(f => f.VariantId == observed.VariantId);
+                        if (index < 0) _formats.Add(observed); else _formats[index] = observed;
+                    }
+                    if (_formats.Count > 0) _formatProbeMethod ??= ProbeMethods.NetworkMedia;
+                    var advertised = doc.RootElement.TryGetProperty("availableHeights", out var heights) && heights.ValueKind == JsonValueKind.Array
+                        ? heights.EnumerateArray().Where(h => h.TryGetInt32(out _)).Select(h => h.GetInt32()).DefaultIfEmpty().Max() : 0;
+                    var captured = _formats.Select(f => f.Height ?? 0).DefaultIfEmpty().Max();
+                    var summary = $"{advertised}/{captured}/{_formats.Count}";
+                    if (_observedFormatSummary != summary)
+                    {
+                        _observedFormatSummary = summary;
+                        _logger.LogInformation("YouTube player formats content={ContentId} advertisedHeight={Advertised} capturedHeight={Captured} variants={Count}",
+                            _contentId, advertised, captured, _formats.Count);
+                    }
+                }
+            }
             var combinedUrls = new HashSet<string>(StringComparer.Ordinal);
             if (doc.RootElement.TryGetProperty("combinedMedia", out var combined) && combined.ValueKind == JsonValueKind.Array)
                 foreach (var value in combined.EnumerateArray())
@@ -424,6 +488,11 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         _context = RequestContext.CreateEmpty();
         _tracks.Clear();
         _formats.Clear();
+        _formatProbeMethod = null;
+        _publishedFormats = null;
+        _durationSec = null;
+        _expectedVideoHeight = 0;
+        _observedFormatSummary = null;
         _failed = false;
         _failureReason = null;
         _externalAttempted = false;

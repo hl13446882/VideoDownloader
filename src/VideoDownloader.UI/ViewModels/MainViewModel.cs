@@ -83,7 +83,7 @@ public sealed partial class DetectedVideoViewModel : ObservableObject
     public string SiteId => Video.SiteId;
     public string Family => Video.Family.ToString();
     public bool IsDrm => Video.IsDrmProtected;
-    public bool CanDownload => !Video.IsDrmProtected && !Video.IsLive && SelectedVariant is not null;
+    public bool CanDownload => !Video.IsDrmProtected && !Video.IsLive && !Video.IsFormatDiscoveryPending && SelectedVariant is not null;
 
     public string DurationText
     {
@@ -127,7 +127,7 @@ public sealed partial class DetectedVideoViewModel : ObservableObject
         {
             if (Video.IsDrmProtected)
                 return _loc?.T("detect.drm") ?? "受 DRM 保护，不支持下载";
-            if (Video.Variants.Count == 0)
+            if (Video.Variants.Count == 0 || Video.IsFormatDiscoveryPending)
                 return _loc?.T("detect.parsing") ?? "解析中...";
             if (!string.IsNullOrWhiteSpace(Video.StatusHint))
                 return Video.StatusHint;
@@ -148,6 +148,7 @@ public sealed partial class DetectedVideoViewModel : ObservableObject
     public void ReplaceVariants(DetectedVideo video)
     {
         var previousMode = SelectedMode;
+        var wasDefaultSelection = ReferenceEquals(SelectedVariant, Variants.FirstOrDefault());
         var previousVariantId = SelectedVariant?.Variant.VariantId;
         var previousUrl = SelectedVariant?.Variant.SourceUrl.AbsoluteUri;
 
@@ -180,8 +181,9 @@ public sealed partial class DetectedVideoViewModel : ObservableObject
         else
             ApplyModeFilter();
 
-        // Rank already put largest first; keep prior selection when still present.
+        // Follow newly discovered higher qualities while still on the default; preserve an explicit other choice.
         SelectedVariant =
+            (wasDefaultSelection ? Variants.FirstOrDefault() : null) ??
             Variants.FirstOrDefault(v => v.Variant.VariantId == previousVariantId) ??
             Variants.FirstOrDefault(v => v.Variant.SourceUrl.AbsoluteUri == previousUrl) ??
             Variants.FirstOrDefault();
@@ -206,7 +208,7 @@ public sealed partial class DetectedVideoViewModel : ObservableObject
         foreach (var item in AllVariants.Where(v => MatchesMode(v.Variant, mode)))
             Variants.Add(item);
 
-        // AllVariants is size-ranked; first match is the largest for this mode.
+        // AllVariants is quality-ranked; first match is the highest resolution for this mode.
         SelectedVariant =
             Variants.FirstOrDefault(v => v.Variant.VariantId == previousId) ??
             Variants.FirstOrDefault(v => v.Variant.SourceUrl.AbsoluteUri == previousUrl) ??
@@ -2367,9 +2369,13 @@ public sealed partial class MainViewModel : ObservableObject
                         (ExtractStableContentKey(null, current!.Video.PageUrl) is not null &&
                          BuildAutoContentFingerprint(current!) != CaptureAutoPlaybackIdentity()))
                         return null;
+                    // Automatic downloads always use the best video, independently of a manual dropdown choice.
+                    var automaticVariant = MediaVariantRanking.SelectPreferredVideo(current!.Video.Variants);
+                    if (automaticVariant is null) return null;
                     var fingerprint = BuildAutoContentFingerprint(current!);
                     var existing = _downloadEngine.GetActiveJobs().FirstOrDefault(j =>
                         ExtractStableContentKey(null, j.PageUrl) is { } existingKey && existingKey == fingerprint &&
+                        (j.Variant.Height ?? 0) >= (automaticVariant.Height ?? 0) &&
                         (j.Status is DownloadStatus.Pending or DownloadStatus.Preparing or DownloadStatus.Downloading or DownloadStatus.Muxing ||
                          j.Status == DownloadStatus.Completed && System.IO.File.Exists(j.TargetPath) && new System.IO.FileInfo(j.TargetPath).Length > 0));
                     if (existing is not null)
@@ -2382,7 +2388,7 @@ public sealed partial class MainViewModel : ObservableObject
                         return null;
 
                     // An address is applied immediately. The five-second delay belongs AFTER transfer starts.
-                    var id = await TryStartDownloadQuietAsync(current!.Video, current.SelectedVariant!.Variant,
+                    var id = await TryStartDownloadQuietAsync(current!.Video, automaticVariant,
                         cancellationToken: token);
                     if (token.IsCancellationRequested || _autoCts?.Token != token)
                         return null;
@@ -2485,7 +2491,7 @@ public sealed partial class MainViewModel : ObservableObject
         DetectedVideos.Count > 0 ? DetectedVideos[0] : null;
 
     private static bool IsAutoCandidateDownloadable(DetectedVideoViewModel? item) =>
-        item is { IsDrm: false, Video.IsLive: false, SelectedVariant.Variant: not null } &&
+        item is { IsDrm: false, Video.IsLive: false, Video.IsFormatDiscoveryPending: false, SelectedVariant.Variant: not null } &&
         !UnifiedMediaPipeline.IsDouyinLiveStream(item.SelectedVariant.Variant.SourceUrl);
 
     public async Task StartDownloadAsync(DetectedVideo video, MediaVariant variant) =>
@@ -3196,10 +3202,11 @@ public sealed partial class MainViewModel : ObservableObject
     {
         if (!string.Equals(candidate.DisplayTitle, current.DisplayTitle, StringComparison.Ordinal) ||
             candidate.IsDrmProtected != current.IsDrmProtected ||
+            candidate.IsFormatDiscoveryPending != current.IsFormatDiscoveryPending ||
             candidate.Variants.Count != current.Variants.Count)
             return false;
 
-        static string Key(MediaVariant variant) => string.Join("|", variant.Tracks
+        static string Key(MediaVariant variant) => $"{variant.Width}:{variant.Height}:" + string.Join("|", variant.Tracks
             .Select(track => $"{track.Kind}:{track.SourceUrl.AbsoluteUri}:{track.ContentLength}:{track.Bandwidth}"));
 
         return candidate.Variants.Select(Key).OrderBy(x => x, StringComparer.OrdinalIgnoreCase)

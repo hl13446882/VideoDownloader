@@ -16,6 +16,9 @@ public sealed record DetectedVideo(
     public Guid SessionId { get; init; }
     public bool IsLive { get; init; }
 
+    /// <summary>A lower-quality address exists, but advertised higher qualities are still being resolved.</summary>
+    public bool IsFormatDiscoveryPending { get; init; }
+
     /// <summary>Complete A/V vs audio-only / video-denied partial results (T2).</summary>
     public MediaAvailabilityKind Availability { get; init; } = MediaAvailabilityKind.Complete;
 
