@@ -102,14 +102,14 @@ public sealed class DetectionSpeedAndIsolationTests
     {
         var stats = Substitute.For<IProbeMethodStats>();
         var detector = new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance,
-            new YouTubeYtDlpExtractor(Options.Create(new AppOptions()), NullLogger<YouTubeYtDlpExtractor>.Instance, stats), stats);
+            new GatedYouTubeExtractor(available: false), stats);
         var page = new Uri("https://www.youtube.com/watch?v=current");
         detector.BeginSession(page, Guid.NewGuid());
         var results = new List<MediaDescriptor>();
         detector.DescriptorsReady += (_, rows) => results.AddRange(rows);
         await detector.ProcessPageObservationAsync(page, "current",
             """{"media":["https://rr.googlevideo.com/videoplayback?itag=18&mime=video"],"combinedMedia":["https://rr.googlevideo.com/videoplayback?itag=18&mime=video"]}""",
-            RequestContext.CreateEmpty(), default, runExternal: false);
+            RequestContext.CreateEmpty(), default, runExternal: true);
         Assert.Single(results);
         Assert.Equal(MediaTrackKind.Combined, results[0].Video!.Kind);
         Assert.True(VideoDownloader.Core.Detection.DetectionReadiness.IsUsable(
@@ -117,32 +117,34 @@ public sealed class DetectionSpeedAndIsolationTests
     }
 
     [Fact]
-    public async Task YouTubeNetworkPair_IsPublishedWithoutWaitingForFinalCompletion()
+    public async Task YouTubeNetworkPair_IsPublishedOnlyAfterFormatDiscoveryFinishes()
     {
-        var options = Options.Create(new AppOptions());
+        var extractor = new GatedYouTubeExtractor();
         var detector = new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance,
-            new YouTubeYtDlpExtractor(options, NullLogger<YouTubeYtDlpExtractor>.Instance, Substitute.For<IProbeMethodStats>()),
-            Substitute.For<IProbeMethodStats>());
+            extractor, Substitute.For<IProbeMethodStats>());
         var page = new Uri("https://www.youtube.com/watch?v=current");
         detector.BeginSession(page, Guid.NewGuid());
         var results = new List<MediaDescriptor>();
         detector.DescriptorsReady += (_, rows) => results.AddRange(rows);
-        await detector.ProcessPageObservationAsync(page, "current",
+
+        var discovery = detector.ProcessPageObservationAsync(page, "current",
             """{"media":["https://rr.googlevideo.com/videoplayback?mime=video&itag=137"]}""",
-            RequestContext.CreateEmpty(), default, runExternal: false);
-        Assert.Empty(results); // Silent/incomplete adaptive track is not a fast success.
+            RequestContext.CreateEmpty(), default, runExternal: true);
         await detector.ProcessPageObservationAsync(page, "current",
             """{"media":["https://rr.googlevideo.com/videoplayback?mime=audio&itag=140"]}""",
             RequestContext.CreateEmpty(), default, runExternal: false);
-        Assert.NotEmpty(results);
-        Assert.NotNull(results[^1].Video);
-        Assert.NotNull(results[^1].Audio);
-        var published = results.Count;
-        await detector.CompleteAsync(default);
+        Assert.Empty(results); // The passive A/V pair must wait for the full ladder.
+
+        extractor.Complete();
+        await discovery;
+        var descriptor = Assert.Single(results);
+        Assert.NotNull(descriptor.Video);
+        Assert.NotNull(descriptor.Audio);
+
         await detector.ProcessPageObservationAsync(page, "current",
             """{"media":["https://rr.googlevideo.com/videoplayback?mime=audio&itag=141"]}""",
             RequestContext.CreateEmpty(), default, runExternal: false);
-        Assert.Equal(published, results.Count);
+        Assert.Single(results);
     }
 
     [Fact]

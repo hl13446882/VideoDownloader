@@ -28,6 +28,8 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
     private CancellationTokenSource _lifetime = new();
     private long _probeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
     private bool _externalAttempted;
+    /// <summary>True once the one-shot format discovery has finished (succeeded or failed).</summary>
+    private bool _externalFinished;
     private bool _successCounted;
     private bool _publishedFormats;
     private bool _isLive;
@@ -76,6 +78,16 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         {
             // Do not drop late CDN after a failed Complete — late-retry must still accept media.
             if (_pageUrl is null || _successCounted) return Task.CompletedTask;
+
+            // In-flight CDP responses outlive a video switch; never stamp previous-video media
+            // with the current content id.
+            if (e.PageUrl is { } eventPage)
+            {
+                var eventId = ExtractVideoId(eventPage);
+                if (eventId is not null && _contentId is not null &&
+                    !string.Equals(eventId, _contentId, StringComparison.Ordinal))
+                    return Task.CompletedTask;
+            }
             var url = e.Url.AbsoluteUri;
             if (url.Contains("sabr=1", StringComparison.OrdinalIgnoreCase) &&
                 !url.Contains("mime=video", StringComparison.OrdinalIgnoreCase) &&
@@ -125,6 +137,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         Uri pageUrl, string? pageTitle, string? pageScriptJson, RequestContext context, CancellationToken ct,
         bool runExternal)
     {
+        var incomingContentId = ExtractVideoId(pageUrl) ?? ReadId(pageScriptJson);
         string? contentId;
         Uri resolveUrl;
         RequestContext enriched;
@@ -133,23 +146,33 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         lock (_gate)
         {
             if (_pageUrl is null) BeginSession(pageUrl, _sessionId == Guid.Empty ? Guid.NewGuid() : _sessionId);
+
+            // A queued observation for the previous video must not move this session backwards.
+            if (incomingContentId is not null && _contentId is not null &&
+                !string.Equals(incomingContentId, _contentId, StringComparison.Ordinal))
+                return;
+
             _pageUrl = pageUrl;
             _context = Enrich(context);
-            contentId = ExtractVideoId(pageUrl) ?? ReadId(pageScriptJson);
-            if (!string.IsNullOrWhiteSpace(contentId) &&
-                !string.Equals(_contentId, contentId, StringComparison.Ordinal))
+            contentId = incomingContentId;
+            var switched = !string.IsNullOrWhiteSpace(contentId) &&
+                           !string.Equals(_contentId, contentId, StringComparison.Ordinal);
+            if (switched)
             {
                 _lifetime.Cancel();
                 _lifetime.Dispose();
                 _lifetime = new();
                 _probeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 _contentId = contentId;
+                // Old title/caption must not label the next video.
+                _caption = null;
                 _formats.Clear();
                 _tracks.Clear();
                 _author = null;
                 _failed = false;
                 _failureReason = null;
                 _externalAttempted = false;
+                _externalFinished = false;
                 _successCounted = false;
                 _publishedFormats = false;
                 _isLive = false;
@@ -157,7 +180,8 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
             else
                 _contentId ??= contentId;
 
-            if (!string.IsNullOrWhiteSpace(pageTitle)) _caption ??= pageTitle.Trim();
+            // A title supplied with a switched observation may still describe the retired video.
+            if (!switched && !string.IsNullOrWhiteSpace(pageTitle)) _caption ??= pageTitle.Trim();
             ApplyMediaJson(pageScriptJson);
             resolveUrl = _pageUrl;
             enriched = _context;
@@ -165,19 +189,35 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
             lifetime = _lifetime.Token;
         }
 
-        PublishAvailable();
-        if (!runExternal || string.IsNullOrWhiteSpace(contentId))
+        // Passive network/DOM evidence is partial; wait for the one-shot format discovery.
+        if (!runExternal)
             return;
 
         using var resolveCancellation = CancellationTokenSource.CreateLinkedTokenSource(ct, lifetime);
         var resolveToken = resolveCancellation.Token;
+        bool attempt;
         lock (_gate)
         {
             resolveToken.ThrowIfCancellationRequested();
-            if (session != _sessionId || !_ytdlp.IsAvailable || _externalAttempted)
+            if (session != _sessionId || contentId != _contentId || _externalAttempted)
                 return;
-            // Claim the slot before await so concurrent probes cannot double-launch yt-dlp.
-            _externalAttempted = true;
+            attempt = !string.IsNullOrWhiteSpace(contentId) && _ytdlp.IsAvailable;
+            if (attempt)
+            {
+                // Claim the slot before await so concurrent probes cannot double-launch yt-dlp.
+                _externalAttempted = true;
+            }
+            else
+            {
+                // No format discovery is possible; the network fallback is all this session gets.
+                _externalFinished = true;
+            }
+        }
+
+        if (!attempt)
+        {
+            PublishAvailable();
+            return;
         }
 
         Diagnostics.HangProbe.Mark("youtube.ytdlp.begin", $"{resolveUrl.AbsoluteUri} cookies={enriched.Cookies.Count}");
@@ -229,19 +269,27 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         {
             Diagnostics.HangProbe.Mark("youtube.ytdlp.cancel", resolveUrl.AbsoluteUri);
             lock (_gate)
-                if (session == _sessionId) _externalAttempted = false;
+                if (session == _sessionId && contentId == _contentId) _externalAttempted = false;
             throw;
         }
         catch (Exception ex)
         {
             Diagnostics.HangProbe.Mark("youtube.ytdlp.fail", ex.GetType().Name + " " + ex.Message);
             _logger.LogInformation(ex, "YouTube exclusive yt-dlp resolve failed (no Generic fallback)");
-            lock (_gate)
-                // Always unlock — cancelled SPA switches / transient yt-dlp errors must allow another round.
-                if (session == _sessionId) _externalAttempted = false;
         }
 
-        if (session != _sessionId || resolveToken.IsCancellationRequested) return;
+        bool current;
+        lock (_gate)
+        {
+            current = session == _sessionId && contentId == _contentId;
+            if (current)
+            {
+                // Always unlock — transient yt-dlp errors must allow another round.
+                _externalAttempted = false;
+                _externalFinished = true;
+            }
+        }
+        if (!current || resolveToken.IsCancellationRequested) return;
         PublishAvailable();
         var useNetwork = false;
         lock (_gate)
@@ -255,6 +303,9 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         MediaDescriptor? descriptor;
         lock (_gate)
         {
+            // Do not show a partial network ladder while format discovery is still pending.
+            // Live streams and finished (possibly failed) discovery fall back to network media.
+            if (!_isLive && !_externalFinished) return;
             descriptor = Build(out var method);
             if (descriptor is null) return;
             if (descriptor.Formats.Count == 0 && descriptor.Video?.Kind == MediaTrackKind.Video &&
@@ -421,6 +472,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         _failed = false;
         _failureReason = null;
         _externalAttempted = false;
+        _externalFinished = false;
         _successCounted = false;
         _publishedFormats = false;
         _isLive = false;

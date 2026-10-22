@@ -12,7 +12,7 @@ using VideoDownloader.Infrastructure.Logging;
 
 namespace VideoDownloader.Infrastructure.Detection.Sites.YouTube;
 
-public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
+public class YouTubeYtDlpExtractor : IExternalSiteResolver
 {
     private static readonly System.Text.UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
     private static int _ytDlpWarmStarted;
@@ -39,7 +39,7 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
     /// <summary>Which YouTube address method last produced formats (ytdlp.pot_mweb / default / web_embedded).</summary>
     public string? LastProbeMethod { get; private set; }
 
-    public bool IsAvailable
+    public virtual bool IsAvailable
     {
         get
         {
@@ -53,7 +53,7 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
 
     public bool SupportsSite(string siteId) => string.Equals(siteId, SiteIds.YouTube, StringComparison.Ordinal);
 
-    public async Task<IReadOnlyList<DetectedVideo>> ResolveAsync(
+    public virtual async Task<IReadOnlyList<DetectedVideo>> ResolveAsync(
         Uri pageUrl,
         RequestContext context,
         CancellationToken ct)

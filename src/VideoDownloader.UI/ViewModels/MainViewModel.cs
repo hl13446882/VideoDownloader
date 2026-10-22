@@ -3413,6 +3413,11 @@ public sealed partial class MainViewModel : ObservableObject
             string.Equals(currentStable, videoStable, StringComparison.Ordinal))
             return true;
 
+        // Two known but different content ids are different videos; same-host feed tolerance
+        // below must not let the retired video's card survive into the next one.
+        if (currentStable is not null && videoStable is not null)
+            return false;
+
         // Exclusive-site feed soft-nav: same host accepts the exclusive card.
         // Douyin/TikTok paths kept; YouTube/Bilibili added so content-keyed identities are not dropped.
         if (Uri.TryCreate(currentPage, UriKind.Absolute, out var cur) &&
