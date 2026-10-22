@@ -7,7 +7,7 @@ namespace VideoDownloader.Infrastructure.Download;
 /// Persists sibling quality/CDN variants on a selected download so 403 recovery can
 /// switch without rediscovery. Cap keeps SQLite meta bounded.
 /// </summary>
-internal static class MediaVariantAlternatives
+public static class MediaVariantAlternatives
 {
     public const int MaxStored = 24;
 

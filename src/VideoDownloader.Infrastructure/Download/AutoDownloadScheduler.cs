@@ -115,16 +115,29 @@ public sealed class AutoDownloadScheduler : IDisposable
         {
             var variant = DownloadJobMapper.DeserializeVariant(
                 item.SourceUrl, item.VariantMetaJson, item.VariantSecret);
+            // Prefer the session-selected quality when present; keep the full ladder as siblings.
+            if (!string.IsNullOrWhiteSpace(item.SelectedVariantId) &&
+                !string.Equals(variant.VariantId, item.SelectedVariantId, StringComparison.Ordinal) &&
+                variant.Alternatives.FirstOrDefault(v =>
+                    string.Equals(v.VariantId, item.SelectedVariantId, StringComparison.Ordinal)) is { } chosen)
+            {
+                variant = MediaVariantAlternatives.WithLadder(chosen,
+                    variant.Alternatives.Prepend(variant));
+            }
+
             var pageUrl = Uri.TryCreate(item.PageUrl, UriKind.Absolute, out var page) ? page : null;
             var displayName = DownloadFileNameBuilder.ClampStem(
                 string.IsNullOrWhiteSpace(item.Caption) ? "auto" : item.Caption!);
+            var siblings = variant.Alternatives.Count > 0
+                ? variant.Alternatives
+                : null;
             var jobId = await _engine.EnqueueAsync(
                 variant,
                 displayName,
                 pageUrl,
                 item.Caption,
                 durationSec: null,
-                siblingVariants: null,
+                siblingVariants: siblings,
                 author: item.Author,
                 ct: token).ConfigureAwait(false);
 

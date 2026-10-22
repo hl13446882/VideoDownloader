@@ -2772,14 +2772,13 @@ public sealed partial class MainViewModel : ObservableObject
             {
                 token.ThrowIfCancellationRequested();
                 candidate = FindAutoDownloadCandidate();
-                if (SelectedTab?.Host.CurrentPageUrl is { } page &&
-                    SiteHosts.MatchesAny(page, "youtube.com", "youtube-nocookie.com", "youtu.be"))
-                {
-                    waitingForDetection = _detectionRunning;
-                    detectionEmpty = !_detectionRunning && !_feedDisplayState.IsSuspended && candidate is null;
-                }
+                // Wait out the full exclusive/external ladder before persisting or advancing.
+                // Slot pressure must not cut enrichment short (old waitingForSlot had that side effect).
+                waitingForDetection = !persisted && (_detectionRunning || !_pipeline.IsCompleted);
+                detectionEmpty = !persisted && !_detectionRunning && _pipeline.IsCompleted &&
+                                 !_feedDisplayState.IsSuspended && candidate is null;
             });
-            if (detectionEmpty && !persisted && !live)
+            if (detectionEmpty && !live)
                 return new AutoProbeResult(Queued: false, SkipLive: false, AdvanceNoAddress: true);
             live |= candidate?.Video.IsLive == true;
             live |= candidate?.Video.Variants.Any(VideoDownloader.Infrastructure.Detection.Sites.YouTube.YouTubeLiveMedia.IsLiveVariant) == true;
@@ -2856,8 +2855,10 @@ public sealed partial class MainViewModel : ObservableObject
              string.Equals(fingerprint, _autoFailedFingerprint, StringComparison.Ordinal)))
             return false;
 
-        var variant = current.SelectedVariant!.Variant;
-        var (meta, secret) = DownloadJobMapper.SerializeVariant(variant);
+        // Pack the full probed ladder into Alternatives so slot-limited downloads keep every resolution.
+        var selected = current.SelectedVariant!.Variant;
+        var packed = MediaVariantAlternatives.WithLadder(selected, current.Video.Variants);
+        var (meta, secret) = DownloadJobMapper.SerializeVariant(packed);
         var now = DateTimeOffset.UtcNow;
         var item = new AutoQueueItem
         {
@@ -2867,10 +2868,10 @@ public sealed partial class MainViewModel : ObservableObject
             ContentId = current.Video.SiteContentId,
             Caption = current.Video.DisplayTitle,
             Author = AuthorNameResolver.FromDetectedVideo(current.Video),
-            SourceUrl = variant.SourceUrl.AbsoluteUri,
+            SourceUrl = packed.SourceUrl.AbsoluteUri,
             VariantMetaJson = meta,
             VariantSecret = secret,
-            SelectedVariantId = variant.VariantId,
+            SelectedVariantId = packed.VariantId,
             Fingerprint = fingerprint,
             Status = AutoQueueItemStatus.Queued,
             ProbedAt = now,
@@ -2963,11 +2964,12 @@ public sealed partial class MainViewModel : ObservableObject
     {
         if (_feedDisplayState.IsSuspended)
             return null;
-        var candidate = DetectedVideos.FirstOrDefault(v =>
-            v.Video.SessionId == _pipeline.SessionId && IsVideoRelevantToCurrentPage(v.Video));
-        if (candidate?.Video.SiteId == SiteIds.YouTube && (_detectionRunning || !_pipeline.IsCompleted))
+        // All sites: wait for the probe session to finish so progressive yt-dlp ladders are complete
+        // before auto persists / advances (especially when download slots are already saturated).
+        if (_detectionRunning || !_pipeline.IsCompleted)
             return null;
-        return candidate;
+        return DetectedVideos.FirstOrDefault(v =>
+            v.Video.SessionId == _pipeline.SessionId && IsVideoRelevantToCurrentPage(v.Video));
     }
 
     private static bool IsAutoCandidateDownloadable(DetectedVideoViewModel? item) =>
