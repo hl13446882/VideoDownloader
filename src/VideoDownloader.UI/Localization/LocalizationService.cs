@@ -82,6 +82,7 @@ public sealed partial class LocalizationService : ObservableObject
         OnPropertyChanged(nameof(TipSettings));
         OnPropertyChanged(nameof(SideDetected));
         OnPropertyChanged(nameof(SideQueue));
+        OnPropertyChanged(nameof(SideAutoTasks));
         OnPropertyChanged(nameof(ModeVideo));
         OnPropertyChanged(nameof(ModeAudio));
         OnPropertyChanged(nameof(BtnDownload));
@@ -169,6 +170,7 @@ public sealed partial class LocalizationService : ObservableObject
     public string TipSettings => T("tip.settings");
     public string SideDetected => T("side.detected");
     public string SideQueue => T("side.queue");
+    public string SideAutoTasks => T("side.autoTasks");
     public string ModeVideo => T("mode.video");
     public string ModeAudio => T("mode.audio");
     public string BtnDownload => T("btn.download");
@@ -249,7 +251,7 @@ public sealed partial class LocalizationService : ObservableObject
         ["tip.back"] = ("后退", "Go back"),
         ["tip.forward"] = ("前进", "Go forward"),
         ["tip.probe"] = ("重置全部探测状态并重新探测（不刷新网页）", "Reset all probe state and re-detect without reloading"),
-        ["tip.auto"] = ("自动下载已发现视频；↓ / Shift+N / ] 切下一条；探测仍由页面切换触发；到达执行时长后停止", "Auto-download detected videos; ↓ / Shift+N / ] next; probing stays nav-driven; stops at session duration"),
+        ["tip.auto"] = ("自动探测入库后 5 秒切下一条；下载按任务队列与槽位并发；双击任务进行/暂停", "Auto: probe→queue, switch after 5s; downloads follow task queue and slots; double-click task to run/pause"),
         ["tip.newTab"] = ("新标签", "New tab"),
         ["tip.favorite"] = ("把当前页加入地址下拉收藏", "Add current page to the address dropdown"),
         ["tip.addressBar"] = ("输入网址后按回车打开", "Press Enter to open the address"),
@@ -263,8 +265,8 @@ public sealed partial class LocalizationService : ObservableObject
             "Set auto limits (first reached wins; 0 = no limit for that item)"),
         ["auto.delayMinutesLabel"] = ("时长（分钟，0 = 不限）", "Duration (minutes, 0 = unlimited)"),
         ["auto.delayCountLabel"] = ("视频数量（0 = 不限）", "Video count (0 = unlimited)"),
-        ["auto.delayHint"] = ("达到时长或成功入队数量后结束自动（不再切换/入队）；进行中的下载会继续。两项都为 0 则仅手动停止。",
-            "Stops auto when duration or successfully enqueued count is reached. In-progress downloads continue. Both 0 means manual stop only."),
+        ["auto.delayHint"] = ("达到时长或探测入库数量后结束自动（不再切换/入库）；队列中的下载仍可由调度器继续。两项都为 0 则仅手动停止。",
+            "Stops auto when duration or probed-queue count is reached. Queued downloads may still run. Both 0 means manual stop only."),
         ["auto.delayInvalid"] = ("请输入非负整数。", "Enter a non-negative integer."),
         ["auto.ok"] = ("开始", "Start"),
         ["auto.cancel"] = ("取消", "Cancel"),
@@ -292,6 +294,23 @@ public sealed partial class LocalizationService : ObservableObject
         ["tip.language"] = ("切换到英文", "Switch to Chinese"),
         ["side.detected"] = ("已发现视频", "Detected videos"),
         ["side.queue"] = ("下载队列", "Download queue"),
+        ["side.autoTasks"] = ("自动任务", "Auto tasks"),
+        ["auto.sessionRunning"] = ("进行中", "Running"),
+        ["auto.sessionPaused"] = ("已暂停", "Paused"),
+        ["auto.sessionStopped"] = ("已停止", "Stopped"),
+        ["auto.sessionCompleted"] = ("已完成", "Completed"),
+        ["auto.sessionFailed"] = ("失败", "Failed"),
+        ["auto.itemQueued"] = ("待下载", "Queued"),
+        ["auto.itemEnqueued"] = ("已入队", "Enqueued"),
+        ["auto.itemDownloading"] = ("下载中", "Downloading"),
+        ["auto.itemCompleted"] = ("完成", "Completed"),
+        ["auto.itemFailed"] = ("失败", "Failed"),
+        ["auto.itemSkipped"] = ("已跳过", "Skipped"),
+        ["auto.itemCancelled"] = ("已取消", "Cancelled"),
+        ["status.autoDelayAfterProbe"] = ("自动模式：地址已入库，{0} 秒后切下一条…", "Auto: address saved, next in {0}s…"),
+        ["status.autoSessionPaused"] = ("自动任务已暂停：{0}", "Auto task paused: {0}"),
+        ["status.autoSessionResumed"] = ("自动任务进行中：{0}", "Auto task running: {0}"),
+        ["status.autoSessionRemoved"] = ("已移除自动任务：{0}", "Auto task removed: {0}"),
         ["mode.video"] = ("视频", "Video"),
         ["mode.audio"] = ("音轨", "Audio"),
         ["btn.download"] = ("下载", "Download"),

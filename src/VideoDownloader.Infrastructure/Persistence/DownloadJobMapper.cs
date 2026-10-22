@@ -5,7 +5,7 @@ using VideoDownloader.Infrastructure.Json;
 
 namespace VideoDownloader.Infrastructure.Persistence;
 
-internal static class DownloadJobMapper
+public static class DownloadJobMapper
 {
     internal sealed record VariantMeta(
         string VariantId,

@@ -53,6 +53,9 @@ public partial class MainWindow : Window
         var primary = list.SelectedItem as DownloadJobViewModel
                       ?? selected.LastOrDefault();
         _viewModel.SetSelectedDownloadJobs(selected, primary);
+        _viewModel.SetSelectedAutoRows(
+            list.SelectedItem as AutoSessionRowViewModel,
+            list.SelectedItem as AutoQueueItemRowViewModel);
     }
 
     private void RestoreDownloadQueueSelection(IReadOnlyList<Guid> ids)
@@ -113,6 +116,10 @@ public partial class MainWindow : Window
             case QueueGroupViewModel:
                 e.Handled = true;
                 return;
+            case AutoSessionRowViewModel session:
+                _ = _viewModel.ToggleAutoSessionAsync(session.SessionId);
+                e.Handled = true;
+                return;
             case DownloadJobViewModel job:
                 _viewModel.ActivateQueueJob(job);
                 e.Handled = true;
@@ -122,6 +129,18 @@ public partial class MainWindow : Window
 
     private void OnDownloadQueuePreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
+        if (QueueRowFromSource(e.OriginalSource) is AutoSessionRowViewModel autoSession)
+        {
+            // Double-click is handled by OnDownloadQueueDoubleClick (run/pause).
+            if (e.ClickCount >= 2)
+            {
+                e.Handled = true;
+                return;
+            }
+            _viewModel.ToggleAutoSessionExpanded(autoSession.SessionId);
+            return;
+        }
+
         if (QueueRowFromSource(e.OriginalSource) is QueueGroupViewModel group)
         {
             if (e.ClickCount >= 2)

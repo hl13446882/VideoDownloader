@@ -341,7 +341,7 @@
                     </DockPanel>
                 </GroupBox>
 
-                <GroupBox Grid.Row="1" Header="{Binding L.SideQueue}" Margin="0,4,0,4">
+                <GroupBox Grid.Row="1" Header="{Binding QueuePanelHeader}" Margin="0,4,0,4">
                     <ListBox x:Name="DownloadQueueList"
                              ItemsSource="{Binding QueueRows}"
                              SelectionMode="Extended"
@@ -360,6 +360,63 @@
                             <KeyBinding Key="Return" Command="{Binding PlaySelectedDownloadCommand}"/>
                         </ListBox.InputBindings>
                         <ListBox.Resources>
+                            <DataTemplate DataType="{x:Type vm:AutoSessionRowViewModel}">
+                                <DockPanel Margin="0,4,0,2" Background="Transparent">
+                                    <TextBlock Text="{Binding Glyph}"
+                                               Width="16"
+                                               FontWeight="SemiBold"
+                                               VerticalAlignment="Center"/>
+                                    <TextBlock DockPanel.Dock="Right"
+                                               Text="{Binding CountText}"
+                                               Margin="8,0,0,0"
+                                               Foreground="#888"
+                                               FontSize="11"
+                                               VerticalAlignment="Center"/>
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding Name}"
+                                                   FontWeight="SemiBold"
+                                                   TextTrimming="CharacterEllipsis"/>
+                                        <TextBlock Text="{Binding StatusText}"
+                                                   FontSize="11"
+                                                   Foreground="#666"/>
+                                    </StackPanel>
+                                </DockPanel>
+                            </DataTemplate>
+                            <DataTemplate DataType="{x:Type vm:AutoQueueItemRowViewModel}">
+                                <StackPanel Margin="16,2,0,2">
+                                    <TextBlock Text="{Binding DisplayName}"
+                                               ToolTip="{Binding DisplayName}"
+                                               TextTrimming="CharacterEllipsis">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Foreground" Value="#222222"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsCompleted}" Value="True">
+                                                        <Setter Property="Foreground" Value="#123A8C"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                    <ProgressBar Height="3"
+                                                 Margin="0,3,0,0"
+                                                 Minimum="0"
+                                                 Maximum="100"
+                                                 Value="{Binding ProgressPercent, Mode=OneWay}">
+                                        <ProgressBar.Style>
+                                            <Style TargetType="ProgressBar">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding ShowProgress}" Value="True">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </ProgressBar.Style>
+                                    </ProgressBar>
+                                    <TextBlock Text="{Binding StatusText}" FontSize="11" Foreground="#666"/>
+                                </StackPanel>
+                            </DataTemplate>
                             <DataTemplate DataType="{x:Type vm:QueueGroupViewModel}">
                                 <DockPanel Margin="0,4,0,2" Background="Transparent">
                                     <TextBlock Text="{Binding Glyph}"
@@ -510,7 +567,9 @@
                 </GroupBox>
 
                 <StackPanel x:Name="QueueActionBar" Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Center">
-                    <Button Content="{Binding QueueGroupToggleLabel}" Width="56" Height="28" Margin="0,0,4,0" Command="{Binding ToggleQueueGroupingCommand}"/>
+                    <Button Content="{Binding QueueGroupToggleLabel}" Width="56" Height="28" Margin="0,0,4,0"
+                            Command="{Binding ToggleQueueGroupingCommand}"
+                            IsEnabled="{Binding CanToggleQueueGrouping}"/>
                     <Button Content="{Binding L.BtnPause}" Width="56" Height="28" Margin="0,0,4,0" Command="{Binding PauseSelectedCommand}"/>
                     <Button Content="{Binding L.BtnResume}" Width="56" Height="28" Margin="0,0,4,0" Command="{Binding ResumeSelectedCommand}"/>
                     <Button Content="{Binding L.BtnCancel}" Width="56" Height="28" Margin="0,0,4,0" Command="{Binding CancelSelectedCommand}"/>

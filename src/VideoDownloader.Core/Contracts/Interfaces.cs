@@ -155,6 +155,25 @@ public interface IDownloadRepository
     Task UpdateThumbReadyAsync(Guid id, bool ready, CancellationToken ct = default);
 }
 
+/// <summary>Persists automatic-mode sessions and probed download-address queues.</summary>
+public interface IAutoSessionRepository
+{
+    Task InitializeAsync(CancellationToken ct = default);
+    Task SaveSessionAsync(AutoSession session, CancellationToken ct = default);
+    Task<AutoSession?> GetSessionAsync(Guid id, CancellationToken ct = default);
+    Task<IReadOnlyList<AutoSession>> GetSessionsAsync(CancellationToken ct = default);
+    Task<AutoSession?> GetRunningSessionAsync(CancellationToken ct = default);
+    Task PauseAllRunningAsync(CancellationToken ct = default);
+    Task DeleteSessionAsync(Guid id, CancellationToken ct = default);
+
+    Task<AutoQueueItem?> TryAddQueuedItemAsync(AutoQueueItem item, CancellationToken ct = default);
+    Task SaveItemAsync(AutoQueueItem item, CancellationToken ct = default);
+    Task<IReadOnlyList<AutoQueueItem>> GetItemsAsync(Guid sessionId, CancellationToken ct = default);
+    Task<AutoQueueItem?> TryClaimNextQueuedAsync(Guid sessionId, CancellationToken ct = default);
+    Task<IReadOnlyList<Guid>> GetActiveJobIdsAsync(Guid sessionId, CancellationToken ct = default);
+    Task DeleteItemAsync(Guid id, CancellationToken ct = default);
+}
+
 /// <summary>
 /// Local-DB library categories. Seeds are inserted only when missing; never overwrite local rows.
 /// </summary>

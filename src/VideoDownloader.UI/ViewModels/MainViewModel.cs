@@ -20,7 +20,9 @@ using VideoDownloader.Infrastructure.Browser;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Detection;
 using VideoDownloader.Infrastructure.Diagnostics;
+using VideoDownloader.Infrastructure.Download;
 using VideoDownloader.Infrastructure.LocalLibrary;
+using VideoDownloader.Infrastructure.Persistence;
 using VideoDownloader.UI.Localization;
 
 namespace VideoDownloader.UI.ViewModels;
@@ -245,6 +247,85 @@ public sealed partial class QueueGroupViewModel : ObservableObject
     public string CountText => Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
 }
 
+public sealed partial class AutoSessionRowViewModel : ObservableObject
+{
+    public AutoSessionRowViewModel(AutoSession session, int itemCount, int completedCount, bool isExpanded, LocalizationService loc)
+    {
+        Session = session;
+        ItemCount = itemCount;
+        CompletedCount = completedCount;
+        IsExpanded = isExpanded;
+        _loc = loc;
+    }
+
+    private readonly LocalizationService _loc;
+    public AutoSession Session { get; }
+    public Guid SessionId => Session.Id;
+    public string Name => Session.Name;
+    public int ItemCount { get; }
+    public int CompletedCount { get; }
+    public bool IsExpanded { get; }
+    public string Glyph => IsExpanded ? "▾" : "▸";
+    public string CountText => CompletedCount.ToString(CultureInfo.InvariantCulture) + "/" +
+                               ItemCount.ToString(CultureInfo.InvariantCulture);
+    public string StatusText => Session.Status switch
+    {
+        AutoSessionStatus.Running => _loc.T("auto.sessionRunning"),
+        AutoSessionStatus.Paused => _loc.T("auto.sessionPaused"),
+        AutoSessionStatus.Completed => _loc.T("auto.sessionCompleted"),
+        AutoSessionStatus.Failed => _loc.T("auto.sessionFailed"),
+        _ => _loc.T("auto.sessionStopped")
+    };
+}
+
+public sealed partial class AutoQueueItemRowViewModel : ObservableObject
+{
+    public AutoQueueItemRowViewModel(AutoQueueItem item, DownloadJob? job, LocalizationService loc)
+    {
+        Item = item;
+        Job = job;
+        _loc = loc;
+    }
+
+    private readonly LocalizationService _loc;
+    public AutoQueueItem Item { get; }
+    public DownloadJob? Job { get; private set; }
+    public Guid ItemId => Item.Id;
+    public Guid SessionId => Item.SessionId;
+    public string DisplayName => string.IsNullOrWhiteSpace(Item.Caption)
+        ? ("#" + Item.Seq.ToString(CultureInfo.InvariantCulture))
+        : ("#" + Item.Seq.ToString(CultureInfo.InvariantCulture) + "  " + Item.Caption);
+    public string StatusText => Item.Status switch
+    {
+        AutoQueueItemStatus.Queued => _loc.T("auto.itemQueued"),
+        AutoQueueItemStatus.Enqueued => _loc.T("auto.itemEnqueued"),
+        AutoQueueItemStatus.Downloading => _loc.T("auto.itemDownloading"),
+        AutoQueueItemStatus.Completed => _loc.T("auto.itemCompleted"),
+        AutoQueueItemStatus.Failed => _loc.T("auto.itemFailed"),
+        AutoQueueItemStatus.Skipped => _loc.T("auto.itemSkipped"),
+        _ => _loc.T("auto.itemCancelled")
+    };
+    public double ProgressPercent
+    {
+        get
+        {
+            if (Job is null || Job.TotalBytes is null or <= 0) return 0;
+            return Math.Clamp(100.0 * Job.DownloadedBytes / Job.TotalBytes.Value, 0, 100);
+        }
+    }
+    public bool ShowProgress => Job is not null &&
+                                Item.Status is AutoQueueItemStatus.Enqueued or AutoQueueItemStatus.Downloading;
+    public bool IsCompleted => Item.Status == AutoQueueItemStatus.Completed;
+
+    public void BindJob(DownloadJob? job)
+    {
+        Job = job;
+        OnPropertyChanged(nameof(ProgressPercent));
+        OnPropertyChanged(nameof(ShowProgress));
+        OnPropertyChanged(nameof(StatusText));
+    }
+}
+
 public sealed partial class DownloadJobViewModel : ObservableObject
 {
     private readonly LocalizationService _loc;
@@ -429,6 +510,8 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly BrowserHostLocator _hostLocator;
     private readonly IMediaDetectionPipeline _pipeline;
     private readonly IDownloadEngine _downloadEngine;
+    private readonly IAutoSessionRepository _autoSessions;
+    private readonly AutoDownloadScheduler _autoScheduler;
     private readonly IMediaAggregator _aggregator;
     private readonly SettingsViewModel _settingsViewModel;
     private readonly LocalizationService _loc;
@@ -436,7 +519,11 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly UserSettingsStore _settingsStore;
     private readonly LocalLibraryHost _localLibrary;
     private readonly HashSet<string> _collapsedQueueGroups = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<Guid> _collapsedAutoSessions = new();
     private bool _queueGrouped;
+    private Guid? _autoDbSessionId;
+    private AutoSessionRowViewModel? _selectedAutoSession;
+    private AutoQueueItemRowViewModel? _selectedAutoItem;
     private readonly Dictionary<Guid, DetectedVideoViewModel> _videoMap = new();
     private readonly object _pageSync = new();
     private CancellationTokenSource _probeCts = new();
@@ -465,6 +552,7 @@ public sealed partial class MainViewModel : ObservableObject
         "status.autoWaitingSlot",
         "status.autoDelayDownload",
         "status.autoDelaySwitch",
+        "status.autoDelayAfterProbe",
         "status.autoNoAddress",
         "status.autoSameContent",
         "update.checking",
@@ -499,8 +587,19 @@ public sealed partial class MainViewModel : ObservableObject
     private bool _isAutoMode;
 
     public string AutoModeButtonLabel => IsAutoMode ? _loc.NavAutoStop : _loc.NavAuto;
+    public string QueuePanelHeader => IsAutoMode ? _loc.T("side.autoTasks") : _loc.SideQueue;
+    public bool CanToggleQueueGrouping => !IsAutoMode;
 
-    partial void OnIsAutoModeChanged(bool value) => OnPropertyChanged(nameof(AutoModeButtonLabel));
+    partial void OnIsAutoModeChanged(bool value)
+    {
+        OnPropertyChanged(nameof(AutoModeButtonLabel));
+        OnPropertyChanged(nameof(QueuePanelHeader));
+        OnPropertyChanged(nameof(CanToggleQueueGrouping));
+        ToggleQueueGroupingCommand.NotifyCanExecuteChanged();
+        _ = RefreshAutoQueueUiAsync();
+        if (!value)
+            RebuildQueueRows();
+    }
 
     public ObservableCollection<AddressPreset> AddressPresets { get; } = new();
 
@@ -680,21 +779,33 @@ public sealed partial class MainViewModel : ObservableObject
                 : new[] { SelectedDownloadJob };
 
     public bool CanPauseSelected =>
-        EffectiveSelectedJobs.Count > 0 &&
-        EffectiveSelectedJobs.All(j => j.Job.Status is DownloadStatus.Downloading);
+        (_selectedAutoSession is { Session.Status: AutoSessionStatus.Running }) ||
+        (_selectedAutoItem?.Item.DownloadJobId is not null &&
+         _selectedAutoItem.Job?.Status is DownloadStatus.Downloading) ||
+        (EffectiveSelectedJobs.Count > 0 &&
+         EffectiveSelectedJobs.All(j => j.Job.Status is DownloadStatus.Downloading));
 
     public bool CanResumeSelected =>
-        EffectiveSelectedJobs.Count > 0 &&
-        EffectiveSelectedJobs.All(j => j.Job.Status is DownloadStatus.Paused or DownloadStatus.Failed);
+        (_selectedAutoSession is { Session.Status: AutoSessionStatus.Paused or AutoSessionStatus.Stopped }) ||
+        (_selectedAutoItem?.Item.DownloadJobId is not null &&
+         _selectedAutoItem.Job?.Status is DownloadStatus.Paused or DownloadStatus.Failed) ||
+        (EffectiveSelectedJobs.Count > 0 &&
+         EffectiveSelectedJobs.All(j => j.Job.Status is DownloadStatus.Paused or DownloadStatus.Failed));
 
     public bool CanCancelSelected =>
-        EffectiveSelectedJobs.Count > 0 &&
-        EffectiveSelectedJobs.All(j => j.Job.Status is not (
-            DownloadStatus.Completed or DownloadStatus.Failed or DownloadStatus.Removed or DownloadStatus.Cancelled));
+        (_selectedAutoSession is { Session.Status: AutoSessionStatus.Running or AutoSessionStatus.Paused }) ||
+        (_selectedAutoItem is not null &&
+         _selectedAutoItem.Item.Status is not (
+             AutoQueueItemStatus.Completed or AutoQueueItemStatus.Cancelled or AutoQueueItemStatus.Skipped)) ||
+        (EffectiveSelectedJobs.Count > 0 &&
+         EffectiveSelectedJobs.All(j => j.Job.Status is not (
+             DownloadStatus.Completed or DownloadStatus.Failed or DownloadStatus.Removed or DownloadStatus.Cancelled)));
 
     public bool CanRemoveSelected =>
-        EffectiveSelectedJobs.Count > 0 &&
-        EffectiveSelectedJobs.All(j => j.Job.Status is DownloadStatus.Completed or DownloadStatus.Failed);
+        (_selectedAutoSession is not null) ||
+        (_selectedAutoItem is not null) ||
+        (EffectiveSelectedJobs.Count > 0 &&
+         EffectiveSelectedJobs.All(j => j.Job.Status is DownloadStatus.Completed or DownloadStatus.Failed));
 
     public bool CanRenameSelected =>
         EffectiveSelectedJobs.Count == 1 &&
@@ -729,6 +840,8 @@ public sealed partial class MainViewModel : ObservableObject
         _hostLocator = hostLocator;
         _pipeline = pipeline;
         _downloadEngine = downloadEngine;
+        _autoSessions = services.GetRequiredService<IAutoSessionRepository>();
+        _autoScheduler = services.GetRequiredService<AutoDownloadScheduler>();
         _aggregator = aggregator;
         _settingsViewModel = settingsViewModel;
         _loc = loc;
@@ -1969,11 +2082,11 @@ public sealed partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void ToggleAutoMode()
+    private async Task ToggleAutoMode()
     {
         if (IsAutoMode)
         {
-            StopAutoMode(announce: true);
+            await StopAutoModeAsync(announce: true);
             return;
         }
 
@@ -2008,6 +2121,31 @@ public sealed partial class MainViewModel : ObservableObject
         try { _settingsStore.Save(_options); }
         catch { /* ignore persist errors */ }
 
+        await StartNewAutoSessionAsync(pageUrl);
+    }
+
+    private async Task StartNewAutoSessionAsync(Uri pageUrl)
+    {
+        await PauseRunningAutoSessionAsync(pauseJobs: true);
+
+        var now = DateTimeOffset.Now;
+        var session = new AutoSession
+        {
+            Id = Guid.NewGuid(),
+            Name = await AllocateAutoSessionNameAsync(now),
+            Status = AutoSessionStatus.Running,
+            Site = ResolveAutoSiteId(pageUrl),
+            MaxVideos = _autoMaxVideos,
+            IdleMinutes = _autoIdleMinutes,
+            EnqueuedCount = 0,
+            TabHint = pageUrl.AbsoluteUri,
+            StartedAt = now.ToUniversalTime(),
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        await _autoSessions.SaveSessionAsync(session);
+        _autoDbSessionId = session.Id;
+        _collapsedAutoSessions.Remove(session.Id);
+
         var cts = new CancellationTokenSource();
         _autoCts?.Cancel();
         _autoCts?.Dispose();
@@ -2021,9 +2159,40 @@ public sealed partial class MainViewModel : ObservableObject
         _autoTab = SelectedTab;
         _autoExpectedNavigationUntil = default;
         IsAutoMode = true;
+        _autoScheduler.SetActiveSession(session.Id);
         SetStatusKey("status.autoStarted", FormatAutoStartedLimits());
         EnsureAutoStartProbe();
+        await RefreshAutoQueueUiAsync();
         _ = RunAutoModeLoopAsync(cts.Token);
+    }
+
+    private async Task<string> AllocateAutoSessionNameAsync(DateTimeOffset localNow)
+    {
+        var baseName = localNow.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+        var existing = await _autoSessions.GetSessionsAsync();
+        var names = existing.Select(s => s.Name).ToHashSet(StringComparer.Ordinal);
+        if (!names.Contains(baseName))
+            return baseName;
+        for (var i = 2; i < 1000; i++)
+        {
+            var candidate = baseName + "-" + i.ToString(CultureInfo.InvariantCulture);
+            if (!names.Contains(candidate))
+                return candidate;
+        }
+        return baseName + "-" + Guid.NewGuid().ToString("N")[..6];
+    }
+
+    private static string? ResolveAutoSiteId(Uri pageUrl)
+    {
+        if (SiteHosts.MatchesAny(pageUrl, "youtube.com", "youtube-nocookie.com", "youtu.be"))
+            return SiteIds.YouTube;
+        if (SiteHosts.MatchesAny(pageUrl, "douyin.com", "iesdouyin.com"))
+            return SiteIds.Douyin;
+        if (SiteHosts.MatchesAny(pageUrl, "tiktok.com"))
+            return SiteIds.TikTok;
+        if (SiteHosts.MatchesAny(pageUrl, "bilibili.com", "b23.tv"))
+            return SiteIds.Bilibili;
+        return null;
     }
 
     /// <summary>
@@ -2094,9 +2263,12 @@ public sealed partial class MainViewModel : ObservableObject
         SetStatusKey("status.autoWaitingSlot", occupied, max);
     }
 
-    public void StopAutoMode(bool announce, bool resumeDetection = true)
+    public void StopAutoMode(bool announce, bool resumeDetection = true) =>
+        _ = StopAutoModeAsync(announce, resumeDetection);
+
+    public async Task StopAutoModeAsync(bool announce, bool resumeDetection = true)
     {
-        var wasActive = IsAutoMode || _autoCts is not null;
+        var wasActive = IsAutoMode || _autoCts is not null || _autoDbSessionId is not null;
         if (!wasActive)
             return;
 
@@ -2104,6 +2276,10 @@ public sealed partial class MainViewModel : ObservableObject
         catch { /* ignore */ }
         _autoCts?.Dispose();
         _autoCts = null;
+        _autoScheduler.Stop();
+        if (_autoDbSessionId is Guid sid)
+            await PauseAutoSessionCoreAsync(sid, pauseJobs: true, markStopped: false);
+        _autoDbSessionId = null;
         IsAutoMode = false;
         _autoTab = null;
         _autoExpectedNavigationUntil = default;
@@ -2112,6 +2288,7 @@ public sealed partial class MainViewModel : ObservableObject
         _autoProcessedCount = 0;
         if (announce)
             SetStatusKey("status.autoStopped");
+        await RefreshAutoQueueUiAsync();
 
         if (!resumeDetection)
             return;
@@ -2130,6 +2307,112 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         _feedDisplayState.BeginSession();
         RestartDetectionForPageChange(page, tab.Title, tab.Host.CurrentMediaSessionKey, forceRestart: true);
+    }
+
+    private async Task PauseRunningAutoSessionAsync(bool pauseJobs)
+    {
+        var running = await _autoSessions.GetRunningSessionAsync();
+        if (running is null)
+            return;
+        await PauseAutoSessionCoreAsync(running.Id, pauseJobs, markStopped: false);
+    }
+
+    private async Task PauseAutoSessionCoreAsync(Guid sessionId, bool pauseJobs, bool markStopped)
+    {
+        var session = await _autoSessions.GetSessionAsync(sessionId);
+        if (session is null)
+            return;
+        if (session.Status == AutoSessionStatus.Running)
+        {
+            try { _autoCts?.Cancel(); }
+            catch { /* ignore */ }
+            if (_autoScheduler.ActiveSessionId == sessionId)
+                _autoScheduler.Stop();
+        }
+
+        if (pauseJobs)
+        {
+            foreach (var jobId in await _autoSessions.GetActiveJobIdsAsync(sessionId))
+            {
+                try { await _downloadEngine.PauseAsync(jobId); }
+                catch { /* ignore */ }
+            }
+        }
+
+        session.Status = markStopped ? AutoSessionStatus.Stopped : AutoSessionStatus.Paused;
+        session.UpdatedAt = DateTimeOffset.UtcNow;
+        if (markStopped)
+            session.EndedAt = DateTimeOffset.UtcNow;
+        await _autoSessions.SaveSessionAsync(session);
+    }
+
+    public async Task ToggleAutoSessionAsync(Guid sessionId)
+    {
+        if (!IsAutoMode)
+            return;
+
+        var session = await _autoSessions.GetSessionAsync(sessionId);
+        if (session is null || session.Status == AutoSessionStatus.Completed)
+            return;
+
+        if (session.Status == AutoSessionStatus.Running)
+        {
+            await PauseAutoSessionCoreAsync(sessionId, pauseJobs: true, markStopped: false);
+            try { _autoCts?.Cancel(); }
+            catch { /* ignore */ }
+            _autoCts?.Dispose();
+            _autoCts = null;
+            if (_autoDbSessionId == sessionId)
+                _autoDbSessionId = null;
+            SetStatusKey("status.autoSessionPaused", session.Name);
+            await RefreshAutoQueueUiAsync();
+            return;
+        }
+
+        // Start / resume this session; pause any other running session and its jobs.
+        await PauseRunningAutoSessionAsync(pauseJobs: true);
+
+        session = await _autoSessions.GetSessionAsync(sessionId);
+        if (session is null)
+            return;
+        session.Status = AutoSessionStatus.Running;
+        session.UpdatedAt = DateTimeOffset.UtcNow;
+        session.EndedAt = null;
+        await _autoSessions.SaveSessionAsync(session);
+
+        foreach (var jobId in await _autoSessions.GetActiveJobIdsAsync(sessionId))
+        {
+            try { await _downloadEngine.ResumeAsync(jobId); }
+            catch { /* ignore */ }
+        }
+
+        _autoDbSessionId = sessionId;
+        _autoIdleMinutes = session.IdleMinutes;
+        _autoMaxVideos = session.MaxVideos;
+        _autoProcessedCount = session.EnqueuedCount;
+        _autoSessionEndUtc = _autoIdleMinutes > 0
+            ? DateTime.UtcNow.AddMinutes(_autoIdleMinutes)
+            : DateTime.MaxValue;
+        _autoItemStartedAt = DateTimeOffset.UtcNow;
+        _autoTab = SelectedTab;
+        _collapsedAutoSessions.Remove(sessionId);
+
+        var cts = new CancellationTokenSource();
+        _autoCts?.Cancel();
+        _autoCts?.Dispose();
+        _autoCts = cts;
+        _autoScheduler.SetActiveSession(sessionId);
+        SetStatusKey("status.autoSessionResumed", session.Name);
+        EnsureAutoStartProbe();
+        await RefreshAutoQueueUiAsync();
+        _ = RunAutoModeLoopAsync(cts.Token);
+    }
+
+    public void ToggleAutoSessionExpanded(Guid sessionId)
+    {
+        if (!_collapsedAutoSessions.Add(sessionId))
+            _collapsedAutoSessions.Remove(sessionId);
+        _ = RefreshAutoQueueUiAsync();
     }
 
     private void SuspendDetectedResults(BrowserTabViewModel tab)
@@ -2293,12 +2576,24 @@ public sealed partial class MainViewModel : ObservableObject
                     break;
                 }
 
-                if (probe.SkipLive || probe.AdvanceNoAddress)
+                if (probe.SkipLive || probe.AdvanceNoAddress || probe.Queued)
                 {
                     if (probe.SkipLive)
                     {
                         await Application.Current.Dispatcher.InvokeAsync(() =>
                             SetStatusKey("status.autoSkipLive"));
+                    }
+
+                    if (probe.Queued)
+                    {
+                        _autoProcessedCount++;
+                        await Application.Current.Dispatcher.InvokeAsync(RefreshAutoRunningStatus);
+                        await RefreshAutoQueueUiAsync();
+                        if (IsAutoCountReached())
+                        {
+                            await EndAutoModeCountAsync(token);
+                            break;
+                        }
                     }
 
                     if (!await AdvanceFeedAsync(sessionEnd, token, previousWasLive: probe.SkipLive))
@@ -2310,28 +2605,9 @@ public sealed partial class MainViewModel : ObservableObject
                     continue;
                 }
 
-                if (probe.JobId is null)
+                if (IsAutoTimeExpired())
                 {
-                    if (IsAutoTimeExpired())
-                    {
-                        await EndAutoModeTimeoutAsync(token);
-                        break;
-                    }
-                    continue;
-                }
-
-                // The per-item gate returns a job only after transfer started and five seconds elapsed.
-                _autoProcessedCount++;
-                await Application.Current.Dispatcher.InvokeAsync(RefreshAutoRunningStatus);
-                if (IsAutoCountReached())
-                {
-                    await EndAutoModeCountAsync(token);
-                    break;
-                }
-
-                if (!await AdvanceFeedAsync(sessionEnd, token))
-                {
-                    await EndAutoModeAfterAdvanceFailAsync(token);
+                    await EndAutoModeTimeoutAsync(token);
                     break;
                 }
             }
@@ -2355,15 +2631,12 @@ public sealed partial class MainViewModel : ObservableObject
         }
         finally
         {
-            if (IsAutoMode && (token.IsCancellationRequested || _autoCts?.Token == token))
+            if (token.IsCancellationRequested || _autoCts?.Token == token)
             {
                 await Application.Current.Dispatcher.InvokeAsync(() =>
                 {
                     if (_autoCts?.Token == token)
                     {
-                        IsAutoMode = false;
-                        _autoTab = null;
-                        _autoExpectedNavigationUntil = default;
                         _autoCts.Dispose();
                         _autoCts = null;
                     }
@@ -2437,11 +2710,31 @@ public sealed partial class MainViewModel : ObservableObject
     private Task EndAutoModeAfterAdvanceFailAsync(CancellationToken token) =>
         IsAutoTimeExpired() ? EndAutoModeTimeoutAsync(token) : EndAutoModeWithStatusAsync("status.autoFeedStuck", token);
 
-    private Task EndAutoModeWithStatusAsync(string statusKey, CancellationToken token) =>
-        Application.Current.Dispatcher.InvokeAsync(() =>
+    private async Task EndAutoModeWithStatusAsync(string statusKey, CancellationToken token)
+    {
+        if (token.IsCancellationRequested || _autoCts?.Token != token)
+            return;
+
+        _autoScheduler.Stop();
+        if (_autoDbSessionId is Guid sid)
         {
-            if (token.IsCancellationRequested || _autoCts?.Token != token)
+            var session = await _autoSessions.GetSessionAsync(sid);
+            if (session is not null)
+            {
+                session.Status = statusKey is "status.autoStoppedTimeout" or "status.autoStoppedCount"
+                    ? AutoSessionStatus.Completed
+                    : AutoSessionStatus.Paused;
+                session.EndedAt = DateTimeOffset.UtcNow;
+                session.UpdatedAt = DateTimeOffset.UtcNow;
+                await _autoSessions.SaveSessionAsync(session);
+            }
+        }
+
+        await Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            if (_autoCts?.Token != token)
                 return;
+            _autoDbSessionId = null;
             IsAutoMode = false;
             _autoCts?.Dispose();
             _autoCts = null;
@@ -2449,7 +2742,9 @@ public sealed partial class MainViewModel : ObservableObject
             _autoExpectedNavigationUntil = default;
             _autoFailedFingerprint = null;
             SetStatusKey(statusKey);
-        }).Task;
+        });
+        await RefreshAutoQueueUiAsync();
+    }
 
     private static int RemainingSessionMinutes(DateTime sessionEndUtc)
     {
@@ -2459,14 +2754,13 @@ public sealed partial class MainViewModel : ObservableObject
     }
 
     /// <summary>
-    /// Waits for the first detected card from the normal detection pipeline (nav/SPA/session),
-    /// then applies download. Does not call Refresh/RestartDetection — auto must not re-orchestrate probe.
+    /// Waits for a detected card, persists its address into the auto-session queue, then delays
+    /// five seconds before the caller advances the feed. Downloads are handled by AutoDownloadScheduler.
     /// </summary>
     private async Task<AutoProbeResult> TryAutoEnqueueUntilAsync(DateTime sessionEndUtc, CancellationToken token)
     {
         var gate = new AutoModeAdvanceGate(_autoItemStartedAt);
-        Guid? enqueuedJobId = null;
-        var wasAlreadyCompleted = false;
+        var persisted = false;
 
         while (!token.IsCancellationRequested && DateTime.UtcNow < sessionEndUtc)
         {
@@ -2485,89 +2779,117 @@ public sealed partial class MainViewModel : ObservableObject
                     detectionEmpty = !_detectionRunning && !_feedDisplayState.IsSuspended && candidate is null;
                 }
             });
-            if (detectionEmpty && enqueuedJobId is null && !live)
-                return new AutoProbeResult(null, SkipLive: false, AdvanceNoAddress: true);
+            if (detectionEmpty && !persisted && !live)
+                return new AutoProbeResult(Queued: false, SkipLive: false, AdvanceNoAddress: true);
             live |= candidate?.Video.IsLive == true;
             live |= candidate?.Video.Variants.Any(VideoDownloader.Infrastructure.Detection.Sites.YouTube.YouTubeLiveMedia.IsLiveVariant) == true;
             if (candidate?.Video.Variants is { Count: > 0 } variants &&
                 variants.All(v => UnifiedMediaPipeline.IsDouyinLiveStream(v.SourceUrl)))
                 live = true;
-            var job = enqueuedJobId is Guid queued
-                ? _downloadEngine.GetActiveJobs().FirstOrDefault(j => j.Id == queued)
-                : null;
-            var waitingForSlot = !wasAlreadyCompleted &&
-                (job?.Status == DownloadStatus.Pending ||
-                 enqueuedJobId is null && _downloadEngine.FreeDownloadSlots <= 0);
-            var reason = gate.Observe(DateTimeOffset.UtcNow, live, job?.Status, wasAlreadyCompleted,
-                waitingForSlot, waitingForDetection);
+
+            var reason = gate.Observe(DateTimeOffset.UtcNow, live, jobStatus: null, wasAlreadyCompleted: false,
+                waitingForSlot: false, waitingForDetection);
             if (reason == AutoModeAdvanceReason.Live)
-                return new AutoProbeResult(null, SkipLive: true);
+                return new AutoProbeResult(Queued: false, SkipLive: true);
             if (reason == AutoModeAdvanceReason.AddressTimeout)
-                return new AutoProbeResult(null, SkipLive: false, AdvanceNoAddress: true);
-            if (reason == AutoModeAdvanceReason.DownloadStarted)
-                return new AutoProbeResult(enqueuedJobId, SkipLive: false);
+                return new AutoProbeResult(Queued: false, SkipLive: false, AdvanceNoAddress: true);
 
-            if (gate.DownloadStartedAt is { } started)
+            if (!persisted && IsAutoCandidateDownloadable(candidate) && _autoDbSessionId is Guid sessionId)
             {
-                var seconds = Math.Max(1, (int)Math.Ceiling(
-                    (started + AutoModeAdvanceGate.DownloadSwitchDelay - DateTimeOffset.UtcNow).TotalSeconds));
-                await Application.Current.Dispatcher.InvokeAsync(() => SetStatusKey("status.autoDelaySwitch", seconds));
-            }
-            else if (enqueuedJobId is null && _downloadEngine.FreeDownloadSlots > 0)
-            {
-                enqueuedJobId = await Application.Current.Dispatcher.InvokeAsync(async () =>
+                var saved = await TryPersistAutoCandidateAsync(sessionId, candidate!, token);
+                if (saved)
                 {
-                    // A queued UI callback from a stopped session must not apply a download.
-                    if (token.IsCancellationRequested || _autoCts?.Token != token || !IsAutoMode ||
-                        DateTimeOffset.UtcNow >= gate.AddressDeadline)
-                        return (Guid?)null;
-
-                    var current = FindAutoDownloadCandidate();
-                    if (!IsAutoCandidateDownloadable(current))
-                        return null;
-                    var fingerprint = BuildAutoContentFingerprint(current!);
-                    if (IsSameAsLastAutoEnqueue(fingerprint) ||
-                        (!string.IsNullOrEmpty(fingerprint) &&
-                         string.Equals(fingerprint, _autoFailedFingerprint, StringComparison.Ordinal)))
-                        return null;
-
-                    // An address is applied immediately. The five-second delay belongs AFTER transfer starts.
-                    var completedBeforeEnqueue = _downloadEngine.GetActiveJobs()
-                        .Where(j => j.Status == DownloadStatus.Completed).Select(j => j.Id).ToHashSet();
-                    var id = await TryStartDownloadQuietAsync(current!.Video, current.SelectedVariant!.Variant,
-                        cancellationToken: token);
-                    if (token.IsCancellationRequested || _autoCts?.Token != token)
-                        return null;
-                    if (id is not null)
-                    {
-                        wasAlreadyCompleted = completedBeforeEnqueue.Contains(id.Value);
-                        _autoLastEnqueuedFingerprint = fingerprint;
-                        _autoFailedFingerprint = null;
-                    }
-                    else
-                    {
-                        _autoFailedFingerprint = fingerprint;
-                    }
-                    return id;
-                }).Task.Unwrap();
-            }
-
-            if (gate.DownloadStartedAt is null && !waitingForDetection)
-            {
-                if (enqueuedJobId is not null || _downloadEngine.FreeDownloadSlots <= 0)
-                    await Application.Current.Dispatcher.InvokeAsync(RefreshAutoWaitingSlotStatus);
-                else
-                {
-                    var seconds = Math.Max(1, (int)Math.Ceiling((gate.AddressDeadline - DateTimeOffset.UtcNow).TotalSeconds));
-                    await Application.Current.Dispatcher.InvokeAsync(() => SetStatusKey("status.autoNoAddress", seconds));
+                    persisted = true;
+                    _autoLastEnqueuedFingerprint = BuildAutoQueueFingerprint(candidate!);
+                    _autoFailedFingerprint = null;
+                    await DelayAfterAutoProbeAsync(token);
+                    return new AutoProbeResult(Queued: true, SkipLive: false);
                 }
+
+                var fingerprint = BuildAutoQueueFingerprint(candidate!);
+                if (IsSameAsLastAutoEnqueue(fingerprint))
+                {
+                    // Same content already queued this session — advance after the standard delay.
+                    await DelayAfterAutoProbeAsync(token);
+                    return new AutoProbeResult(Queued: false, SkipLive: false, AdvanceNoAddress: true);
+                }
+
+                _autoFailedFingerprint = fingerprint;
+            }
+
+            if (!waitingForDetection)
+            {
+                var seconds = Math.Max(1, (int)Math.Ceiling((gate.AddressDeadline - DateTimeOffset.UtcNow).TotalSeconds));
+                await Application.Current.Dispatcher.InvokeAsync(() => SetStatusKey("status.autoNoAddress", seconds));
             }
             await Task.Delay(200, token);
         }
-        return new AutoProbeResult(null, SkipLive: false);
+        return new AutoProbeResult(Queued: false, SkipLive: false);
     }
 
-    private readonly record struct AutoProbeResult(Guid? JobId, bool SkipLive, bool AdvanceNoAddress = false);
+    private async Task DelayAfterAutoProbeAsync(CancellationToken token)
+    {
+        var deadline = DateTimeOffset.UtcNow + AutoModeAdvanceGate.DownloadSwitchDelay;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            token.ThrowIfCancellationRequested();
+            var seconds = Math.Max(1, (int)Math.Ceiling((deadline - DateTimeOffset.UtcNow).TotalSeconds));
+            await Application.Current.Dispatcher.InvokeAsync(() => SetStatusKey("status.autoDelayAfterProbe", seconds));
+            var remain = deadline - DateTimeOffset.UtcNow;
+            if (remain <= TimeSpan.Zero)
+                break;
+            await Task.Delay(remain < TimeSpan.FromMilliseconds(200) ? remain : TimeSpan.FromMilliseconds(200), token);
+        }
+    }
+
+    private async Task<bool> TryPersistAutoCandidateAsync(
+        Guid sessionId, DetectedVideoViewModel current, CancellationToken token)
+    {
+        if (token.IsCancellationRequested || _autoCts?.Token != token || !IsAutoMode)
+            return false;
+        if (!IsAutoCandidateDownloadable(current))
+            return false;
+
+        var fingerprint = BuildAutoQueueFingerprint(current);
+        if (IsSameAsLastAutoEnqueue(fingerprint) ||
+            (!string.IsNullOrEmpty(fingerprint) &&
+             string.Equals(fingerprint, _autoFailedFingerprint, StringComparison.Ordinal)))
+            return false;
+
+        var variant = current.SelectedVariant!.Variant;
+        var (meta, secret) = DownloadJobMapper.SerializeVariant(variant);
+        var now = DateTimeOffset.UtcNow;
+        var item = new AutoQueueItem
+        {
+            Id = Guid.NewGuid(),
+            SessionId = sessionId,
+            PageUrl = current.Video.PageUrl.AbsoluteUri,
+            ContentId = current.Video.SiteContentId,
+            Caption = current.Video.DisplayTitle,
+            Author = AuthorNameResolver.FromDetectedVideo(current.Video),
+            SourceUrl = variant.SourceUrl.AbsoluteUri,
+            VariantMetaJson = meta,
+            VariantSecret = secret,
+            SelectedVariantId = variant.VariantId,
+            Fingerprint = fingerprint,
+            Status = AutoQueueItemStatus.Queued,
+            ProbedAt = now,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+
+        var saved = await _autoSessions.TryAddQueuedItemAsync(item, token);
+        return saved is not null;
+    }
+
+    private static string? BuildAutoQueueFingerprint(DetectedVideoViewModel item)
+    {
+        if (!string.IsNullOrWhiteSpace(item.Video.SiteContentId))
+            return item.Video.SiteId + ":" + item.Video.SiteContentId.Trim();
+        return BuildAutoContentFingerprint(item);
+    }
+
+    private readonly record struct AutoProbeResult(bool Queued, bool SkipLive, bool AdvanceNoAddress = false);
 
     private async Task<bool> WaitForContentSwitchAsync(string? beforeIdentity, bool previousWasLive,
         DateTime sessionEndUtc, CancellationToken token)
@@ -2768,17 +3090,33 @@ public sealed partial class MainViewModel : ObservableObject
         if (orderChanged)
         {
             RefreshDownloadJobs();
+            if (IsAutoMode)
+                _ = RefreshAutoQueueUiAsync();
             return;
         }
 
         foreach (var job in DownloadJobs)
             job.Refresh();
+        if (IsAutoMode)
+            RefreshAutoItemProgressInPlace(jobs);
         NotifyQueueCommands();
     }
 
-    [RelayCommand]
+    private void RefreshAutoItemProgressInPlace(IReadOnlyList<DownloadJob> jobs)
+    {
+        var map = jobs.ToDictionary(j => j.Id);
+        foreach (var row in QueueRows.OfType<AutoQueueItemRowViewModel>())
+        {
+            if (row.Item.DownloadJobId is Guid id && map.TryGetValue(id, out var job))
+                row.BindJob(job);
+        }
+    }
+
+    [RelayCommand(CanExecute = nameof(CanToggleQueueGrouping))]
     private void ToggleQueueGrouping()
     {
+        if (IsAutoMode)
+            return;
         _queueGrouped = !_queueGrouped;
         _options.Ui.QueueGrouped = _queueGrouped;
         _settingsStore.Save(_options);
@@ -2788,6 +3126,45 @@ public sealed partial class MainViewModel : ObservableObject
         if (_selectedDownloadJobIds.Count > 0)
             RestoreQueueSelection?.Invoke(_selectedDownloadJobIds);
         NotifyQueueCommands();
+    }
+
+    private async Task RefreshAutoQueueUiAsync()
+    {
+        if (!IsAutoMode)
+            return;
+        try
+        {
+            var sessions = await _autoSessions.GetSessionsAsync();
+            var jobs = _downloadEngine.GetActiveJobs().ToDictionary(j => j.Id);
+            var rows = new List<object>();
+            foreach (var session in sessions)
+            {
+                var items = await _autoSessions.GetItemsAsync(session.Id);
+                var completed = items.Count(i => i.Status == AutoQueueItemStatus.Completed);
+                var expanded = !_collapsedAutoSessions.Contains(session.Id);
+                rows.Add(new AutoSessionRowViewModel(session, items.Count, completed, expanded, _loc));
+                if (!expanded)
+                    continue;
+                foreach (var item in items)
+                {
+                    jobs.TryGetValue(item.DownloadJobId ?? Guid.Empty, out var job);
+                    rows.Add(new AutoQueueItemRowViewModel(item, job, _loc));
+                }
+            }
+
+            await Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                if (!IsAutoMode)
+                    return;
+                QueueRows.Clear();
+                foreach (var row in rows)
+                    QueueRows.Add(row);
+            });
+        }
+        catch
+        {
+            // UI refresh is best-effort.
+        }
     }
 
     private void SyncJobViewModels(IReadOnlyList<DownloadJob> jobs)
@@ -2811,6 +3188,12 @@ public sealed partial class MainViewModel : ObservableObject
 
     private void RebuildQueueRows()
     {
+        if (IsAutoMode)
+        {
+            _ = RefreshAutoQueueUiAsync();
+            return;
+        }
+
         QueueRows.Clear();
         if (!_queueGrouped)
         {
@@ -2839,9 +3222,31 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
+    public void SetSelectedAutoRows(AutoSessionRowViewModel? session, AutoQueueItemRowViewModel? item)
+    {
+        _selectedAutoSession = session;
+        _selectedAutoItem = item;
+        NotifyQueueCommands();
+    }
+
     [RelayCommand(CanExecute = nameof(CanPauseSelected))]
     private async Task PauseSelectedAsync()
     {
+        if (_selectedAutoSession is { } session)
+        {
+            if (session.Session.Status == AutoSessionStatus.Running)
+                await ToggleAutoSessionAsync(session.SessionId);
+            return;
+        }
+
+        if (_selectedAutoItem?.Item.DownloadJobId is Guid autoJobId)
+        {
+            await _downloadEngine.PauseAsync(autoJobId);
+            RefreshDownloadJobs();
+            await RefreshAutoQueueUiAsync();
+            return;
+        }
+
         var targets = EffectiveSelectedJobs.ToArray();
         if (targets.Length == 0) return;
         foreach (var vm in targets)
@@ -2852,6 +3257,21 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanResumeSelected))]
     private async Task ResumeSelectedAsync()
     {
+        if (_selectedAutoSession is { } session)
+        {
+            if (session.Session.Status is AutoSessionStatus.Paused or AutoSessionStatus.Stopped)
+                await ToggleAutoSessionAsync(session.SessionId);
+            return;
+        }
+
+        if (_selectedAutoItem?.Item.DownloadJobId is Guid autoJobId)
+        {
+            await _downloadEngine.ResumeAsync(autoJobId);
+            RefreshDownloadJobs();
+            await RefreshAutoQueueUiAsync();
+            return;
+        }
+
         var targets = EffectiveSelectedJobs.ToArray();
         if (targets.Length == 0) return;
         foreach (var vm in targets)
@@ -2862,6 +3282,34 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanCancelSelected))]
     private async Task CancelSelectedAsync()
     {
+        if (_selectedAutoSession is { } session)
+        {
+            await PauseAutoSessionCoreAsync(session.SessionId, pauseJobs: true, markStopped: true);
+            if (_autoDbSessionId == session.SessionId)
+            {
+                try { _autoCts?.Cancel(); } catch { /* ignore */ }
+                _autoCts?.Dispose();
+                _autoCts = null;
+                _autoDbSessionId = null;
+                _autoScheduler.Stop();
+            }
+            SetStatusKey("status.autoSessionPaused", session.Name);
+            await RefreshAutoQueueUiAsync();
+            return;
+        }
+
+        if (_selectedAutoItem is { } autoItem)
+        {
+            if (autoItem.Item.DownloadJobId is Guid jobId)
+                await _downloadEngine.CancelAsync(jobId);
+            autoItem.Item.Status = AutoQueueItemStatus.Cancelled;
+            await _autoSessions.SaveItemAsync(autoItem.Item);
+            SetStatusKey("status.cancelled");
+            RefreshDownloadJobs();
+            await RefreshAutoQueueUiAsync();
+            return;
+        }
+
         var targets = EffectiveSelectedJobs.ToArray();
         if (targets.Length == 0) return;
         foreach (var vm in targets)
@@ -2873,6 +3321,37 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanRemoveSelected))]
     private async Task RemoveSelectedAsync()
     {
+        if (_selectedAutoSession is { } session)
+        {
+            if (session.Session.Status == AutoSessionStatus.Running)
+                await PauseAutoSessionCoreAsync(session.SessionId, pauseJobs: true, markStopped: true);
+            if (_autoDbSessionId == session.SessionId)
+            {
+                try { _autoCts?.Cancel(); } catch { /* ignore */ }
+                _autoCts?.Dispose();
+                _autoCts = null;
+                _autoDbSessionId = null;
+                _autoScheduler.Stop();
+            }
+            await _autoSessions.DeleteSessionAsync(session.SessionId);
+            _selectedAutoSession = null;
+            SetStatusKey("status.autoSessionRemoved", session.Name);
+            await RefreshAutoQueueUiAsync();
+            return;
+        }
+
+        if (_selectedAutoItem is { } autoItem)
+        {
+            if (autoItem.Item.DownloadJobId is Guid jobId)
+                await _downloadEngine.RemoveAsync(jobId, deleteFile: false);
+            await _autoSessions.DeleteItemAsync(autoItem.ItemId);
+            _selectedAutoItem = null;
+            SetStatusKey("status.removedRecord");
+            RefreshDownloadJobs();
+            await RefreshAutoQueueUiAsync();
+            return;
+        }
+
         var targets = EffectiveSelectedJobs.ToArray();
         if (targets.Length == 0) return;
 

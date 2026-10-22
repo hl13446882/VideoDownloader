@@ -75,9 +75,11 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<VideoDownloader.Infrastructure.Http.MediaAvailabilityValidator>();
         services.AddSingleton<IDownloadJobStateMachine, DownloadJobStateMachine>();
         services.AddSingleton<IDownloadRepository, SqliteDownloadRepository>();
+        services.AddSingleton<IAutoSessionRepository, SqliteAutoSessionRepository>();
         services.AddSingleton<ILibraryKindCatalog, SqliteLibraryKindCatalog>();
         services.AddSingleton<IDownloadBackendRouter, DownloadBackendRouter>();
         services.AddSingleton<IDownloadEngine, DownloadEngine>();
+        services.AddSingleton<AutoDownloadScheduler>();
         services.AddSingleton<IMediaAddressRediscoverer, BrowserMediaAddressRediscoverer>();
         services.AddSingleton<IFfmpegAdapter, FfmpegAdapter>();
         services.AddSingleton<VideoDownloader.Infrastructure.LocalLibrary.LocalVideoThumbnailStore>();
@@ -223,6 +225,7 @@ public static class ServiceCollectionExtensions
     {
         var repo = services.GetRequiredService<IDownloadRepository>();
         await repo.InitializeAsync();
+        await services.GetRequiredService<IAutoSessionRepository>().InitializeAsync();
 
         await services.GetRequiredService<ILibraryKindCatalog>().InitializeAsync();
 
