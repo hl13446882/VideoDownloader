@@ -15,6 +15,7 @@ using VideoDownloader.Core.Download;
 using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Core.Naming;
+using VideoDownloader.Core.Sites;
 using VideoDownloader.Infrastructure.Browser;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Detection;
@@ -477,6 +478,10 @@ public sealed partial class MainViewModel : ObservableObject
     private string? _douyinDetailBoostId;
 
     private CancellationTokenSource? _autoCts;
+    /// <summary>Tab this auto session belongs to; switching tabs is a manual takeover.</summary>
+    private BrowserTabViewModel? _autoTab;
+    /// <summary>Until when a navigation is presumed to be this session's own feed advance.</summary>
+    private DateTimeOffset _autoExpectedNavigationUntil;
     private int _autoIdleMinutes = 5;
     private int _autoMaxVideos;
     private int _autoProcessedCount;
@@ -867,7 +872,7 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand]
     private async Task GoLocalLibraryAsync()
     {
-        StopAutoMode(announce: false);
+        StopAutoMode(announce: false, resumeDetection: false);
         AddressBar = DefaultHomeUrl;
         await NavigateAsync();
     }
@@ -964,10 +969,14 @@ public sealed partial class MainViewModel : ObservableObject
                 // Document navigation → same singleton full re-probe entry as manual Probe.
                 if (ReferenceEquals(SelectedTab, tab) && Uri.TryCreate(url, UriKind.Absolute, out var page))
                 {
+                    // A navigation outside this auto session's own feed advance is a manual takeover.
+                    if (IsAutoMode && _autoTab is not null &&
+                        (!ReferenceEquals(tab, _autoTab) || DateTimeOffset.UtcNow > _autoExpectedNavigationUntil))
+                        StopAutoMode(announce: true, resumeDetection: false);
                     HangProbe.Mark("vm.navStarted", $"{page.Host}{page.AbsolutePath}");
                     if (IsAppFullscreen && !LocalLibraryHost.IsLocalPlayerUrl(page))
                         SetAppFullscreen(false);
-                    RestartDetectionForPageChange(page, null, mediaSessionKey: null);
+                    RestartDetectionForPageChange(page, null, mediaSessionKey: null, allowSuspended: true);
                 }
             };
             tab.Host.LocalPlayerFullscreenRequested += (_, active) =>
@@ -1077,6 +1086,10 @@ public sealed partial class MainViewModel : ObservableObject
 
     partial void OnSelectedTabChanged(BrowserTabViewModel? oldValue, BrowserTabViewModel? newValue)
     {
+        // Auto is bound to the tab it started on; switching tabs is a manual takeover.
+        if (IsAutoMode && !ReferenceEquals(newValue, _autoTab))
+            StopAutoMode(announce: true, resumeDetection: false);
+
         ClearDetectedVideos();
         if (oldValue is not null)
             oldValue.Host.CaptureEnabled = false;
@@ -1446,6 +1459,10 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
+        // Manual probing takes control from the auto loop; otherwise auto can consume
+        // the first new card and advance away, cancelling this probe.
+        StopAutoMode(announce: false, resumeDetection: false);
+
         // Manual probe: singleton destroy + full re-probe (same entry as auto navigation/SPA/session).
         _feedDisplayState.BeginSession();
         ClearStatus();
@@ -1465,7 +1482,8 @@ public sealed partial class MainViewModel : ObservableObject
         Uri pageUrl,
         string? pageTitle,
         string? mediaSessionKey,
-        bool forceRestart = false)
+        bool forceRestart = false,
+        bool allowSuspended = false)
     {
         HangProbe.Mark("vm.restart", $"{pageUrl.Host}{pageUrl.AbsolutePath} det={_detectionRunning}");
 
@@ -1475,7 +1493,10 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
-        if (!forceRestart && !_feedDisplayState.CanBeginSession(BuildPageIdentity(pageUrl).Split('\n')[0],
+        // A real navigation back to the same page/content (retry after a failed feed switch) must
+        // revive detection; only late events from the retired session need the suspension gate.
+        if (!forceRestart && !allowSuspended &&
+            !_feedDisplayState.CanBeginSession(BuildPageIdentity(pageUrl).Split('\n')[0],
                 ExtractStableContentKey(mediaSessionKey, pageUrl), mediaSessionKey))
             return;
 
@@ -1510,7 +1531,7 @@ public sealed partial class MainViewModel : ObservableObject
 
     private void EnterLocalLibraryMode(Uri pageUrl)
     {
-        StopAutoMode(announce: false);
+        StopAutoMode(announce: false, resumeDetection: false);
         lock (_pageSync)
         {
             _probeCts.Cancel();
@@ -1545,8 +1566,7 @@ public sealed partial class MainViewModel : ObservableObject
         if (digits.Success)
         {
             var id = digits.Groups[1].Value;
-            if (host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
-                host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase))
+            if (SiteHosts.MatchesAny(host, "douyin.com", "iesdouyin.com"))
             {
                 var builder = new UriBuilder(pageUrl);
                 var query = builder.Query.TrimStart('?');
@@ -1560,7 +1580,7 @@ public sealed partial class MainViewModel : ObservableObject
                 return builder.Uri;
             }
 
-            if (host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase) &&
+            if (SiteHosts.Matches(host, "tiktok.com") &&
                 !pageUrl.AbsolutePath.Contains("/video/", StringComparison.OrdinalIgnoreCase) &&
                 !pageUrl.AbsolutePath.Contains("/embed/", StringComparison.OrdinalIgnoreCase))
             {
@@ -1580,9 +1600,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         if (stable.StartsWith("content:youtube:", StringComparison.OrdinalIgnoreCase) &&
-            (host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
-             host.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase) ||
-             host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase)))
+            SiteHosts.MatchesAny(host, "youtube.com", "youtube-nocookie.com", "youtu.be"))
         {
             var videoId = stable["content:youtube:".Length..];
             if (videoId.Length > 0)
@@ -1590,8 +1608,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         if (stable.StartsWith("content:bilibili:", StringComparison.OrdinalIgnoreCase) &&
-            (host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase) ||
-             host.Contains("b23.tv", StringComparison.OrdinalIgnoreCase)))
+            SiteHosts.MatchesAny(host, "bilibili.com", "b23.tv"))
         {
             var bvid = stable["content:bilibili:".Length..];
             if (bvid.Length > 0)
@@ -1750,7 +1767,6 @@ public sealed partial class MainViewModel : ObservableObject
                 shouldStop: Stop,
                 externalDelay: TimeSpan.FromMilliseconds(preferExternal ? 0 : 700),
                 budget: TimeSpan.FromSeconds(isAlbum ? 35 : siteId == SiteIds.YouTube ? 100 : 20),
-                enrichFormats: false,
                 ct: token);
             if (!Current()) return;
 
@@ -2029,9 +2045,39 @@ public sealed partial class MainViewModel : ObservableObject
         _autoLastEnqueuedFingerprint = null;
         _autoFailedFingerprint = null;
         _autoItemStartedAt = DateTimeOffset.UtcNow;
+        _autoTab = SelectedTab;
+        _autoExpectedNavigationUntil = default;
         IsAutoMode = true;
         SetStatusKey("status.autoStarted", FormatAutoStartedLimits());
+        EnsureAutoStartProbe();
         _ = RunAutoModeLoopAsync(cts.Token);
+    }
+
+    /// <summary>
+    /// A fresh tab has no detected card yet; without a probe the loop would wait out the
+    /// address deadline and advance blindly.
+    /// </summary>
+    private void EnsureAutoStartProbe()
+    {
+        var tab = _autoTab;
+        var page = tab?.Host.CurrentPageUrl;
+        if (tab is null || page is null || LocalLibraryHost.IsLocalLibraryHost(page))
+            return;
+        if (DetectedVideos.Any(v => VideoDownloader.Core.Detection.DetectionReadiness.IsUsable(v.Video)))
+            return;
+
+        var key = tab.Host.CurrentMediaSessionKey;
+        bool tracking;
+        lock (_pageSync)
+            tracking = _detectionRunning &&
+                       string.Equals(_currentPageIdentity,
+                           BuildPageIdentity(EnrichPageUrlWithContentId(page, key), key),
+                           StringComparison.Ordinal);
+        if (tracking)
+            return;
+
+        _feedDisplayState.BeginSession();
+        RestartDetectionForPageChange(page, tab.Title, key, forceRestart: true);
     }
 
     private string FormatAutoStartedLimits()
@@ -2070,9 +2116,10 @@ public sealed partial class MainViewModel : ObservableObject
         SetStatusKey("status.autoWaitingSlot", occupied, max);
     }
 
-    public void StopAutoMode(bool announce)
+    public void StopAutoMode(bool announce, bool resumeDetection = true)
     {
-        if (!IsAutoMode && _autoCts is null)
+        var wasActive = IsAutoMode || _autoCts is not null;
+        if (!wasActive)
             return;
 
         try { _autoCts?.Cancel(); }
@@ -2080,11 +2127,31 @@ public sealed partial class MainViewModel : ObservableObject
         _autoCts?.Dispose();
         _autoCts = null;
         IsAutoMode = false;
+        _autoTab = null;
+        _autoExpectedNavigationUntil = default;
         _autoLastEnqueuedFingerprint = null;
         _autoFailedFingerprint = null;
         _autoProcessedCount = 0;
         if (announce)
             SetStatusKey("status.autoStopped");
+
+        if (!resumeDetection)
+            return;
+
+        // Auto may stop while the feed display is suspended mid-advance; the user must not be
+        // left with a permanently blank panel.
+        var tab = SelectedTab;
+        var page = tab?.Host.CurrentPageUrl;
+        if (tab is null || page is null || LocalLibraryHost.IsLocalLibraryHost(page))
+            return;
+        bool needsResume;
+        lock (_pageSync)
+            needsResume = !_detectionRunning &&
+                          (_feedDisplayState.IsSuspended || DetectedVideos.Count == 0);
+        if (!needsResume)
+            return;
+        _feedDisplayState.BeginSession();
+        RestartDetectionForPageChange(page, tab.Title, tab.Host.CurrentMediaSessionKey, forceRestart: true);
     }
 
     private void SuspendDetectedResults(BrowserTabViewModel tab)
@@ -2107,26 +2174,133 @@ public sealed partial class MainViewModel : ObservableObject
         tab.Host.ResetDetectionSession();
     }
 
+    private static readonly TimeSpan ManualSwitchTimeout = TimeSpan.FromSeconds(6);
+    private static readonly TimeSpan ManualSwitchPoll = TimeSpan.FromMilliseconds(200);
+
     public async Task SwitchToNextVideoAsync(CancellationToken ct = default)
     {
+        // Manual next is a takeover; auto must not also advance this item.
+        StopAutoMode(announce: false, resumeDetection: false);
         var tab = SelectedTab;
+        if (tab?.Host is null || !tab.IsInitialized)
+            return;
+        if (tab.Host.CurrentPageUrl is { } page && LocalLibraryHost.IsLocalLibraryHost(page))
+            return;
+
+        var before = CaptureManualPlaybackSnapshot(tab);
+        SetStatusKey("status.nextSwitching");
+        try
+        {
+            // Keep the current cards until the page confirms the switch; a rejected key must
+            // not leave the panel empty.
+            await SendFeedNextCoreAsync(ct, suspendFirst: false, target: tab);
+            if (await WaitForManualContentSwitchAsync(before, tab, ct))
+                return;
+            if (!ReferenceEquals(SelectedTab, tab))
+                return;
+
+            // A page can drop the first synthetic key while focus moves; retry once.
+            await SendFeedNextCoreAsync(ct, suspendFirst: false, target: tab);
+            if (await WaitForManualContentSwitchAsync(before, tab, ct))
+                return;
+            RecoverManualNextFailure(tab);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch { RecoverManualNextFailure(tab); }
+    }
+
+    private void RecoverManualNextFailure(BrowserTabViewModel tab)
+    {
+        if (!ReferenceEquals(SelectedTab, tab))
+            return;
+        // An auto takeover may already have cleared the panel; never leave it empty.
+        if (DetectedVideos.Count == 0)
+            Refresh();
+        SetStatusKey("status.nextSwitchFailed");
+    }
+
+    private async Task SendFeedNextCoreAsync(CancellationToken ct, bool suspendFirst = true,
+        BrowserTabViewModel? target = null)
+    {
+        var tab = target ?? SelectedTab;
         if (tab?.Host is null || !tab.IsInitialized)
             return;
         try
         {
             ct.ThrowIfCancellationRequested();
-            await Application.Current.Dispatcher.InvokeAsync(() =>
-            {
-                ct.ThrowIfCancellationRequested();
-                SuspendDetectedResults(tab);
-            });
+            if (suspendFirst)
+                await Application.Current.Dispatcher.InvokeAsync(() =>
+                {
+                    ct.ThrowIfCancellationRequested();
+                    SuspendDetectedResults(tab);
+                });
             await tab.Host.SendFeedNextAsync(ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch
         {
-            // Page may reject synthetic keys; ignore for manual ↓.
+            // Page may reject synthetic keys; the caller decides how to recover.
         }
+    }
+
+    private readonly record struct ManualPlaybackSnapshot(string? Identity, string? PageUrl);
+
+    private static ManualPlaybackSnapshot CaptureManualPlaybackSnapshot(BrowserTabViewModel tab)
+    {
+        var page = tab.Host.CurrentPageUrl?.AbsoluteUri;
+        var key = tab.Host.CurrentMediaSessionKey;
+        return new ManualPlaybackSnapshot(
+            string.IsNullOrEmpty(key) ? null : (page ?? string.Empty) + "\n" + key,
+            page);
+    }
+
+    private static bool HasManualPlaybackChanged(ManualPlaybackSnapshot before, BrowserTabViewModel tab)
+    {
+        var current = CaptureManualPlaybackSnapshot(tab);
+        if (!string.Equals(before.PageUrl, current.PageUrl, StringComparison.Ordinal))
+            return true;
+        return AutoModeAdvanceGate.HasPlaybackChanged(before.Identity, current.Identity, false, false);
+    }
+
+    private async Task<bool> WaitForManualContentSwitchAsync(ManualPlaybackSnapshot before,
+        BrowserTabViewModel tab, CancellationToken ct)
+    {
+        var deadline = DateTimeOffset.UtcNow + ManualSwitchTimeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (ConfirmManualContentSwitch(before, tab))
+                return true;
+            await Task.Delay(ManualSwitchPoll, ct);
+        }
+        return ConfirmManualContentSwitch(before, tab);
+    }
+
+    private bool ConfirmManualContentSwitch(ManualPlaybackSnapshot before, BrowserTabViewModel tab)
+    {
+        if (!HasManualPlaybackChanged(before, tab))
+            return false;
+
+        // URL changes restart detection through NavigationStarted/PageIdentityChanged. A same-URL
+        // feed switch can be confirmed by the new media key while the host suppresses
+        // MediaSessionChanged (first-media anchor), so bind the pipeline to it explicitly.
+        if (ReferenceEquals(SelectedTab, tab) &&
+            tab.Host.CurrentPageUrl is { } page &&
+            !LocalLibraryHost.IsLocalLibraryHost(page) &&
+            string.Equals(before.PageUrl, page.AbsoluteUri, StringComparison.Ordinal))
+        {
+            var key = tab.Host.CurrentMediaSessionKey;
+            var enriched = EnrichPageUrlWithContentId(page, key);
+            bool tracked;
+            lock (_pageSync)
+                tracked = _detectionRunning &&
+                          string.Equals(_currentPageIdentity, BuildPageIdentity(enriched, key),
+                              StringComparison.Ordinal);
+            if (!tracked)
+                RestartDetectionForPageChange(page, tab.Title, key);
+        }
+
+        return true;
     }
 
     private async Task RunAutoModeLoopAsync(CancellationToken token)
@@ -2212,6 +2386,8 @@ public sealed partial class MainViewModel : ObservableObject
                     if (_autoCts?.Token == token)
                     {
                         IsAutoMode = false;
+                        _autoTab = null;
+                        _autoExpectedNavigationUntil = default;
                         _autoCts.Dispose();
                         _autoCts = null;
                     }
@@ -2225,8 +2401,17 @@ public sealed partial class MainViewModel : ObservableObject
     {
         var beforeIdentity = CaptureAutoPlaybackIdentity();
         _autoItemStartedAt = DateTimeOffset.UtcNow;
-        await SwitchToNextVideoAsync(token);
-        return await WaitForContentSwitchAsync(beforeIdentity, previousWasLive, sessionEndUtc, token);
+        // Feed-next may navigate; a navigation inside this window belongs to auto, not the user.
+        _autoExpectedNavigationUntil = DateTimeOffset.UtcNow + AutoModeAdvanceGate.AddressTimeout;
+        try
+        {
+            await SendFeedNextCoreAsync(token);
+            return await WaitForContentSwitchAsync(beforeIdentity, previousWasLive, sessionEndUtc, token);
+        }
+        finally
+        {
+            _autoExpectedNavigationUntil = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(5);
+        }
     }
 
     private async Task<bool> IsCurrentPlaybackLiveAsync(CancellationToken token)
@@ -2282,6 +2467,8 @@ public sealed partial class MainViewModel : ObservableObject
             IsAutoMode = false;
             _autoCts?.Dispose();
             _autoCts = null;
+            _autoTab = null;
+            _autoExpectedNavigationUntil = default;
             _autoFailedFingerprint = null;
             SetStatusKey(statusKey);
         }).Task;
@@ -2408,8 +2595,10 @@ public sealed partial class MainViewModel : ObservableObject
             await Application.Current.Dispatcher.InvokeAsync(() => SetStatusKey("status.autoNoAddress", seconds));
             await Task.Delay(200, token);
         }
-        // If the page did not change, the next probe observes this SAME expired item deadline and advances once.
-        return !token.IsCancellationRequested && DateTime.UtcNow < sessionEndUtc;
+
+        // The key was ignored (or the page kept playing the same work): report failure instead of
+        // pretending the switch succeeded and looping the same content forever.
+        return false;
     }
 
     private string? CaptureAutoPlaybackIdentity()
@@ -3050,18 +3239,11 @@ public sealed partial class MainViewModel : ObservableObject
         siteId is SiteIds.Douyin or SiteIds.TikTok or SiteIds.YouTube or SiteIds.Bilibili;
 
     /// <summary>Host-level exclusive sites (Douyin/TikTok/YouTube/Bilibili) for settle/probe tuning.</summary>
-    private static bool IsExclusiveHost(Uri pageUrl)
-    {
-        var host = pageUrl.Host;
-        return host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("b23.tv", StringComparison.OrdinalIgnoreCase);
-    }
+    private static bool IsExclusiveHost(Uri pageUrl) =>
+        SiteHosts.MatchesAny(pageUrl,
+            "douyin.com", "iesdouyin.com", "tiktok.com",
+            "youtube.com", "youtu.be", "youtube-nocookie.com",
+            "bilibili.com", "b23.tv");
 
     private void FocusLargestVideoVariant(DetectedVideoViewModel vm)
     {
@@ -3199,7 +3381,8 @@ public sealed partial class MainViewModel : ObservableObject
             RestartDetectionForPageChange(
                 e.PageUrl,
                 e.PageTitle,
-                mediaSessionKey: tab.Host.CurrentMediaSessionKey);
+                mediaSessionKey: tab.Host.CurrentMediaSessionKey,
+                allowSuspended: true);
         }, System.Windows.Threading.DispatcherPriority.Background);
     }
 
@@ -3233,12 +3416,9 @@ public sealed partial class MainViewModel : ObservableObject
         // Exclusive-site feed soft-nav: same host accepts the exclusive card.
         // Douyin/TikTok paths kept; YouTube/Bilibili added so content-keyed identities are not dropped.
         if (Uri.TryCreate(currentPage, UriKind.Absolute, out var cur) &&
-            (cur.Host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
-             cur.Host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase) ||
-             cur.Host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase) ||
-             cur.Host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
-             cur.Host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase) ||
-             cur.Host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase)) &&
+            SiteHosts.MatchesAny(cur,
+                "douyin.com", "tiktok.com", "iesdouyin.com",
+                "youtube.com", "youtu.be", "bilibili.com") &&
             string.Equals(cur.Host, video.PageUrl.Host, StringComparison.OrdinalIgnoreCase))
             return true;
 
@@ -3315,7 +3495,7 @@ public sealed partial class MainViewModel : ObservableObject
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         if (ytShorts.Success)
             return "content:youtube:" + ytShorts.Groups["id"].Value;
-        if (pageUrl.Host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.Matches(pageUrl, "youtu.be"))
         {
             var id = pageUrl.AbsolutePath.Trim('/');
             if (id.Length >= 6)

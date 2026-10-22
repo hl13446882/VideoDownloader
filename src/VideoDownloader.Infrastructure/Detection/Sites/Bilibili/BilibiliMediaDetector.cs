@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Core.Sites;
 using VideoDownloader.Infrastructure.Detection;
 
 namespace VideoDownloader.Infrastructure.Detection.Sites.Bilibili;
@@ -48,8 +49,7 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
     public event EventHandler<IReadOnlyList<MediaDescriptor>>? DescriptorsReady;
 
     public bool Matches(Uri pageUrl) =>
-        pageUrl.Host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase) ||
-        pageUrl.Host.Contains("b23.tv", StringComparison.OrdinalIgnoreCase);
+        SiteHosts.MatchesAny(pageUrl, "bilibili.com", "b23.tv");
 
     public void BeginSession(Uri pageUrl, Guid sessionId)
     {
@@ -165,10 +165,7 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
             return;
 
         if (NetworkPairLeads())
-        {
             _probeStats.ReportMethod(SiteIds.Bilibili, ProbeMethods.NetworkPlayurl);
-            return;
-        }
 
         using var resolveCancellation = CancellationTokenSource.CreateLinkedTokenSource(ct, lifetime);
         var resolveToken = resolveCancellation.Token;
@@ -299,13 +296,8 @@ public sealed class BilibiliMediaDetector : IExclusiveSiteMediaDetector
     {
         winningMethod = null;
         if (_pageUrl is null) return null;
-        if (NetworkPairLeads())
-        {
-            var network = BuildFromNetwork(out winningMethod);
-            if (network is not null)
-                return network;
-        }
 
+        // A completed yt-dlp ladder is the authoritative format list; network playurl is fallback.
         if (_formats.Count > 0)
         {
             var formats = _formats.Select(PreferDurableCdn).ToArray();

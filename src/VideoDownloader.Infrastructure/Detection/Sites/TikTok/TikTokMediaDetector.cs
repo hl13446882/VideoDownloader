@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Core.Sites;
 using VideoDownloader.Infrastructure.Detection;
 
 namespace VideoDownloader.Infrastructure.Detection.Sites.TikTok;
@@ -63,7 +64,7 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
     public event EventHandler<IReadOnlyList<MediaDescriptor>>? DescriptorsReady;
 
     public bool Matches(Uri pageUrl) =>
-        pageUrl.Host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase);
+        SiteHosts.Matches(pageUrl, "tiktok.com");
 
     public void BeginSession(Uri pageUrl, Guid sessionId)
     {
@@ -270,13 +271,8 @@ public sealed class TikTokMediaDetector : IExclusiveSiteMediaDetector
                     _probeStats.ReportMethod(SiteIds.TikTok, ProbeMethods.WebData);
                 return;
             }
-            // Skip yt-dlp only when an already-held passive method outranks it.
-            if (HasDurableObservedVideoUnlocked())
-            {
-                _probeStats.ReportMethod(SiteIds.TikTok, ProbeMethods.WebData);
-                return;
-            }
-            // One yt-dlp pass per work. Observation tracks are allowed alongside, but do not relaunch.
+            // One yt-dlp pass per work: a passive play address may already be usable, but the
+            // external ladder still owns the complete format list/fragments.
             if (_formats.Count > 0)
                 return;
             if (_resolveTask is { IsCompleted: false })

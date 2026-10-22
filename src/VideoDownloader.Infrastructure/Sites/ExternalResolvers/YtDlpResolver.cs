@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Core.Sites;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Json;
 using VideoDownloader.Infrastructure.Logging;
@@ -53,11 +54,10 @@ public sealed class YtDlpResolver : IExternalSiteResolver
         }
 
         var siteId =
-            pageUrl.Host.Contains("tiktok", StringComparison.OrdinalIgnoreCase) ? SiteIds.TikTok :
-            pageUrl.Host.Contains("bilibili", StringComparison.OrdinalIgnoreCase) ? SiteIds.Bilibili :
-            pageUrl.Host.Contains("douyin", StringComparison.OrdinalIgnoreCase) ? SiteIds.Douyin :
-            pageUrl.Host.Contains("youtube", StringComparison.OrdinalIgnoreCase) ||
-            pageUrl.Host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase) ? SiteIds.YouTube :
+            SiteHosts.Matches(pageUrl, "tiktok.com") ? SiteIds.TikTok :
+            SiteHosts.MatchesAny(pageUrl, "bilibili.com", "bilibili.tv", "b23.tv") ? SiteIds.Bilibili :
+            SiteHosts.MatchesAny(pageUrl, "douyin.com", "iesdouyin.com") ? SiteIds.Douyin :
+            SiteHosts.MatchesAny(pageUrl, "youtube.com", "youtu.be", "youtube-nocookie.com") ? SiteIds.YouTube :
             SiteIds.Generic;
 
         if (siteId is not SiteIds.Generic && !_options.Sites.GetSiteEnabled(siteId))
@@ -325,8 +325,7 @@ public sealed class YtDlpResolver : IExternalSiteResolver
     private static string CanonicalizePageUrl(Uri pageUrl)
     {
         // Drop playlist / radio noise so yt-dlp resolves the single watch item.
-        if (pageUrl.Host.Contains("youtube", StringComparison.OrdinalIgnoreCase) ||
-            pageUrl.Host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(pageUrl, "youtube.com", "youtu.be", "youtube-nocookie.com"))
         {
             foreach (var part in pageUrl.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
             {
@@ -341,7 +340,7 @@ public sealed class YtDlpResolver : IExternalSiteResolver
         }
 
         // Douyin feed/modal URLs are not extractable; map to /video/{id}.
-        if (pageUrl.Host.Contains("douyin", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(pageUrl, "douyin.com", "iesdouyin.com"))
         {
             foreach (var part in pageUrl.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
             {
@@ -359,7 +358,7 @@ public sealed class YtDlpResolver : IExternalSiteResolver
 
         // TikTok-only narrow rewrite: bare /video/{id} 404s. Keep /@user/video/{id} and
         // /embed/v2/{id} intact so site detectors can try both forms without collapsing.
-        if (pageUrl.Host.Contains("tiktok", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.Matches(pageUrl, "tiktok.com"))
         {
             var userVideo = System.Text.RegularExpressions.Regex.Match(
                 pageUrl.AbsolutePath,
@@ -1009,22 +1008,21 @@ public sealed class YtDlpResolver : IExternalSiteResolver
             return true;
 
         // YouTube auth cookies often live on google.com.
-        if (host.Contains("youtube", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(host, "youtube.com", "youtu.be", "youtube-nocookie.com"))
         {
             return IsCookieDomainMatch("youtube.com", domain) ||
                    IsCookieDomainMatch("google.com", domain) ||
                    IsCookieDomainMatch("accounts.google.com", domain);
         }
 
-        if (host.Contains("douyin", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(host, "douyin.com", "iesdouyin.com"))
             return IsCookieDomainMatch("douyin.com", domain) ||
                    IsCookieDomainMatch("iesdouyin.com", domain);
 
-        if (host.Contains("bilibili", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(host, "bilibili.com", "bilibili.tv"))
             return IsCookieDomainMatch("bilibili.com", domain);
 
-        if (host.Contains("tiktok", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(host, "tiktok.com", "tiktokv.com"))
         {
             return IsCookieDomainMatch("tiktok.com", domain) ||
                    IsCookieDomainMatch("tiktokv.com", domain) ||

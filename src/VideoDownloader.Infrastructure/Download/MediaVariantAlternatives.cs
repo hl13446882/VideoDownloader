@@ -16,7 +16,7 @@ internal static class MediaVariantAlternatives
         var siblings = (ladder ?? [])
             .Concat(primary.Alternatives)
             .Where(v => v.Tracks.Count > 0)
-            .Where(v => !SameSource(primary, v))
+            .Where(v => !SameVariant(primary, v))
             .Select(v => v with { Alternatives = [] })
             .GroupBy(DedupKey, StringComparer.OrdinalIgnoreCase)
             .Select(g => g
@@ -33,11 +33,15 @@ internal static class MediaVariantAlternatives
         return primary with { Alternatives = siblings };
     }
 
-    private static bool SameSource(MediaVariant a, MediaVariant b) =>
-        string.Equals(a.SourceUrl.AbsoluteUri, b.SourceUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+    private static bool SameVariant(MediaVariant a, MediaVariant b) =>
+        string.Equals(MediaVariantIdentity.DedupKey(a), MediaVariantIdentity.DedupKey(b),
+            StringComparison.OrdinalIgnoreCase);
 
     private static string DedupKey(MediaVariant v)
     {
+        if (MediaVariantIdentity.IsDashVariant(v))
+            return MediaVariantIdentity.DedupKey(v);
+
         if (BilibiliCdnPreference.IsMediaHost(v.SourceUrl))
         {
             // Keep both a durable and a fragile CDN for the same m4s so 403/RST recovery
@@ -46,6 +50,6 @@ internal static class MediaVariantAlternatives
             return "obj:" + BilibiliCdnPreference.ObjectKey(v.SourceUrl) + "|" + tier;
         }
 
-        return "url:" + string.Join('|', v.Tracks.Select(t => t.SourceUrl.AbsoluteUri));
+        return MediaVariantIdentity.DedupKey(v);
     }
 }

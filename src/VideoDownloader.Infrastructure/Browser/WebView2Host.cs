@@ -8,6 +8,7 @@ using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Core.Sites;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Logging;
 
@@ -863,9 +864,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
     private static IEnumerable<string> RelatedCookieUrls(Uri pageUrl)
     {
         var host = pageUrl.Host;
-        if (host.Contains("youtube", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("google", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(host, "youtube.com", "youtu.be", "youtube-nocookie.com", "google.com"))
         {
             yield return "https://www.youtube.com/";
             yield return "https://youtube.com/";
@@ -873,20 +872,19 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             yield return "https://accounts.google.com/";
         }
 
-        if (host.Contains("douyin", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("amemv", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(host, "douyin.com", "iesdouyin.com", "amemv.com"))
         {
             yield return "https://www.douyin.com/";
             yield return "https://www.iesdouyin.com/";
         }
 
-        if (host.Contains("bilibili", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(host, "bilibili.com", "bilibili.tv", "b23.tv"))
         {
             yield return "https://www.bilibili.com/";
             yield return "https://bilibili.com/";
         }
 
-        if (host.Contains("tiktok", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(host, "tiktok.com", "tiktokv.com"))
         {
             yield return "https://www.tiktok.com/";
             yield return "https://tiktok.com/";
@@ -1264,22 +1262,14 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
                url.Contains("/feed", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool IsExclusiveMediaHost(Uri pageUrl)
-    {
-        var host = pageUrl.Host;
-        return host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("b23.tv", StringComparison.OrdinalIgnoreCase);
-    }
+    private static bool IsExclusiveMediaHost(Uri pageUrl) =>
+        SiteHosts.MatchesAny(pageUrl,
+            "douyin.com", "iesdouyin.com", "tiktok.com",
+            "youtube.com", "youtu.be", "youtube-nocookie.com",
+            "bilibili.com", "b23.tv");
 
     private static bool IsDouyinHost(Uri pageUrl) =>
-        pageUrl.Host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
-        pageUrl.Host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase);
+        SiteHosts.MatchesAny(pageUrl, "douyin.com", "iesdouyin.com");
 
     private static bool IsAwemeDetailApi(Uri url)
     {

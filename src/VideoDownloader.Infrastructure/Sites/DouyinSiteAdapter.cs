@@ -1,5 +1,6 @@
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Core.Sites;
 
 namespace VideoDownloader.Infrastructure.Sites;
 
@@ -9,7 +10,7 @@ public sealed class DouyinSiteAdapter : ISiteAdapter
     public int Priority => 100;
 
     public bool CanHandle(Uri pageUrl) =>
-        pageUrl.Host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase);
+        SiteHosts.MatchesAny(pageUrl, "douyin.com", "iesdouyin.com");
 
     public Task<SiteProbeResult> ProbeAsync(SiteProbeContext context, CancellationToken ct)
     {

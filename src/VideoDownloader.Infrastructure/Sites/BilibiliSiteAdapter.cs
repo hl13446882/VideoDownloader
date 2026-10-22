@@ -1,6 +1,7 @@
 using System.Text.Json;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Core.Sites;
 using VideoDownloader.Infrastructure.Json;
 
 namespace VideoDownloader.Infrastructure.Sites;
@@ -18,7 +19,7 @@ public sealed class BilibiliSiteAdapter : ISiteAdapter
     public int Priority => 100;
 
     public bool CanHandle(Uri pageUrl) =>
-        pageUrl.Host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase);
+        SiteHosts.MatchesAny(pageUrl, "bilibili.com", "bilibili.tv", "b23.tv");
 
     public async Task<SiteProbeResult> ProbeAsync(SiteProbeContext context, CancellationToken ct)
     {

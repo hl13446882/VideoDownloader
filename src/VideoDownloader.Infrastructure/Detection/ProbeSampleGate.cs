@@ -37,7 +37,7 @@ internal static class ProbeSampleGate
             if (variant.Tracks.Any(t => t.BrowserObserved))
                 return (true, null);
 
-            if (variant.Tracks.Any(t => t.Container is "hls" or "dash"))
+            if (variant.Tracks.Any(t => MediaContainer.IsManifest(t.Container, t.SourceUrl)))
                 return (true, null);
 
             var ok = true;

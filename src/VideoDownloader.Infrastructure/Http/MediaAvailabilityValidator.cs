@@ -6,7 +6,6 @@ using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
-using VideoDownloader.Infrastructure.Download;
 
 namespace VideoDownloader.Infrastructure.Http;
 
@@ -19,8 +18,7 @@ public sealed class MediaAvailabilityValidator(IHttpClientFactory clients, IRequ
         foreach (var track in variant.Tracks.DistinctBy(t => t.SourceUrl))
         {
             // Manifest backends validate initialization/segments; binary sniffing is for direct resources only.
-            if (track.Container is "hls" or "dash" ||
-                DownloadBackendRouter.IsStreamingManifest(track.SourceUrl))
+            if (MediaContainer.IsManifest(track.Container, track.SourceUrl))
                 continue;
             // CDP already delivered these bytes to the playing document — do not re-GET flaky CDN URLs.
             if (track.BrowserObserved || track.IsValidated)

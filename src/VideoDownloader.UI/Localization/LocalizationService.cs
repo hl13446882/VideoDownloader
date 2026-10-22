@@ -435,6 +435,8 @@ public sealed partial class LocalizationService : ObservableObject
         ["status.probeManualEmptyExt"] = ("手动探测完成：未发现地址。外置解析：{0}",
             "Manual probe done: no URL. External: {0}"),
         ["status.probeManualFailed"] = ("手动探测失败：{0}", "Manual probe failed: {0}"),
+        ["status.nextSwitching"] = ("正在切换到下一条…", "Advancing to next…"),
+        ["status.nextSwitchFailed"] = ("未能切换到下一条，请重试", "Could not advance to next; please retry"),
         ["status.probeWaiting"] = ("探测中：等待页面媒体加载…", "Probing: waiting for page media…"),
         ["status.probeRunning"] = ("探测中：DOM + 外置解析…", "Probing: DOM + external…"),
         ["status.probeMethod"] = ("正在使用{0}方法探测，目前成功率{1}%", "Probing with {0}, success rate {1}%"),

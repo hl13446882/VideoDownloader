@@ -1,5 +1,6 @@
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Core.Sites;
 
 namespace VideoDownloader.Infrastructure.Sites;
 
@@ -16,8 +17,7 @@ public sealed class YouTubeSiteAdapter : ISiteAdapter
     public int Priority => 100;
 
     public bool CanHandle(Uri pageUrl) =>
-        pageUrl.Host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
-        pageUrl.Host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase);
+        SiteHosts.MatchesAny(pageUrl, "youtube.com", "youtu.be", "youtube-nocookie.com");
 
     public async Task<SiteProbeResult> ProbeAsync(SiteProbeContext context, CancellationToken ct)
     {

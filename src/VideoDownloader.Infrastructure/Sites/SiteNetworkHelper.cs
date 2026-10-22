@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Core.Sites;
 
 namespace VideoDownloader.Infrastructure.Sites;
 
@@ -42,7 +43,7 @@ internal static partial class SiteNetworkHelper
 
     public static string? ExtractYouTubeVideoId(Uri pageUrl)
     {
-        if (pageUrl.Host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.Matches(pageUrl, "youtu.be"))
             return pageUrl.AbsolutePath.Trim('/').Split('/').FirstOrDefault();
 
         var v = Regex.Match(pageUrl.Query, @"[?&]v=([^&]+)", RegexOptions.IgnoreCase);

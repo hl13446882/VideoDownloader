@@ -717,10 +717,9 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         if (!isFeedRoot)
             return pageUrl;
 
-        if (host.Contains("tiktok", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.Matches(host, "tiktok.com"))
             return new Uri($"https://www.tiktok.com/@i/video/{id}");
-        if (host.Contains("douyin", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("iesdouyin", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(host, "douyin.com", "iesdouyin.com"))
             return new Uri($"https://www.douyin.com/video/{id}");
 
         return pageUrl;
@@ -1156,9 +1155,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             : null;
 
         // Manifest metadata alone cannot classify an untyped media playlist.
-        var isManifest = container is "hls" or "dash" ||
-                         url.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) ||
-                         url.AbsolutePath.EndsWith(".mpd", StringComparison.OrdinalIgnoreCase);
+        var isManifest = MediaContainer.IsManifest(container, url);
         if (resolveManifest && isManifest && _manifests is not null)
             return await InspectManifestAsync(url,page,context,container,timeout.Token);
 
@@ -1419,10 +1416,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             present.Add(ProbeMethods.YtDlp);
         if (tracks.Any(track => track.BrowserObserved || track.Evidence == MediaEvidence.BrowserObserved))
             present.Add(ProbeMethods.BrowserPlay);
-        if (tracks.Any(track =>
-                track.Container is "hls" or "dash" ||
-                track.SourceUrl.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) ||
-                track.SourceUrl.AbsolutePath.EndsWith(".mpd", StringComparison.OrdinalIgnoreCase)))
+        if (tracks.Any(track => MediaContainer.IsManifest(track.Container, track.SourceUrl)))
             present.Add(ProbeMethods.Manifest);
         if (tracks.Any(track => track.Evidence == MediaEvidence.DomObserved))
             present.Add(ProbeMethods.DomMorphology);
@@ -1516,7 +1510,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 .Select(t => MediaUrlNormalizer.Normalize(t.SourceUrl)).ToHashSet(StringComparer.Ordinal);
             probed = probed.Select(p => p.Track.ContentIdentity is null && identifiedUrls.Contains(MediaUrlNormalizer.Normalize(p.Track.SourceUrl))
                 ? p with { Track = p.Track with { ContentIdentity = owner } } : p).ToArray();
-            var externalTracks = external.Variants.Where(v => v.Tracks.Count == 1 || v.Tracks.All(t => t.Container is not ("hls" or "dash")))
+            var externalTracks = external.Variants.Where(v => v.Tracks.Count == 1 || v.Tracks.All(t => !MediaContainer.IsManifest(t.Container, t.SourceUrl)))
                 .SelectMany(v => v.Tracks.Select(t => new Probed(external.PageUrl,
                 t with { ContentIdentity = owner }, 0, v.Height)))
                 .DistinctBy(p => (p.Track.SourceUrl.AbsoluteUri, p.Track.TrackId, p.Track.Kind));
@@ -1606,7 +1600,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             // Progressive Combined can donate audio to a higher video-only sibling.
             // HLS/DASH Combined is already a full A+V playlist — never pair it as audio-extract.
             .Concat(singleTracks.Where(a => a.Track.Kind == MediaTrackKind.Combined)
-                .Where(a => a.Track.Container is not ("hls" or "dash"))
+                .Where(a => !MediaContainer.IsManifest(a.Track.Container, a.Track.SourceUrl))
                 .Where(a => !IsInsufficientByteDanceDownloadObject(a.Track.SourceUrl, a.Track.ContentLength))
                 .Where(a => !IsHlsTransportSegment(a.Track.SourceUrl, null) && !MediaUrlNormalizer.IsLikelySegment(a.Track.SourceUrl))
                 .Select(a => a with { Track = a.Track with { Kind = MediaTrackKind.Audio, TrackId = "audio-extract", Codec = null } }))
@@ -1732,6 +1726,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
 
         // Deduplicate ABR history within the same media group only — never collapse distinct videos.
         variants = variants
+            .Select(MediaContainer.NormalizeVariant)
             .GroupBy(v =>
             {
                 var audioOnly = v.Tracks.Count > 0 && v.Tracks.All(t => t.Kind == MediaTrackKind.Audio);
@@ -1755,8 +1750,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
             .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
             .ToList();
 
-        var family = all.Any(a => a.Track.Container == "hls") ? MediaFamily.Hls
-            : all.Any(a => a.Track.Container == "dash") ? MediaFamily.Dash
+        var family = all.Any(a => MediaContainer.Normalize(a.Track.Container, a.Track.SourceUrl) == "hls") ? MediaFamily.Hls
+            : all.Any(a => MediaContainer.Normalize(a.Track.Container, a.Track.SourceUrl) == "dash") ? MediaFamily.Dash
             : MediaFamily.DirectMp4;
 
         var id = new Guid(SHA256.HashData(Encoding.UTF8.GetBytes("page:" + page.AbsoluteUri)).AsSpan(0, 16));
@@ -1878,8 +1873,8 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
                 DurationSec = ResolveGroupDuration(groupVariants, probed)
                     ?? (ordered.Length == 1 ? merged.DurationSec : null),
                 Variants = stamped,
-                Family = stamped.Any(v => v.Tracks.Any(t => t.Container == "hls")) ? MediaFamily.Hls
-                    : stamped.Any(v => v.Tracks.Any(t => t.Container == "dash")) ? MediaFamily.Dash
+                Family = stamped.Any(v => v.Tracks.Any(t => MediaContainer.Normalize(t.Container, t.SourceUrl) == "hls")) ? MediaFamily.Hls
+                    : stamped.Any(v => v.Tracks.Any(t => MediaContainer.Normalize(t.Container, t.SourceUrl) == "dash")) ? MediaFamily.Dash
                     : merged.Family
             });
         }
@@ -2118,7 +2113,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
 
         // Full HLS/DASH playlists are not audio donors for a separate video object.
         if (audio.Track.TrackId == "audio-extract" &&
-            audio.Track.Container is "hls" or "dash")
+            MediaContainer.IsManifest(audio.Track.Container, audio.Track.SourceUrl))
             return false;
 
         // Orphan tracks on a shared feed host must not invent a pair.
@@ -2148,18 +2143,11 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
     /// <summary>
     /// Exclusive sites (Douyin/TikTok/YouTube/Bilibili) must never enter Unified.
     /// </summary>
-    internal static bool IsExclusiveSiteHost(Uri pageUrl)
-    {
-        var host = pageUrl.Host;
-        return host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("b23.tv", StringComparison.OrdinalIgnoreCase);
-    }
+    internal static bool IsExclusiveSiteHost(Uri pageUrl) =>
+        SiteHosts.MatchesAny(pageUrl,
+            "douyin.com", "iesdouyin.com", "tiktok.com",
+            "youtube.com", "youtu.be", "youtube-nocookie.com",
+            "bilibili.com", "b23.tv");
 
     /// <summary>
     /// Collapse <c>id:123</c>, <c>content:douyin:123</c>, <c>host:content:123</c> to bare <c>123</c>.
@@ -2179,7 +2167,7 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
     {
         var pageHost = page.Host;
         var mediaHost = media.Host;
-        var pageBili = pageHost.Contains("bilibili", StringComparison.OrdinalIgnoreCase);
+        var pageBili = SiteHosts.MatchesAny(pageHost, "bilibili.com", "bilibili.tv", "b23.tv");
         var mediaBili = mediaHost.Contains("bilivideo", StringComparison.OrdinalIgnoreCase) ||
                         mediaHost.Contains("bilibili", StringComparison.OrdinalIgnoreCase) ||
                         mediaHost.StartsWith("upos-", StringComparison.OrdinalIgnoreCase) ||
@@ -2189,17 +2177,16 @@ public sealed class UnifiedMediaPipeline : IMediaDetectionPipeline
         if (mediaBili && !pageBili)
             return true;
 
-        var pageDy = pageHost.Contains("douyin", StringComparison.OrdinalIgnoreCase) ||
-                     pageHost.Contains("iesdouyin", StringComparison.OrdinalIgnoreCase);
+        var pageDy = SiteHosts.MatchesAny(pageHost, "douyin.com", "iesdouyin.com");
         var mediaDy = mediaHost.Contains("douyin", StringComparison.OrdinalIgnoreCase) ||
                       mediaHost.Contains("byteicdn", StringComparison.OrdinalIgnoreCase) ||
                       mediaHost.Contains("zjcdn", StringComparison.OrdinalIgnoreCase) ||
                       mediaHost.Contains("douyinvod", StringComparison.OrdinalIgnoreCase) ||
                       mediaHost.Contains("douyincdn", StringComparison.OrdinalIgnoreCase);
-        if (mediaDy && !pageDy && !pageHost.Contains("tiktok", StringComparison.OrdinalIgnoreCase))
+        if (mediaDy && !pageDy && !SiteHosts.Matches(pageHost, "tiktok.com"))
             return true;
 
-        var pageTt = pageHost.Contains("tiktok", StringComparison.OrdinalIgnoreCase);
+        var pageTt = SiteHosts.Matches(pageHost, "tiktok.com");
         var mediaTt = mediaHost.Contains("tiktok", StringComparison.OrdinalIgnoreCase);
         if (mediaTt && !pageTt && !pageDy)
             return true;

@@ -406,7 +406,7 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
 
     private static string? ExtractYouTubeId(Uri page)
     {
-        if (page.Host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.Matches(page, "youtu.be"))
             return page.AbsolutePath.Trim('/').Split('/').FirstOrDefault();
         var v = System.Text.RegularExpressions.Regex.Match(page.Query, @"[?&]v=([^&]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         if (v.Success) return v.Groups[1].Value;

@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Core.Sites;
 using VideoDownloader.Infrastructure.Detection;
 
 namespace VideoDownloader.Infrastructure.Detection.Sites.YouTube;
@@ -28,6 +29,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
     private long _probeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
     private bool _externalAttempted;
     private bool _successCounted;
+    private bool _publishedFormats;
     private bool _isLive;
 
     public YouTubeMediaDetector(
@@ -47,9 +49,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
     public event EventHandler<IReadOnlyList<MediaDescriptor>>? DescriptorsReady;
 
     public bool Matches(Uri pageUrl) =>
-        pageUrl.Host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
-        pageUrl.Host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase) ||
-        pageUrl.Host.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase);
+        SiteHosts.MatchesAny(pageUrl, "youtube.com", "youtu.be", "youtube-nocookie.com");
 
     public void BeginSession(Uri pageUrl, Guid sessionId)
     {
@@ -151,6 +151,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
                 _failureReason = null;
                 _externalAttempted = false;
                 _successCounted = false;
+                _publishedFormats = false;
                 _isLive = false;
             }
             else
@@ -173,7 +174,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         lock (_gate)
         {
             resolveToken.ThrowIfCancellationRequested();
-            if (session != _sessionId || _successCounted || !_ytdlp.IsAvailable || _externalAttempted)
+            if (session != _sessionId || !_ytdlp.IsAvailable || _externalAttempted)
                 return;
             // Claim the slot before await so concurrent probes cannot double-launch yt-dlp.
             _externalAttempted = true;
@@ -254,15 +255,19 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         MediaDescriptor? descriptor;
         lock (_gate)
         {
-            if (_successCounted) return;
             descriptor = Build(out var method);
             if (descriptor is null) return;
             if (descriptor.Formats.Count == 0 && descriptor.Video?.Kind == MediaTrackKind.Video &&
                 descriptor.Audio is null) return;
             var mapped = MediaDescriptorMapper.ToDetectedVideo(descriptor, _sessionId);
             if (!descriptor.IsLive && !VideoDownloader.Core.Detection.DetectionReadiness.IsUsable(mapped)) return;
+            // A passive result may already be on screen; publish again once the external ladder
+            // arrives so the complete format list replaces the partial one.
+            var hasFormats = descriptor.Formats.Count > 0;
+            if (_successCounted && (!hasFormats || _publishedFormats)) return;
             _failed = false;
             _failureReason = null;
+            _publishedFormats |= hasFormats;
             CountSuccess(method);
         }
         DescriptorsReady?.Invoke(this, [descriptor]);
@@ -417,6 +422,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
         _failureReason = null;
         _externalAttempted = false;
         _successCounted = false;
+        _publishedFormats = false;
         _isLive = false;
     }
 
@@ -448,7 +454,7 @@ public sealed class YouTubeMediaDetector : IExclusiveSiteMediaDetector
 
     private static string? ExtractVideoId(Uri page)
     {
-        if (page.Host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.Matches(page, "youtu.be"))
             return page.AbsolutePath.Trim('/').Split('/').FirstOrDefault();
         var v = Regex.Match(page.Query, @"[?&]v=([^&]+)", RegexOptions.IgnoreCase);
         if (v.Success) return v.Groups[1].Value;

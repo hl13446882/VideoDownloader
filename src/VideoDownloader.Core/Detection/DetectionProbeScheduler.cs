@@ -12,7 +12,6 @@ public static class DetectionProbeScheduler
         Func<bool> shouldStop,
         TimeSpan externalDelay,
         TimeSpan budget,
-        bool enrichFormats,
         CancellationToken ct,
         TimeSpan? pollInterval = null,
         TimeSpan? trailingObservation = null)
@@ -30,22 +29,41 @@ public static class DetectionProbeScheduler
             while (true)
             {
                 token.ThrowIfCancellationRequested();
-                if (shouldStop() || hasUsableResult()) break;
-                await observe(token);
                 if (shouldStop()) break;
-                var ready = hasUsableResult();
-                if (ready) break;
 
-                if (extract is not null && external is null &&
-                    (ready || watch.Elapsed >= externalDelay))
-                    external = extract(token);
-
-                if (external?.IsCompleted == true)
+                if (external is not null)
                 {
+                    // A usable browser result must not cancel a running extraction: it owns the
+                    // complete format ladder/fragments this page session needs.
+                    if (!external.IsCompleted)
+                    {
+                        await Task.Delay(poll, token);
+                        continue;
+                    }
+
                     await external;
                     finishedAt ??= watch.Elapsed;
-                    if (hasUsableResult() || watch.Elapsed - finishedAt >= trailing) break;
+                    if (hasUsableResult() || watch.Elapsed - finishedAt >= trailing)
+                        break;
+                    await observe(token);
+                    if (shouldStop()) break;
                 }
+                else
+                {
+                    await observe(token);
+                    if (shouldStop()) break;
+
+                    var ready = hasUsableResult();
+                    if (extract is null)
+                    {
+                        if (ready) break;
+                    }
+                    else if (ready || watch.Elapsed >= externalDelay)
+                    {
+                        external = extract(token);
+                    }
+                }
+
                 await Task.Delay(poll, token);
             }
         }

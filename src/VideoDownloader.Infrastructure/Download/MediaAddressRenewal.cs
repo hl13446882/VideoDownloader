@@ -2,6 +2,7 @@ using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Core.Sites;
 using VideoDownloader.Infrastructure.Detection;
 using VideoDownloader.Infrastructure.Detection.Sites.Bilibili;
 
@@ -335,19 +336,13 @@ internal static class MediaAddressRenewal
     /// <summary>Map page host to the isolated yt-dlp extractor site id (null → try Generic only via SupportsSite).</summary>
     private static string? InferSiteId(Uri page)
     {
-        var host = page.Host;
-        if (host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(page, "youtube.com", "youtu.be", "youtube-nocookie.com"))
             return SiteIds.YouTube;
-        if (host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.Matches(page, "tiktok.com"))
             return SiteIds.TikTok;
-        if (host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("bilibili.tv", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("b23.tv", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(page, "bilibili.com", "bilibili.tv", "b23.tv"))
             return SiteIds.Bilibili;
-        if (host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(page, "douyin.com", "iesdouyin.com"))
             return SiteIds.Douyin;
         return SiteIds.Generic;
     }

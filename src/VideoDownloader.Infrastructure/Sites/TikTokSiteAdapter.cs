@@ -1,5 +1,6 @@
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Core.Sites;
 
 namespace VideoDownloader.Infrastructure.Sites;
 
@@ -16,7 +17,7 @@ public sealed class TikTokSiteAdapter : ISiteAdapter
     public int Priority => 100;
 
     public bool CanHandle(Uri pageUrl) =>
-        pageUrl.Host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase);
+        SiteHosts.Matches(pageUrl, "tiktok.com");
 
     public async Task<SiteProbeResult> ProbeAsync(SiteProbeContext context, CancellationToken ct)
     {

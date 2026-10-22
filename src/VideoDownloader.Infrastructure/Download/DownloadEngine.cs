@@ -6,6 +6,7 @@ using VideoDownloader.Core.Download;
 using VideoDownloader.Core.Errors;
 using VideoDownloader.Core.Models;
 using VideoDownloader.Core.Naming;
+using VideoDownloader.Core.Sites;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Detection;
 using VideoDownloader.Infrastructure.Detection.Sites.Bilibili;
@@ -1811,8 +1812,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
     }
 
     private static bool IsDouyinRecoveryPage(Uri pageUrl) =>
-        pageUrl.Host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
-        pageUrl.Host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase);
+        SiteHosts.MatchesAny(pageUrl, "douyin.com", "iesdouyin.com");
 
     private static bool TryBuildDouyinPlayGateway(MediaVariant variant, Uri pageUrl, out Uri gateway)
     {

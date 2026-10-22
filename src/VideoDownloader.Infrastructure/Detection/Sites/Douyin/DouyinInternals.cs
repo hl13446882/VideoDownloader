@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Core.Sites;
 using VideoDownloader.Infrastructure.Detection;
 
 namespace VideoDownloader.Infrastructure.Detection.Sites.Douyin;
@@ -15,8 +16,7 @@ internal static class DouyinIdentity
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     public static bool IsPageHost(Uri page) =>
-        page.Host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
-        page.Host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase);
+        SiteHosts.MatchesAny(page, "douyin.com", "iesdouyin.com");
 
     public static bool IsMediaHost(Uri url) =>
         url.Host.Contains("douyin", StringComparison.OrdinalIgnoreCase) ||
@@ -87,10 +87,7 @@ internal static class DouyinPlayEvidence
         if (!url.AbsolutePath.Contains("/aweme/v1/play", StringComparison.OrdinalIgnoreCase) &&
             !url.AbsolutePath.Contains("/aweme/v1/playwm", StringComparison.OrdinalIgnoreCase))
             return false;
-        var host = url.Host;
-        return host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase) ||
-               host.Contains("amemv.com", StringComparison.OrdinalIgnoreCase);
+        return SiteHosts.MatchesAny(url, "douyin.com", "iesdouyin.com", "amemv.com");
     }
 
     public static bool IsPlayableUrl(Uri url)

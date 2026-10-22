@@ -7,45 +7,45 @@ public sealed class DetectionProbeSchedulerTests
 {
     private static Task Run(Func<CancellationToken, Task> observe,
         Func<CancellationToken, Task>? extract, Func<bool> ready, CancellationToken ct = default,
-        bool enrich = false, Func<bool>? stop = null, int delayMs = 0, int budgetMs = 2000) =>
+        Func<bool>? stop = null, int delayMs = 0, int budgetMs = 2000) =>
         DetectionProbeScheduler.RunAsync(observe, extract, ready, stop ?? (() => false),
-            TimeSpan.FromMilliseconds(delayMs), TimeSpan.FromMilliseconds(budgetMs), enrich, ct,
+            TimeSpan.FromMilliseconds(delayMs), TimeSpan.FromMilliseconds(budgetMs), ct,
             TimeSpan.FromMilliseconds(10), TimeSpan.FromMilliseconds(30));
 
     [Fact]
-    public async Task ExistingUsableAddress_ReturnsWithoutStartingExternalProcess()
+    public async Task UsablePassiveResult_StillRunsExternalOnceForCompleteFormats()
     {
         var calls = 0;
         await Run(_ => Task.CompletedTask, _ => { calls++; return Task.CompletedTask; }, () => true);
-        Assert.Equal(0, calls);
+        Assert.Equal(1, calls);
     }
 
     [Fact]
-    public async Task BrowserCanWinWhileExternalIsRunning_AndCancellationJoinsItsCleanup()
+    public async Task BrowserResult_DoesNotCancelRunningExternal_AndCancellationJoinsCleanup()
     {
         var started = false;
         var cleaned = false;
-        var ready = false;
         var calls = 0;
-        await Run(_ => { ready |= started; return Task.CompletedTask; }, async ct =>
+        await Run(_ => { started = true; return Task.CompletedTask; }, async ct =>
         {
             calls++;
-            started = true;
             try { await Task.Delay(Timeout.Infinite, ct); }
             finally { await Task.Yield(); cleaned = true; }
-        }, () => ready);
-        Assert.True(ready);
+        }, () => started, budgetMs: 80);
+        Assert.True(started);
         Assert.True(cleaned);
         Assert.Equal(1, calls);
     }
 
     [Fact]
-    public async Task Success_StopsEvenWhenEnrichmentWasRequested()
+    public async Task UsablePassiveResult_DoesNotStartOneExternalRoundPerPoll()
     {
         var calls = 0;
-        await Run(_ => Task.CompletedTask,
-            _ => { calls++; return Task.CompletedTask; }, () => true, enrich: true);
-        Assert.Equal(0, calls);
+        var observations = 0;
+        await Run(_ => { observations++; return Task.CompletedTask; },
+            _ => { calls++; return Task.CompletedTask; }, () => true);
+        Assert.Equal(1, calls);
+        Assert.Equal(1, observations);
     }
 
     [Fact]
@@ -57,22 +57,22 @@ public sealed class DetectionProbeSchedulerTests
     }
 
     [Fact]
-    public async Task PassiveGrace_EndsAsSoonAsBrowserFindsUsableAddress()
+    public async Task BrowserUsableBeforeDelay_StartsExternalImmediately()
     {
         var observations = 0;
         var calls = 0;
         await Run(_ => { observations++; return Task.CompletedTask; },
             _ => { calls++; return Task.CompletedTask; }, () => observations >= 2, delayMs: 500);
-        Assert.Equal(0, calls);
+        Assert.Equal(1, calls);
         Assert.Equal(2, observations);
     }
 
     [Fact]
-    public async Task LiveSignal_StopsBeforeExternalExtraction_EvenInEnrichmentMode()
+    public async Task LiveSignal_StopsBeforeExternalExtraction()
     {
         var calls = 0;
         await Run(_ => Task.CompletedTask, _ => { calls++; return Task.CompletedTask; },
-            () => false, enrich: true, stop: () => true);
+            () => false, stop: () => true);
         Assert.Equal(0, calls);
     }
 

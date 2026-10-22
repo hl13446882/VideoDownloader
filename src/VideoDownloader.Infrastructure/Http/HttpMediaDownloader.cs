@@ -1248,6 +1248,8 @@ public sealed class HttpMediaDownloader
     {
         foreach (var track in job.Variant.Tracks)
         {
+            if (track.HttpDashFragmentUrls is { Count: > 1 } urls)
+                return urls.Count;
             if (track.HttpDashFragmentCount is int n and > 1)
                 return n;
         }
@@ -1319,6 +1321,9 @@ public sealed class HttpMediaDownloader
             const int batchSize = 4;
             var template = job.Variant.SourceUrl;
             var resource = BuildResource(job.Variant, job);
+            var explicitFragments = job.Variant.Tracks
+                .Select(t => t.HttpDashFragmentUrls)
+                .FirstOrDefault(urls => urls is { Count: > 1 });
 
             for (var index = startIndex; index < fragmentCount; index += batchSize)
             {
@@ -1328,9 +1333,10 @@ public sealed class HttpMediaDownloader
                 var fetchTasks = Enumerable.Range(0, batchCount).Select(async offset =>
                 {
                     var fragIndex = index + offset;
+                    var fragmentUrl = ResolveFragmentUrl(template, explicitFragments, fragIndex);
                     var bytes = await DownloadOneDashFragmentAsync(
                         resource,
-                        WithFragmentSequence(template, fragIndex),
+                        fragmentUrl,
                         ct);
                     return (Offset: offset, Bytes: bytes);
                 });
@@ -1419,6 +1425,11 @@ public sealed class HttpMediaDownloader
 
         throw last ?? new DownloadException(ErrorCodes.NetTimeout, "Fragment download failed.");
     }
+
+    internal static Uri ResolveFragmentUrl(Uri template, IReadOnlyList<Uri>? explicitFragments, int index) =>
+        explicitFragments is not null && index >= 0 && index < explicitFragments.Count
+            ? explicitFragments[index]
+            : WithFragmentSequence(template, index);
 
     internal static Uri WithFragmentSequence(Uri url, int sequence)
     {

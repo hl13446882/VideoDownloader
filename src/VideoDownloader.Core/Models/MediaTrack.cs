@@ -54,4 +54,10 @@ public sealed record MediaTrack(
     /// Null/≤1 means ordinary progressive HTTP.
     /// </summary>
     public int? HttpDashFragmentCount { get; init; }
+
+    /// <summary>
+    /// Explicit fragment addresses when yt-dlp lists them (non-YouTube DASH), in sequence order.
+    /// Takes precedence over deriving <c>sq=</c> from <see cref="SourceUrl"/>.
+    /// </summary>
+    public IReadOnlyList<Uri>? HttpDashFragmentUrls { get; init; }
 }

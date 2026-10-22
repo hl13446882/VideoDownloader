@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Core.Sites;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Json;
 using VideoDownloader.Infrastructure.Logging;
@@ -47,7 +48,8 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
         }
     }
 
-    private static bool SupportsHost(Uri pageUrl) => pageUrl.Host.Contains("youtube", StringComparison.OrdinalIgnoreCase) || pageUrl.Host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase);
+    private static bool SupportsHost(Uri pageUrl) =>
+        SiteHosts.MatchesAny(pageUrl, "youtube.com", "youtu.be", "youtube-nocookie.com");
 
     public bool SupportsSite(string siteId) => string.Equals(siteId, SiteIds.YouTube, StringComparison.Ordinal);
 
@@ -619,8 +621,8 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
         if (variants.Count == 0)
             return [];
 
-        var family = variants[0].Container is "hls" ? MediaFamily.Hls :
-            variants[0].Container is "dash" ? MediaFamily.Dash : MediaFamily.DirectMp4;
+        var family = MediaContainer.Normalize(variants[0].Container, variants[0].SourceUrl) is "hls" ? MediaFamily.Hls :
+            MediaContainer.Normalize(variants[0].Container, variants[0].SourceUrl) is "dash" ? MediaFamily.Dash : MediaFamily.DirectMp4;
 
         return
         [
@@ -1028,6 +1030,10 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
         if (IsHlsManifest(url))
             container = "hls";
 
+        var fragmentUrls = YtDlpSegments.ReadUrls(format);
+        // A partial fragment list must not truncate the authoritative fragment_count.
+        if (fragmentUrls is not null && fragmentCount is int declared && fragmentUrls.Count < declared)
+            fragmentUrls = null;
         return new MediaTrack(
             trackId,
             kind,
@@ -1040,7 +1046,8 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
             TryGetSize(format),
             BuildRequestContext(format, fallback))
         {
-            HttpDashFragmentCount = fragmentCount
+            HttpDashFragmentCount = fragmentCount ?? fragmentUrls?.Count,
+            HttpDashFragmentUrls = fragmentUrls
         };
     }
 
@@ -1119,22 +1126,21 @@ public sealed class YouTubeYtDlpExtractor : IExternalSiteResolver
             return true;
 
         // YouTube auth cookies often live on google.com.
-        if (host.Contains("youtube", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(host, "youtube.com", "youtu.be", "youtube-nocookie.com"))
         {
             return IsCookieDomainMatch("youtube.com", domain) ||
                    IsCookieDomainMatch("google.com", domain) ||
                    IsCookieDomainMatch("accounts.google.com", domain);
         }
 
-        if (host.Contains("douyin", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(host, "douyin.com", "iesdouyin.com"))
             return IsCookieDomainMatch("douyin.com", domain) ||
                    IsCookieDomainMatch("iesdouyin.com", domain);
 
-        if (host.Contains("bilibili", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(host, "bilibili.com", "bilibili.tv"))
             return IsCookieDomainMatch("bilibili.com", domain);
 
-        if (host.Contains("tiktok", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(host, "tiktok.com", "tiktokv.com"))
         {
             return IsCookieDomainMatch("tiktok.com", domain) ||
                    IsCookieDomainMatch("tiktokv.com", domain) ||

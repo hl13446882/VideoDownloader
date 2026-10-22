@@ -7,21 +7,16 @@ public sealed class SiteDetectionRouter : ISiteDetectionRouter
 {
     public SiteKind Resolve(Uri pageUrl)
     {
-        var host = pageUrl.Host;
-        if (host.Contains("douyin.com", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("iesdouyin.com", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(pageUrl, "douyin.com", "iesdouyin.com"))
             return SiteKind.Douyin;
 
-        if (host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.Matches(pageUrl, "tiktok.com"))
             return SiteKind.TikTok;
 
-        if (host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(pageUrl, "youtube.com", "youtu.be", "youtube-nocookie.com"))
             return SiteKind.YouTube;
 
-        if (host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("b23.tv", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(pageUrl, "bilibili.com", "b23.tv"))
             return SiteKind.Bilibili;
 
         return SiteKind.Other;

@@ -11,14 +11,15 @@ public sealed class DownloadBackendRouter : IDownloadBackendRouter
             string.Equals(variant.Container, "album", StringComparison.OrdinalIgnoreCase))
             return DownloadBackendKind.FfmpegAlbumSlideshow;
 
-        if (variant.Tracks.Any(t => t.Container is "hls" or "dash" || t.TrackId == "audio-extract") ||
-            IsStreamingManifest(variant.SourceUrl) ||
+        if (variant.Tracks.Any(t => MediaContainer.IsManifest(t.Container, t.SourceUrl) ||
+                                    t.TrackId == "audio-extract") ||
+            MediaContainer.IsManifest(variant.Container, variant.SourceUrl) ||
             variant.Tracks.Any(t => IsStreamingManifest(t.SourceUrl)))
             return DownloadBackendKind.FfmpegRemux;
         if (variant.Tracks.Count > 1)
             return DownloadBackendKind.FfmpegMultiInput;
 
-        var container = variant.Container?.ToLowerInvariant();
+        var container = MediaContainer.Normalize(variant.Container, variant.SourceUrl);
         if (container is "hls" or "dash")
             return DownloadBackendKind.FfmpegRemux;
 
@@ -37,8 +38,11 @@ public sealed class DownloadBackendRouter : IDownloadBackendRouter
     {
         if (url is null)
             return false;
+        if (MediaContainer.IsManifest(null, url))
+            return true;
         var text = url.AbsoluteUri;
         return text.Contains(".m3u8", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains(".mpd", StringComparison.OrdinalIgnoreCase) ||
                text.Contains("/hls_playlist", StringComparison.OrdinalIgnoreCase) ||
                text.Contains("/manifest/hls", StringComparison.OrdinalIgnoreCase) ||
                (text.Contains("/dash/", StringComparison.OrdinalIgnoreCase) &&

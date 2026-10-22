@@ -78,22 +78,23 @@ public sealed class M3u8DownloadAdapter(
                 if (File.Exists(saved)) { progress[index] = new FileInfo(saved).Length; return track with { SourceUrl = new Uri(saved), RequestContext = RequestContext.CreateEmpty(), Hls = null }; }
             }
             var input = track.SourceUrl.AbsoluteUri;
-            if (track.Container is not ("hls" or "dash"))
+            var manifest = MediaContainer.IsManifest(track.Container, track.SourceUrl);
+            if (!manifest)
             {
                 input = Path.Combine(folder, "input.mpd");
                 XNamespace ns = "urn:mpeg:dash:schema:mpd:2011";
                 var audio = track.Kind == MediaTrackKind.Audio && track.TrackId != "audio-extract";
-                var manifest = new XDocument(new XElement(ns + "MPD", new XAttribute("type", "static"), new XAttribute("mediaPresentationDuration", "PT1S"),
+                var document = new XDocument(new XElement(ns + "MPD", new XAttribute("type", "static"), new XAttribute("mediaPresentationDuration", "PT1S"),
                     new XElement(ns + "Period", new XElement(ns + "AdaptationSet", new XAttribute("mimeType", audio ? "audio/mp4" : "video/mp4"),
                         new XElement(ns + "Representation", new XAttribute("id", "0"), new XAttribute("bandwidth", "1000000"),
                             new XElement(ns + "BaseURL", track.SourceUrl.AbsoluteUri), new XElement(ns + "SegmentBase", new XElement(ns + "Initialization")))))));
-                await File.WriteAllTextAsync(input, manifest.ToString(), stop.Token);
+                await File.WriteAllTextAsync(input, document.ToString(), stop.Token);
             }
             var appDir = PathExpander.ResolveAppDirectory();
             var psi = new ProcessStartInfo(Path.Combine(appDir, "M3u8", "N_m3u8DL-RE.exe"))
             { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = folder };
             foreach (var arg in new[] { input, "--save-dir", output, "--tmp-dir", Path.Combine(folder, "segments"), "--save-name", "media", "--thread-count", "6", "--download-retry-count", "3", "--concurrent-download", "--auto-select", "--no-ansi-color", "--no-log", "--write-meta-json", "false", "--disable-update-check", "--ffmpeg-binary-path", Path.Combine(appDir, "ffmpeg", "ffmpeg.exe") }) psi.ArgumentList.Add(arg);
-            if (track.Container is not ("hls" or "dash")) psi.ArgumentList.Add("--binary-merge");
+            if (!manifest) psi.ArgumentList.Add("--binary-merge");
             else { psi.ArgumentList.Add("-M"); psi.ArgumentList.Add("format=mkv"); }
             if (track.TrackId.StartsWith("dash:",StringComparison.Ordinal))
             {

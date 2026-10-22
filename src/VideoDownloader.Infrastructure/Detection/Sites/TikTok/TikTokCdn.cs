@@ -1,3 +1,5 @@
+using VideoDownloader.Core.Sites;
+
 namespace VideoDownloader.Infrastructure.Detection.Sites.TikTok;
 
 /// <summary>
@@ -56,8 +58,8 @@ internal static class TikTokCdn
     {
         if (current is null)
             return false;
-        if (!current.Host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase) ||
-            !requested.Host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase))
+        if (!SiteHosts.Matches(current, "tiktok.com") ||
+            !SiteHosts.Matches(requested, "tiktok.com"))
             return false;
         if (string.Equals(current.AbsoluteUri, requested.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
             return true;
@@ -68,7 +70,7 @@ internal static class TikTokCdn
 
     public static bool IsFeedShell(Uri page)
     {
-        if (!page.Host.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase))
+        if (!SiteHosts.Matches(page, "tiktok.com"))
             return false;
 
         var path = page.AbsolutePath.TrimEnd('/');

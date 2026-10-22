@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Detection;
 using VideoDownloader.Core.Models;
+using VideoDownloader.Core.Sites;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Json;
 using VideoDownloader.Infrastructure.Logging;
@@ -36,7 +37,8 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
         }
     }
 
-    private static bool SupportsHost(Uri pageUrl) => pageUrl.Host.Contains("tiktok", StringComparison.OrdinalIgnoreCase);
+    private static bool SupportsHost(Uri pageUrl) =>
+        SiteHosts.MatchesAny(pageUrl, "tiktok.com", "tiktokv.com");
 
     public bool SupportsSite(string siteId) => string.Equals(siteId, SiteIds.TikTok, StringComparison.Ordinal);
 
@@ -404,7 +406,7 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
                         : (int?)null;
                     var container = combined.TryGetProperty("ext", out var cext) ? cext.GetString() : "mp4";
                     var codec = combined.TryGetProperty("vcodec", out var cvc) ? cvc.GetString() : null;
-                    variants.Add(MediaVariant.FromCombinedTrack(
+                    var combinedVariant = MediaVariant.FromCombinedTrack(
                         height is not null ? $"{height}p" : "default",
                         new Uri(combinedUrl),
                         BuildRequestContext(combined, context),
@@ -413,7 +415,11 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
                         null,
                         codec,
                         container,
-                        TryGetSize(combined)));
+                        TryGetSize(combined));
+                    variants.Add(combinedVariant with
+                    {
+                        Tracks = [YtDlpSegments.Attach(combined, combinedVariant.Tracks[0])]
+                    });
                 }
             }
         }
@@ -439,7 +445,7 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
                 var vcodec = bestVideo.TryGetProperty("vcodec", out var vc) ? vc.GetString() : null;
                 var videoContainer = bestVideo.TryGetProperty("ext", out var ext) ? ext.GetString() : "mp4";
                 var videoContext = BuildRequestContext(bestVideo, context);
-                var vTrack = new MediaTrack(
+                var vTrack = YtDlpSegments.Attach(bestVideo, new MediaTrack(
                     "video",
                     MediaTrackKind.Video,
                     new Uri(vUrl),
@@ -447,7 +453,7 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
                     videoContainer,
                     null,
                     TryGetSize(bestVideo),
-                    videoContext);
+                    videoContext));
 
                 MediaTrack? aTrack = null;
                 string? audioContainer = null;
@@ -458,7 +464,7 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
                     {
                         audioContainer = bestAudio.TryGetProperty("ext", out var aext) ? aext.GetString() : "m4a";
                         var audioContext = BuildRequestContext(bestAudio, context);
-                        aTrack = new MediaTrack(
+                        aTrack = YtDlpSegments.Attach(bestAudio, new MediaTrack(
                             "audio",
                             MediaTrackKind.Audio,
                             new Uri(aUrl),
@@ -466,7 +472,7 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
                             audioContainer,
                             null,
                             TryGetSize(bestAudio),
-                            audioContext);
+                            audioContext));
                     }
                 }
 
@@ -483,16 +489,13 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
                 }
                 else if (aTrack is null)
                 {
-                    variants.Add(MediaVariant.FromCombinedTrack(
+                    variants.Add(MediaVariant.FromTracks(
                         height is not null ? $"{height}p" : "default",
-                        vTrack.SourceUrl,
-                        videoContext,
                         null,
                         height,
-                        null,
-                        vcodec,
-                        vTrack.Container,
-                        vTrack.ContentLength));
+                        vTrack.Bandwidth,
+                        vTrack.Container ?? "mp4",
+                        [vTrack with { Kind = MediaTrackKind.Combined }]));
                 }
             }
         }
@@ -511,7 +514,7 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
 
             var height = JsonNumber.TryInt32Prop(videoFormat, "height", out var heightValue) ? heightValue : (int?)null;
             var videoContainer = videoFormat.TryGetProperty("ext", out var ext) ? ext.GetString() : "mp4";
-            var videoTrack = new MediaTrack(
+            var videoTrack = YtDlpSegments.Attach(videoFormat, new MediaTrack(
                 "video-" + FormatId(videoFormat),
                 MediaTrackKind.Video,
                 new Uri(videoUrl),
@@ -519,7 +522,7 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
                 videoContainer,
                 TryGetBitrate(videoFormat),
                 TryGetSize(videoFormat),
-                BuildRequestContext(videoFormat, context));
+                BuildRequestContext(videoFormat, context)));
 
             if (preferredAudio.ValueKind != JsonValueKind.Undefined &&
                 TryBuildAudioTrack(preferredAudio, context, out var audioTrack))
@@ -572,8 +575,8 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
         if (variants.Count == 0)
             return [];
 
-        var family = variants[0].Container is "hls" ? MediaFamily.Hls :
-            variants[0].Container is "dash" ? MediaFamily.Dash : MediaFamily.DirectMp4;
+        var family = MediaContainer.Normalize(variants[0].Container, variants[0].SourceUrl) is "hls" ? MediaFamily.Hls :
+            MediaContainer.Normalize(variants[0].Container, variants[0].SourceUrl) is "dash" ? MediaFamily.Dash : MediaFamily.DirectMp4;
 
         return
         [
@@ -742,7 +745,7 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
             return false;
         }
 
-        track = new MediaTrack(
+        track = YtDlpSegments.Attach(format, new MediaTrack(
             "audio-" + FormatId(format),
             MediaTrackKind.Audio,
             new Uri(url),
@@ -750,7 +753,7 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
             StringProperty(format, "ext") ?? "m4a",
             TryGetBitrate(format),
             TryGetSize(format),
-            BuildRequestContext(format, fallback));
+            BuildRequestContext(format, fallback)));
         return true;
     }
 
@@ -881,6 +884,9 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
         if (string.IsNullOrWhiteSpace(url))
             return false;
 
+        if (!YtDlpSegments.HasUsableAddress(format, url))
+            return false;
+
         if (format.TryGetProperty("has_drm", out var drm) &&
             drm.ValueKind is JsonValueKind.True)
             return false;
@@ -971,22 +977,21 @@ public sealed class TikTokYtDlpExtractor : IExternalSiteResolver
             return true;
 
         // YouTube auth cookies often live on google.com.
-        if (host.Contains("youtube", StringComparison.OrdinalIgnoreCase) ||
-            host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(host, "youtube.com", "youtu.be", "youtube-nocookie.com"))
         {
             return IsCookieDomainMatch("youtube.com", domain) ||
                    IsCookieDomainMatch("google.com", domain) ||
                    IsCookieDomainMatch("accounts.google.com", domain);
         }
 
-        if (host.Contains("douyin", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(host, "douyin.com", "iesdouyin.com"))
             return IsCookieDomainMatch("douyin.com", domain) ||
                    IsCookieDomainMatch("iesdouyin.com", domain);
 
-        if (host.Contains("bilibili", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(host, "bilibili.com", "bilibili.tv"))
             return IsCookieDomainMatch("bilibili.com", domain);
 
-        if (host.Contains("tiktok", StringComparison.OrdinalIgnoreCase))
+        if (SiteHosts.MatchesAny(host, "tiktok.com", "tiktokv.com"))
         {
             return IsCookieDomainMatch("tiktok.com", domain) ||
                    IsCookieDomainMatch("tiktokv.com", domain) ||

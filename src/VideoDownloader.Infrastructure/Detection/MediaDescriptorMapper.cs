@@ -21,7 +21,9 @@ public static class MediaDescriptorMapper
 
     public static DetectedVideo ToDetectedVideo(MediaDescriptor descriptor, Guid sessionId)
     {
-        var variants = BuildVariants(descriptor);
+        var variants = BuildVariants(descriptor)
+            .Select(NormalizeContainers)
+            .ToArray();
         if (descriptor.VideoHeight is > 0)
         {
             variants = variants
@@ -31,8 +33,8 @@ public static class MediaDescriptorMapper
         var family = descriptor.ContentType switch
         {
             MediaContentType.Album => MediaFamily.DirectMp4,
-            _ when variants.Any(v => v.Container is "hls") => MediaFamily.Hls,
-            _ when variants.Any(v => v.Container is "dash") => MediaFamily.Dash,
+            _ when variants.Any(HasContainer("hls")) => MediaFamily.Hls,
+            _ when variants.Any(HasContainer("dash")) => MediaFamily.Dash,
             _ => MediaFamily.DirectMp4
         };
 
@@ -53,6 +55,11 @@ public static class MediaDescriptorMapper
         // Caption/文案 stays verbatim — resolution/size belong on the variant, not the title.
         _ = preferred;
 
+        var hasVideo = variants.Any(v =>
+            v.Tracks.Any(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined));
+        var hasAudio = variants.Any(v =>
+            v.Tracks.Any(t => t.Kind is MediaTrackKind.Audio or MediaTrackKind.Combined));
+
         return new DetectedVideo(
             videoId,
             descriptor.Site,
@@ -66,9 +73,10 @@ public static class MediaDescriptorMapper
         {
             SessionId = sessionId,
             IsLive = descriptor.IsLive,
-            Availability = variants.Count > 0
+            // Audio-only descriptors must not claim Complete, and an empty ladder is Unavailable.
+            Availability = hasVideo
                 ? MediaAvailabilityKind.Complete
-                : MediaAvailabilityKind.Unavailable,
+                : hasAudio ? MediaAvailabilityKind.AudioOnly : MediaAvailabilityKind.Unavailable,
             DurationSec = descriptor.DurationSec is > 0 ? descriptor.DurationSec : null,
             Metadata = descriptor.Author is null
                 ? null
@@ -94,6 +102,25 @@ public static class MediaDescriptorMapper
         return title.TrimEnd() + " " + bit;
     }
 
+    private static Func<MediaVariant, bool> HasContainer(string container) =>
+        variant =>
+            string.Equals(variant.Container, container, StringComparison.OrdinalIgnoreCase) ||
+            variant.Tracks.Any(t => string.Equals(t.Container, container, StringComparison.OrdinalIgnoreCase));
+
+    private static MediaVariant NormalizeContainers(MediaVariant variant) =>
+        MediaContainer.NormalizeVariant(variant);
+
+    private static long DashVideoBandwidth(MediaVariant variant) =>
+        variant.Tracks.FirstOrDefault(t => t.Kind is MediaTrackKind.Video or MediaTrackKind.Combined)?.Bandwidth
+        ?? variant.Bandwidth
+        ?? 0;
+
+    private static long DashAudioBandwidth(MediaVariant variant) =>
+        variant.Tracks.Where(t => t.Kind == MediaTrackKind.Audio)
+            .Select(t => t.Bandwidth ?? 0)
+            .DefaultIfEmpty(0)
+            .Max();
+
     private static IReadOnlyList<MediaVariant> BuildVariants(MediaDescriptor descriptor)
     {
         if (descriptor.Formats.Count > 0)
@@ -106,10 +133,17 @@ public static class MediaDescriptorMapper
                 .Where(v => !v.Tracks.Any(t => t.IsMseTrack || MediaUrlNormalizer.IsByteDanceMseTrack(t.SourceUrl)))
                 .Where(v => !(v.Tracks.Any(t => t.Kind == MediaTrackKind.Combined) &&
                               v.Tracks.Any(t => t.Kind == MediaTrackKind.Audio && t.TrackId != "audio-extract")))
-                .GroupBy(v => string.Join("|", v.Tracks.Select(t => t.SourceUrl.AbsoluteUri)), StringComparer.OrdinalIgnoreCase)
+                .GroupBy(MediaVariantIdentity.DedupKey, StringComparer.OrdinalIgnoreCase)
                 .Select(g =>
                 {
-                    var best = g.OrderByDescending(x => x.TotalContentLength ?? x.Bandwidth ?? 0).First();
+                    // DASH qualities share the manifest URL; keep one entry per representation
+                    // and pair it with the best audio representation in the group.
+                    var best = MediaVariantIdentity.IsDashVariant(g.First())
+                        ? g.OrderByDescending(DashVideoBandwidth)
+                            .ThenByDescending(DashAudioBandwidth)
+                            .ThenByDescending(x => x.TotalContentLength ?? 0)
+                            .First()
+                        : g.OrderByDescending(x => x.TotalContentLength ?? x.Bandwidth ?? 0).First();
                     var identity = best.ContentIdentity
                         ?? (descriptor.MediaId is null ? null : "id:" + descriptor.MediaId);
                     return best with
@@ -126,6 +160,29 @@ public static class MediaDescriptorMapper
                 .ThenByDescending(v => v.Height ?? 0)
                 .ThenByDescending(v => v.TotalContentLength ?? v.Bandwidth ?? 0)
                 .ToArray();
+
+            // A Combined-only ladder still supports audio-only output via track extraction.
+            if (!ladder.Any(v => v.Tracks.Any(t => t.Kind == MediaTrackKind.Audio)))
+            {
+                var source = ladder.FirstOrDefault(v =>
+                    v.Tracks.Any(t => t.Kind == MediaTrackKind.Combined && !t.IsMseTrack));
+                if (source is not null)
+                {
+                    var combined = source.Tracks.First(t => t.Kind == MediaTrackKind.Combined);
+                    var audio = MediaVariant.FromTracks(
+                        "音轨",
+                        null,
+                        null,
+                        combined.Bandwidth ?? source.Bandwidth,
+                        "mka",
+                        [combined with { Kind = MediaTrackKind.Audio, TrackId = "audio-extract", Codec = null }]) with
+                    {
+                        ContentIdentity = source.ContentIdentity,
+                        RecoveryPageUrl = source.RecoveryPageUrl
+                    };
+                    ladder = [.. ladder, audio];
+                }
+            }
 
             // Attach sibling formats so HTTP 403 recovery can switch hosts/qualities without rediscovery.
             return ladder

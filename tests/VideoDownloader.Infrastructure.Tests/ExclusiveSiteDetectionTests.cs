@@ -524,6 +524,28 @@ public class ExclusiveSiteDetectionTests
         Assert.False(UnifiedMediaPipeline.IsExclusiveSiteHost(new Uri("https://cdn.example.com/a.m3u8")));
     }
 
+    [Theory]
+    [InlineData("https://notyoutube.com/watch?v=abc")]
+    [InlineData("https://youtube.com.evil.example/watch?v=abc")]
+    [InlineData("https://eviltiktok.com/@a/video/1")]
+    [InlineData("https://bilibili.com.evil.example/video/BV1")]
+    [InlineData("https://douyin.com.evil.example/video/1")]
+    [InlineData("https://youtu.be.evil.example/abc")]
+    public void Spoofed_Hosts_Never_Enter_Exclusive_Detection(string url)
+    {
+        var page = new Uri(url);
+        Assert.Equal(SiteKind.Other, new SiteDetectionRouter().Resolve(page));
+        Assert.False(UnifiedMediaPipeline.IsExclusiveSiteHost(page));
+        var detectors = new IExclusiveSiteMediaDetector[]
+        {
+            new DouyinMediaDetector(NullLogger<DouyinMediaDetector>.Instance, Substitute.For<IProbeMethodStats>()),
+            new TikTokMediaDetector(NullLogger<TikTokMediaDetector>.Instance, StubTikTokYtDlp(), Substitute.For<IProbeMethodStats>()),
+            new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance, StubYouTubeYtDlp(), Substitute.For<IProbeMethodStats>()),
+            new BilibiliMediaDetector(NullLogger<BilibiliMediaDetector>.Instance, StubBilibiliYtDlp(), Substitute.For<IProbeMethodStats>())
+        };
+        Assert.DoesNotContain(detectors, d => d.Matches(page));
+    }
+
     [Fact]
     public async Task Douyin_Case1_Video_Emits_Descriptor_No_Generic()
     {
