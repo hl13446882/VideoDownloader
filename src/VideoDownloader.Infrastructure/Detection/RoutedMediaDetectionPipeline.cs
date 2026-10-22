@@ -166,9 +166,13 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
         lock (_gate)
         {
             // Reject retired network work before it can route back to the old page.
-            if (normalized.SessionId != Guid.Empty && normalized.SessionId != SessionId)
+            if (ct.IsCancellationRequested ||
+                normalized.SessionId != Guid.Empty && normalized.SessionId != SessionId)
                 return Task.CompletedTask;
             var page = normalized.PageUrl ?? _page;
+            if (_kind == SiteKind.YouTube && _page is not null && page is not null &&
+                !SameExclusiveWork(_page, page, _kind))
+                return Task.CompletedTask;
             if (page is not null)
             {
                 // REDUNDANT(pending-delete after confirm): EnsureRouteUnlocked on every network event.
@@ -207,6 +211,7 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
         CancellationToken ct,
         bool runExternal = false)
     {
+        ct.ThrowIfCancellationRequested();
         IExclusiveSiteMediaDetector? exclusive;
         lock (_gate)
         {
@@ -293,6 +298,13 @@ public sealed class RoutedMediaDetectionPipeline : IMediaDetectionPipeline
         if (exclusive.Failed)
         {
             HangProbe.Mark("route.complete.end", "exclusiveFailed-noSessionSeal");
+            return;
+        }
+
+        if (exclusive.Site == SiteKind.YouTube)
+        {
+            // Final formats are sealed; lingering playback requests cannot enrich them.
+            session.Cancel();
             return;
         }
 

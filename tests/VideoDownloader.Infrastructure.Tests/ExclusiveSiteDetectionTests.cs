@@ -403,6 +403,65 @@ public class ExclusiveSiteDetectionTests
     }
 
     [Fact]
+    public async Task YouTubeNetworkCannotReenterPreviousPageEvenWithCurrentSessionStamp()
+    {
+        var detector = Substitute.For<IExclusiveSiteMediaDetector>();
+        detector.Matches(Arg.Any<Uri>()).Returns(true);
+        detector.Site.Returns(SiteKind.YouTube);
+        var routed = new RoutedMediaDetectionPipeline(
+            new UnifiedMediaPipeline(Substitute.For<IRequestMessageFactory>(), [], Options.Create(new AppOptions())),
+            new SiteDetectionRouter(), new ExclusiveSiteMediaDetectorResolver([detector]),
+            NullLogger<RoutedMediaDetectionPipeline>.Instance);
+        var previous = new Uri("https://www.youtube.com/watch?v=previous");
+        var current = new Uri("https://www.youtube.com/watch?v=current");
+        routed.Reenter(current);
+        var session = routed.SessionId;
+        await routed.ProcessAsync(Evt(previous, "https://rr.googlevideo.com/videoplayback?itag=137")
+            with { SessionId = session }, default);
+        Assert.Equal(session, routed.SessionId);
+        await detector.DidNotReceive().ProcessNetworkAsync(Arg.Any<NormalizedNetworkEvent>(), Arg.Any<CancellationToken>());
+        detector.Received(1).BeginSession(current, session);
+    }
+
+    [Fact]
+    public async Task CancelledObservationCannotReenterPreviousPage()
+    {
+        var detector = Substitute.For<IExclusiveSiteMediaDetector>();
+        detector.Matches(Arg.Any<Uri>()).Returns(true);
+        detector.Site.Returns(SiteKind.YouTube);
+        var routed = new RoutedMediaDetectionPipeline(
+            new UnifiedMediaPipeline(Substitute.For<IRequestMessageFactory>(), [], Options.Create(new AppOptions())),
+            new SiteDetectionRouter(), new ExclusiveSiteMediaDetectorResolver([detector]),
+            NullLogger<RoutedMediaDetectionPipeline>.Instance);
+        var current = new Uri("https://www.youtube.com/watch?v=current");
+        routed.Reenter(current);
+        var session = routed.SessionId;
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => routed.ProbePageAsync(
+            new Uri("https://www.youtube.com/watch?v=previous"), null, null, RequestContext.CreateEmpty(),
+            new CancellationToken(true), runExternal: true));
+        Assert.Equal(session, routed.SessionId);
+    }
+
+    [Fact]
+    public async Task YouTubeFinalCompletionDoesNotWaitForPlaybackLease()
+    {
+        var detector = Substitute.For<IExclusiveSiteMediaDetector>();
+        detector.Matches(Arg.Any<Uri>()).Returns(true);
+        detector.Site.Returns(SiteKind.YouTube);
+        var routed = new RoutedMediaDetectionPipeline(
+            new UnifiedMediaPipeline(Substitute.For<IRequestMessageFactory>(), [], Options.Create(new AppOptions())),
+            new SiteDetectionRouter(), new ExclusiveSiteMediaDetectorResolver([detector]),
+            NullLogger<RoutedMediaDetectionPipeline>.Instance);
+        routed.Reenter(new Uri("https://www.youtube.com/watch?v=current"));
+        using var playback = routed.BeginDiscovery(routed.SessionId);
+        Assert.NotNull(playback);
+        var completion = routed.CompleteDiscoveryAsync(default);
+        Assert.True(completion.IsCompletedSuccessfully);
+        await completion;
+        Assert.True(routed.IsCompleted);
+    }
+
+    [Fact]
     public void Reenter_Destroys_Previous_Singleton_Session_Then_BeginSession_Once()
     {
         var detector = Substitute.For<IExclusiveSiteMediaDetector>();
@@ -1157,16 +1216,37 @@ public class ExclusiveSiteDetectionTests
     [Fact]
     public async Task YouTube_Exclusive_Positive_Path()
     {
-        var detector = new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance, StubYouTubeYtDlp(), Substitute.For<IProbeMethodStats>());
+        // Publication gate waits for yt-dlp formats (network-only Complete must not publish).
+        var extractor = new GatedYouTubeExtractor();
+        var detector = new YouTubeMediaDetector(
+            NullLogger<YouTubeMediaDetector>.Instance, extractor, Substitute.For<IProbeMethodStats>());
         MediaDescriptor? last = null;
         detector.DescriptorsReady += (_, list) => last = list.FirstOrDefault();
         var page = new Uri("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
         detector.BeginSession(page, Guid.NewGuid());
-        await detector.ProcessNetworkAsync(Evt(page,
-            "https://rr1---sn-abc.googlevideo.com/videoplayback?mime=video%2Fmp4&itag=137"), CancellationToken.None);
+        var observation = detector.ProcessPageObservationAsync(
+            page, "Sample", null, RequestContext.CreateEmpty(), CancellationToken.None);
+        extractor.Complete(new DetectedVideo(
+            Guid.NewGuid(),
+            SiteIds.YouTube,
+            "dQw4w9WgXcQ",
+            "Sample",
+            page,
+            MediaFamily.DirectMp4,
+            [
+                MediaVariant.FromCombinedTrack(
+                    "v",
+                    new Uri("https://rr1---sn-abc.googlevideo.com/videoplayback?itag=18&mime=video%2Fmp4"),
+                    RequestContext.CreateEmpty(),
+                    height: 360)
+            ],
+            false,
+            ProbeSource.SiteAdapter));
+        await observation;
         await detector.CompleteAsync(CancellationToken.None);
         Assert.NotNull(last);
         Assert.Equal(SiteIds.YouTube, last!.Site);
+        Assert.Equal("Sample", last.DisplayTitle);
     }
 
     [Fact]

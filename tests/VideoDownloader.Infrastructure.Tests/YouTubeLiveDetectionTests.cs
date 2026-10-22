@@ -53,16 +53,63 @@ public class YouTubeLiveDetectionTests
     {
         var detector = new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance, Extractor(), Substitute.For<IProbeMethodStats>());
         var page = new Uri("https://www.youtube.com/watch?v=live-id");
-        MediaDescriptor? result = null;
-        detector.DescriptorsReady += (_, descriptors) => result = descriptors.Single();
+        var results = new List<MediaDescriptor>();
+        detector.DescriptorsReady += (_, descriptors) => results.AddRange(descriptors);
         detector.BeginSession(page, Guid.NewGuid());
         await detector.ProcessPageObservationAsync(page, "Live",
-            """{"identity":"content:youtube:live-id","isLive":true,"durationSec":3600}""", RequestContext.CreateEmpty(), default);
+            """{"identity":"content:youtube:live-id","isLive":true,"durationSec":3600}""", RequestContext.CreateEmpty(), default,
+            runExternal: false);
+        Assert.Single(results);
         await detector.CompleteAsync(default);
-        Assert.NotNull(result);
+        await detector.ProcessPageObservationAsync(page, "Live", """{"isLive":true}""", RequestContext.CreateEmpty(), default);
+        var result = Assert.Single(results);
         Assert.True(result.IsLive);
         var video = MediaDescriptorMapper.ToDetectedVideo(result, Guid.NewGuid());
         Assert.True(video.IsLive);
         Assert.Empty(video.Variants);
+    }
+
+    [Theory]
+    [InlineData("network")]
+    [InlineData("dom")]
+    [InlineData("external")]
+    public async Task Live_Is_A_Single_Timely_Terminal_Signal_Without_Complete(string source)
+    {
+        var extractor = new GatedYouTubeExtractor();
+        var detector = new YouTubeMediaDetector(NullLogger<YouTubeMediaDetector>.Instance, extractor, Substitute.For<IProbeMethodStats>());
+        var page = new Uri("https://www.youtube.com/watch?v=live-id");
+        var session = Guid.NewGuid();
+        var results = new List<MediaDescriptor>();
+        detector.DescriptorsReady += (_, descriptors) => results.AddRange(descriptors);
+        detector.BeginSession(page, session);
+        var observation = detector.ProcessPageObservationAsync(page, "Live", null, RequestContext.CreateEmpty(), default);
+        Assert.Empty(results);
+
+        if (source == "network")
+            await detector.ProcessNetworkAsync(new NormalizedNetworkEvent(
+                new Uri("https://manifest.googlevideo.com/api/manifest/hls_playlist/source/yt_live_broadcast/live/1/index.m3u8"),
+                "GET", 200, "application/vnd.apple.mpegurl", null, "Media", null, page, null,
+                new Dictionary<string, string>(), new Dictionary<string, string>(), RequestContext.CreateEmpty(),
+                DateTimeOffset.UtcNow, NetworkEventSource.Cdp) { SessionId = session }, default);
+        else if (source == "dom")
+            await detector.ProcessPageObservationAsync(page, "Live", """{"isLive":true}""", RequestContext.CreateEmpty(), default,
+                runExternal: false);
+
+        if (source != "external")
+        {
+            Assert.False(observation.IsCompleted);
+            Assert.True(Assert.Single(results).IsLive);
+        }
+        extractor.Complete(new DetectedVideo(Guid.NewGuid(), SiteIds.YouTube, "live-id", "Live", page,
+            MediaFamily.Hls, [], false, ProbeSource.SiteAdapter) { IsLive = true });
+        await observation.WaitAsync(TimeSpan.FromSeconds(5));
+        var result = Assert.Single(results);
+        Assert.True(result.IsLive);
+        Assert.Equal(session, result.SessionId);
+        await detector.CompleteAsync(default);
+        await detector.CompleteAsync(default);
+        await detector.ProcessPageObservationAsync(page, "Live", """{"isLive":true}""", RequestContext.CreateEmpty(), default);
+        Assert.Single(results);
+        Assert.Equal(1, extractor.ResolveCount);
     }
 }

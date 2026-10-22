@@ -1029,7 +1029,19 @@ public sealed partial class MainViewModel : ObservableObject
             tab.Host.MediaSessionChanging += (_, _) =>
             {
                 if (!ReferenceEquals(SelectedTab, tab)) return;
-                Application.Current.Dispatcher.Invoke(() => SuspendDetectedResults(tab));
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    var page = tab.Host.CurrentPageUrl;
+                    if (page is not null && SiteHosts.MatchesAny(page, "youtube.com", "youtube-nocookie.com", "youtu.be"))
+                    {
+                        var current = ExtractStableContentKeyFromIdentity(_currentPageIdentity);
+                        var incoming = ExtractStableContentKey(null, page);
+                        var previous = ExtractStableContentKey(tab.Host.CurrentMediaSessionKey, null);
+                        if (_detectionRunning && incoming is not null && incoming == current && previous != incoming)
+                            return;
+                    }
+                    SuspendDetectedResults(tab);
+                });
             };
             tab.Host.MediaSessionChanged += (_, e) =>
             {
@@ -1037,13 +1049,18 @@ public sealed partial class MainViewModel : ObservableObject
                     return;
                 _ = Application.Current.Dispatcher.InvokeAsync(() =>
                 {
+                    if (!ReferenceEquals(SelectedTab, tab) ||
+                        !IsSameDocumentPage(tab.Host.CurrentPageUrl, e.PageUrl))
+                        return;
                     HangProbe.Mark("vm.mediaSession", $"{e.PageUrl.Host}{e.PageUrl.AbsolutePath} key={e.MediaSessionKey}");
                     lock (_pageSync)
                     {
                         // Duplicate identity for the session already under probe — skip only.
+                        // YouTube playlist AbsoluteUri can change (list/index) without a new watch id.
                         if (!e.ForceRestart &&
                             _detectionRunning &&
-                            string.Equals(_currentPageIdentity, BuildPageIdentity(e.PageUrl, e.MediaSessionKey), StringComparison.Ordinal))
+                            (string.Equals(_currentPageIdentity, BuildPageIdentity(e.PageUrl, e.MediaSessionKey), StringComparison.Ordinal) ||
+                             IsSameYouTubeIdentity(_currentPageIdentity, e.PageUrl, e.MediaSessionKey)))
                             return;
                     }
                     // Content switch → same singleton full re-probe as manual Probe.
@@ -1470,7 +1487,8 @@ public sealed partial class MainViewModel : ObservableObject
         RestartDetectionForPageChange(
             pageUrl,
             tab?.Title,
-            mediaSessionKey: tab?.Host.CurrentMediaSessionKey);
+            mediaSessionKey: tab?.Host.CurrentMediaSessionKey,
+            forceRestart: true);
     }
 
     /// <summary>
@@ -1502,7 +1520,8 @@ public sealed partial class MainViewModel : ObservableObject
 
         lock (_pageSync)
         {
-            if (_detectionRunning && !forceRestart)
+            if (!forceRestart && !_feedDisplayState.IsSuspended &&
+                (_detectionRunning || _pipeline.IsCompleted && !allowSuspended))
             {
                 var incomingStable = ExtractStableContentKey(mediaSessionKey, pageUrl);
                 var currentStable = ExtractStableContentKeyFromIdentity(_currentPageIdentity);
@@ -1518,15 +1537,7 @@ public sealed partial class MainViewModel : ObservableObject
         RefreshSidePanelVisibility(pageUrl);
 
         var enriched = EnrichPageUrlWithContentId(pageUrl, mediaSessionKey);
-        StartPageDetectionSession(
-            enriched,
-            pageTitle,
-            clearUi: true,
-            forceReplace: true,
-            mediaSessionKey: mediaSessionKey,
-            resetMediaSession: true,
-            forceFullRestart: true,
-            destroySameContent: true);
+        StartPageDetectionSession(enriched, pageTitle, mediaSessionKey);
     }
 
     private void EnterLocalLibraryMode(Uri pageUrl)
@@ -1652,76 +1663,34 @@ public sealed partial class MainViewModel : ObservableObject
     /// One stable page session per document or confirmed player-content switch. Network activity
     /// may enrich the current result, but never schedules additional timed re-probes.
     /// </summary>
-    private void StartPageDetectionSession(
-        Uri pageUrl,
-        string? pageTitle,
-        bool clearUi,
-        bool forceReplace = false,
-        string? mediaSessionKey = null,
-        bool resetMediaSession = true,
-        bool forceFullRestart = false,
-        bool destroySameContent = false)
+    private void StartPageDetectionSession(Uri pageUrl, string? pageTitle, string? mediaSessionKey)
     {
         long generation;
         CancellationToken token;
         lock (_pageSync)
         {
-            var pageKey = BuildPageIdentity(pageUrl, mediaSessionKey);
-            var stableIncoming = ExtractStableContentKey(mediaSessionKey, pageUrl);
-            var stableCurrent = ExtractStableContentKeyFromIdentity(_currentPageIdentity);
-            // Same aweme already running: keep the only singleton session unless Probe / ForceRestart.
-            if (!destroySameContent &&
-                _detectionRunning &&
-                stableIncoming is not null &&
-                string.Equals(stableIncoming, stableCurrent, StringComparison.Ordinal))
-            {
-                return;
-            }
-
-            // Same document already being probed — ignore duplicate NavigationStarted/PageIdentity.
-            if (!forceFullRestart &&
-                clearUi &&
-                !forceReplace &&
-                _detectionRunning &&
-                string.Equals(_currentPageIdentity, pageKey, StringComparison.Ordinal))
-            {
-                return;
-            }
-
-            _currentPageIdentity = pageKey;
+            _currentPageIdentity = BuildPageIdentity(pageUrl, mediaSessionKey);
             _lastNavigatedPageUrl = BuildPageIdentity(pageUrl);
-            _forceReplaceResults = forceReplace || clearUi || forceFullRestart;
+            _forceReplaceResults = true;
             _detectionRunning = true;
-            _pageGeneration++;
-            generation = _pageGeneration;
+            generation = ++_pageGeneration;
             _probeCts.Cancel();
             _probeCts.Dispose();
             _probeCts = new CancellationTokenSource();
             token = _probeCts.Token;
         }
 
-        if (clearUi || forceFullRestart)
-        {
-            _feedDisplayState.BeginSession();
-            DetectedVideos.Clear();
-            _videoMap.Clear();
-            SelectedDetectedVideo = null;
-        }
-
-        // Fresh singleton entry: destroy previous detector session, BeginSession once.
-        if (forceFullRestart)
-        {
-            _aggregator.Clear();
-            if (_pipeline is RoutedMediaDetectionPipeline routed)
-                routed.Reenter(pageUrl);
-            else
-                HardResetDetectionPipeline();
-        }
+        _feedDisplayState.BeginSession();
+        DetectedVideos.Clear();
+        _videoMap.Clear();
+        SelectedDetectedVideo = null;
+        _aggregator.Clear();
+        if (_pipeline is RoutedMediaDetectionPipeline routed)
+            routed.Reenter(pageUrl);
         else
-            ResetDetectionPipeline();
+            HardResetDetectionPipeline();
 
-        if (resetMediaSession)
-            SelectedTab?.Host.ResetDetectionSession();
+        SelectedTab?.Host.ResetDetectionSession();
         _ = RunStableDetectionSessionAsync(pageUrl, pageTitle, token, generation);
     }
 
@@ -1765,9 +1734,10 @@ public sealed partial class MainViewModel : ObservableObject
                     ct => RunPagePassAsync(pageUrl, pageTitle, ct, generation, runExternal: true),
                 hasUsableResult: Ready,
                 shouldStop: Stop,
-                externalDelay: TimeSpan.FromMilliseconds(preferExternal ? 0 : 700),
+                externalDelay: TimeSpan.FromMilliseconds(siteId == SiteIds.YouTube || preferExternal ? 0 : 700),
                 budget: TimeSpan.FromSeconds(isAlbum ? 35 : siteId == SiteIds.YouTube ? 100 : 20),
-                ct: token);
+                ct: token,
+                trailingObservation: siteId == SiteIds.YouTube ? TimeSpan.Zero : null);
             if (!Current()) return;
 
             // Seal once, after the external process has completed or been cancelled and joined.
@@ -1934,9 +1904,12 @@ public sealed partial class MainViewModel : ObservableObject
                         // (YouTube/Bilibili bot checks). Does not change Douyin detector code.
                         if (runExternal)
                             await tab.Host.RefreshContextSnapshotAsync(token, forceCookies: true);
-                        HangProbe.Mark("vm.pagePass.probe1.begin");
-                        await tab.Host.ProbeCurrentPageAsync(token);
-                        HangProbe.Mark("vm.pagePass.probe1.end");
+                        if (!runExternal || !SiteHosts.MatchesAny(pageUrl, "youtube.com", "youtube-nocookie.com", "youtu.be"))
+                        {
+                            HangProbe.Mark("vm.pagePass.probe1.begin");
+                            await tab.Host.ProbeCurrentPageAsync(token);
+                            HangProbe.Mark("vm.pagePass.probe1.end");
+                        }
                     }
                     catch (OperationCanceledException) when (token.IsCancellationRequested)
                     {
@@ -2063,6 +2036,11 @@ public sealed partial class MainViewModel : ObservableObject
         var page = tab?.Host.CurrentPageUrl;
         if (tab is null || page is null || LocalLibraryHost.IsLocalLibraryHost(page))
             return;
+        if (SiteHosts.MatchesAny(page, "youtube.com", "youtube-nocookie.com", "youtu.be"))
+        {
+            RestartDetectionForPageChange(page, tab.Title, tab.Host.CurrentMediaSessionKey, forceRestart: true);
+            return;
+        }
         if (DetectedVideos.Any(v => VideoDownloader.Core.Detection.DetectionReadiness.IsUsable(v.Video)))
             return;
 
@@ -2281,26 +2259,22 @@ public sealed partial class MainViewModel : ObservableObject
         if (!HasManualPlaybackChanged(before, tab))
             return false;
 
-        // URL changes restart detection through NavigationStarted/PageIdentityChanged. A same-URL
-        // feed switch can be confirmed by the new media key while the host suppresses
-        // MediaSessionChanged (first-media anchor), so bind the pipeline to it explicitly.
-        if (ReferenceEquals(SelectedTab, tab) &&
-            tab.Host.CurrentPageUrl is { } page &&
-            !LocalLibraryHost.IsLocalLibraryHost(page) &&
-            string.Equals(before.PageUrl, page.AbsoluteUri, StringComparison.Ordinal))
-        {
-            var key = tab.Host.CurrentMediaSessionKey;
-            var enriched = EnrichPageUrlWithContentId(page, key);
-            bool tracked;
-            lock (_pageSync)
-                tracked = _detectionRunning &&
-                          string.Equals(_currentPageIdentity, BuildPageIdentity(enriched, key),
-                              StringComparison.Ordinal);
-            if (!tracked)
-                RestartDetectionForPageChange(page, tab.Title, key);
-        }
-
+        EnsurePlaybackDetection(tab);
         return true;
+    }
+
+    private void EnsurePlaybackDetection(BrowserTabViewModel tab)
+    {
+        if (!ReferenceEquals(SelectedTab, tab) || tab.Host.CurrentPageUrl is not { } page ||
+            LocalLibraryHost.IsLocalLibraryHost(page))
+            return;
+        var key = tab.Host.CurrentMediaSessionKey;
+        var identity = BuildPageIdentity(EnrichPageUrlWithContentId(page, key), key);
+        if (!_feedDisplayState.IsSuspended &&
+            string.Equals(_currentPageIdentity, identity, StringComparison.Ordinal) &&
+            (_detectionRunning || _pipeline.IsCompleted))
+            return;
+        RestartDetectionForPageChange(page, tab.Title, key);
     }
 
     private async Task RunAutoModeLoopAsync(CancellationToken token)
@@ -2315,7 +2289,7 @@ public sealed partial class MainViewModel : ObservableObject
                     break;
                 if (IsAutoTimeExpired())
                 {
-                    await EndAutoModeTimeoutAsync();
+                    await EndAutoModeTimeoutAsync(token);
                     break;
                 }
 
@@ -2329,7 +2303,7 @@ public sealed partial class MainViewModel : ObservableObject
 
                     if (!await AdvanceFeedAsync(sessionEnd, token, previousWasLive: probe.SkipLive))
                     {
-                        await EndAutoModeAfterAdvanceFailAsync();
+                        await EndAutoModeAfterAdvanceFailAsync(token);
                         break;
                     }
 
@@ -2340,7 +2314,7 @@ public sealed partial class MainViewModel : ObservableObject
                 {
                     if (IsAutoTimeExpired())
                     {
-                        await EndAutoModeTimeoutAsync();
+                        await EndAutoModeTimeoutAsync(token);
                         break;
                     }
                     continue;
@@ -2351,19 +2325,19 @@ public sealed partial class MainViewModel : ObservableObject
                 await Application.Current.Dispatcher.InvokeAsync(RefreshAutoRunningStatus);
                 if (IsAutoCountReached())
                 {
-                    await EndAutoModeCountAsync();
+                    await EndAutoModeCountAsync(token);
                     break;
                 }
 
                 if (!await AdvanceFeedAsync(sessionEnd, token))
                 {
-                    await EndAutoModeAfterAdvanceFailAsync();
+                    await EndAutoModeAfterAdvanceFailAsync(token);
                     break;
                 }
             }
 
             if (IsAutoMode && !token.IsCancellationRequested && IsAutoLimitReached())
-                await EndAutoModeByLimitAsync();
+                await EndAutoModeByLimitAsync(token);
         }
         catch (OperationCanceledException)
         {
@@ -2373,6 +2347,8 @@ public sealed partial class MainViewModel : ObservableObject
         {
             await Application.Current.Dispatcher.InvokeAsync(() =>
             {
+                if (token.IsCancellationRequested || _autoCts?.Token != token)
+                    return;
                 StopAutoMode(announce: false);
                 SetStatusKey("status.probeFailed", ex.Message);
             });
@@ -2449,21 +2425,23 @@ public sealed partial class MainViewModel : ObservableObject
         return false;
     }
 
-    private Task EndAutoModeTimeoutAsync() =>
-        EndAutoModeWithStatusAsync("status.autoStoppedTimeout");
+    private Task EndAutoModeTimeoutAsync(CancellationToken token) =>
+        EndAutoModeWithStatusAsync("status.autoStoppedTimeout", token);
 
-    private Task EndAutoModeCountAsync() =>
-        EndAutoModeWithStatusAsync("status.autoStoppedCount");
+    private Task EndAutoModeCountAsync(CancellationToken token) =>
+        EndAutoModeWithStatusAsync("status.autoStoppedCount", token);
 
-    private Task EndAutoModeByLimitAsync() =>
-        IsAutoCountReached() ? EndAutoModeCountAsync() : EndAutoModeTimeoutAsync();
+    private Task EndAutoModeByLimitAsync(CancellationToken token) =>
+        IsAutoCountReached() ? EndAutoModeCountAsync(token) : EndAutoModeTimeoutAsync(token);
 
-    private Task EndAutoModeAfterAdvanceFailAsync() =>
-        IsAutoTimeExpired() ? EndAutoModeTimeoutAsync() : EndAutoModeWithStatusAsync("status.autoFeedStuck");
+    private Task EndAutoModeAfterAdvanceFailAsync(CancellationToken token) =>
+        IsAutoTimeExpired() ? EndAutoModeTimeoutAsync(token) : EndAutoModeWithStatusAsync("status.autoFeedStuck", token);
 
-    private Task EndAutoModeWithStatusAsync(string statusKey) =>
+    private Task EndAutoModeWithStatusAsync(string statusKey, CancellationToken token) =>
         Application.Current.Dispatcher.InvokeAsync(() =>
         {
+            if (token.IsCancellationRequested || _autoCts?.Token != token)
+                return;
             IsAutoMode = false;
             _autoCts?.Dispose();
             _autoCts = null;
@@ -2494,7 +2472,21 @@ public sealed partial class MainViewModel : ObservableObject
         {
             var live = await IsCurrentPlaybackLiveAsync(token);
             DetectedVideoViewModel? candidate = null;
-            await Application.Current.Dispatcher.InvokeAsync(() => candidate = FindAutoDownloadCandidate());
+            var waitingForDetection = false;
+            var detectionEmpty = false;
+            await Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                token.ThrowIfCancellationRequested();
+                candidate = FindAutoDownloadCandidate();
+                if (SelectedTab?.Host.CurrentPageUrl is { } page &&
+                    SiteHosts.MatchesAny(page, "youtube.com", "youtube-nocookie.com", "youtu.be"))
+                {
+                    waitingForDetection = _detectionRunning;
+                    detectionEmpty = !_detectionRunning && !_feedDisplayState.IsSuspended && candidate is null;
+                }
+            });
+            if (detectionEmpty && enqueuedJobId is null && !live)
+                return new AutoProbeResult(null, SkipLive: false, AdvanceNoAddress: true);
             live |= candidate?.Video.IsLive == true;
             live |= candidate?.Video.Variants.Any(VideoDownloader.Infrastructure.Detection.Sites.YouTube.YouTubeLiveMedia.IsLiveVariant) == true;
             if (candidate?.Video.Variants is { Count: > 0 } variants &&
@@ -2506,7 +2498,8 @@ public sealed partial class MainViewModel : ObservableObject
             var waitingForSlot = !wasAlreadyCompleted &&
                 (job?.Status == DownloadStatus.Pending ||
                  enqueuedJobId is null && _downloadEngine.FreeDownloadSlots <= 0);
-            var reason = gate.Observe(DateTimeOffset.UtcNow, live, job?.Status, wasAlreadyCompleted, waitingForSlot);
+            var reason = gate.Observe(DateTimeOffset.UtcNow, live, job?.Status, wasAlreadyCompleted,
+                waitingForSlot, waitingForDetection);
             if (reason == AutoModeAdvanceReason.Live)
                 return new AutoProbeResult(null, SkipLive: true);
             if (reason == AutoModeAdvanceReason.AddressTimeout)
@@ -2559,7 +2552,7 @@ public sealed partial class MainViewModel : ObservableObject
                 }).Task.Unwrap();
             }
 
-            if (gate.DownloadStartedAt is null)
+            if (gate.DownloadStartedAt is null && !waitingForDetection)
             {
                 if (enqueuedJobId is not null || _downloadEngine.FreeDownloadSlots <= 0)
                     await Application.Current.Dispatcher.InvokeAsync(RefreshAutoWaitingSlotStatus);
@@ -2588,7 +2581,16 @@ public sealed partial class MainViewModel : ObservableObject
             var currentIsLive = SelectedTab?.Host is { } currentHost &&
                 await currentHost.IsLivePlaybackAsync(token);
             if (AutoModeAdvanceGate.HasPlaybackChanged(beforeIdentity, now, previousWasLive, currentIsLive))
+            {
+                await Application.Current.Dispatcher.InvokeAsync(() =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    if (_autoTab is { } tab)
+                        EnsurePlaybackDetection(tab);
+                });
+                _autoItemStartedAt = DateTimeOffset.UtcNow;
                 return true;
+            }
 
             // A slow detector is not permission to send another Next key. Only the 60-second gate may retry.
             var seconds = Math.Max(1, (int)Math.Ceiling((deadline - DateTimeOffset.UtcNow).TotalSeconds));
@@ -2603,12 +2605,10 @@ public sealed partial class MainViewModel : ObservableObject
 
     private string? CaptureAutoPlaybackIdentity()
     {
-        var tab = SelectedTab;
-        var key = tab?.Host.CurrentMediaSessionKey;
-        // Prefer the player's identity. Clearing/repopulating the detected-card UI is not a playback switch.
-        return !string.IsNullOrEmpty(key)
-            ? (tab?.Host.CurrentPageUrl?.AbsoluteUri ?? string.Empty) + "\n" + key
-            : FindAutoDownloadCandidate() is { } candidate ? BuildAutoContentFingerprint(candidate) : null;
+        if (SelectedTab is not { } tab)
+            return null;
+        var snapshot = CaptureManualPlaybackSnapshot(tab);
+        return snapshot.Identity ?? snapshot.PageUrl;
     }
     private static string? BuildAutoContentFingerprint(DetectedVideoViewModel item) =>
         BuildAutoContentFingerprint(item.Video.PageUrl.AbsoluteUri, item.Video.DisplayTitle);
@@ -2637,9 +2637,16 @@ public sealed partial class MainViewModel : ObservableObject
         !string.IsNullOrEmpty(_autoLastEnqueuedFingerprint) &&
         string.Equals(fingerprint, _autoLastEnqueuedFingerprint, StringComparison.Ordinal);
 
-    /// <summary>Always the first detected card (list order), not the UI selection.</summary>
-    private DetectedVideoViewModel? FindAutoDownloadCandidate() =>
-        DetectedVideos.Count > 0 ? DetectedVideos[0] : null;
+    private DetectedVideoViewModel? FindAutoDownloadCandidate()
+    {
+        if (_feedDisplayState.IsSuspended)
+            return null;
+        var candidate = DetectedVideos.FirstOrDefault(v =>
+            v.Video.SessionId == _pipeline.SessionId && IsVideoRelevantToCurrentPage(v.Video));
+        if (candidate?.Video.SiteId == SiteIds.YouTube && (_detectionRunning || !_pipeline.IsCompleted))
+            return null;
+        return candidate;
+    }
 
     private static bool IsAutoCandidateDownloadable(DetectedVideoViewModel? item) =>
         item is { IsDrm: false, Video.IsLive: false, SelectedVariant.Variant: not null } &&
@@ -3361,6 +3368,11 @@ public sealed partial class MainViewModel : ObservableObject
     {
         _ = Application.Current.Dispatcher.InvokeAsync(() =>
         {
+            // YouTube playlist SPA: observation href may lead Source by one tick — still sync UI.
+            if (tab.Host.CurrentPageUrl is { } current &&
+                !IsSameDocumentPage(current, e.PageUrl) &&
+                !WebView2Host.AcceptsObservedPageUrl(current, e.PageUrl))
+                return;
             HangProbe.Mark("vm.pageIdentity", $"{e.PageUrl.Host}{e.PageUrl.AbsolutePath}");
             tab.Address = e.PageUrl.AbsoluteUri;
             if (!string.IsNullOrWhiteSpace(e.PageTitle))
@@ -3373,9 +3385,11 @@ public sealed partial class MainViewModel : ObservableObject
             RefreshSidePanelVisibility(e.PageUrl);
 
             // Soft document URL change (SPA) without NavigationStarting (modal_id etc.).
+            // YouTube: ignore list/index-only AbsoluteUri jitter — compare stable watch id.
             var pageOnly = BuildPageIdentity(e.PageUrl);
             if (string.Equals(_lastNavigatedPageUrl, pageOnly, StringComparison.Ordinal) ||
-                string.Equals(_currentPageIdentity, pageOnly, StringComparison.Ordinal))
+                string.Equals(_currentPageIdentity, pageOnly, StringComparison.Ordinal) ||
+                IsSameYouTubeIdentity(_currentPageIdentity, e.PageUrl, tab.Host.CurrentMediaSessionKey))
                 return;
 
             RestartDetectionForPageChange(
@@ -3384,6 +3398,26 @@ public sealed partial class MainViewModel : ObservableObject
                 mediaSessionKey: tab.Host.CurrentMediaSessionKey,
                 allowSuspended: true);
         }, System.Windows.Threading.DispatcherPriority.Background);
+    }
+
+    private static bool IsSameDocumentPage(Uri? a, Uri? b)
+    {
+        if (a is null || b is null)
+            return false;
+        if (string.Equals(a.AbsoluteUri, b.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
+            return true;
+        return WebView2Host.IsSameYouTubeWatchVideo(a, b);
+    }
+
+    private static bool IsSameYouTubeIdentity(string? currentIdentity, Uri pageUrl, string? mediaSessionKey)
+    {
+        if (string.IsNullOrWhiteSpace(currentIdentity) ||
+            !SiteHosts.MatchesAny(pageUrl, "youtube.com", "youtu.be", "youtube-nocookie.com"))
+            return false;
+        var currentStable = ExtractStableContentKeyFromIdentity(currentIdentity);
+        var nextStable = ExtractStableContentKey(mediaSessionKey, pageUrl);
+        return currentStable is not null && nextStable is not null &&
+               string.Equals(currentStable, nextStable, StringComparison.Ordinal);
     }
 
     private bool IsVideoRelevantToCurrentPage(DetectedVideo video)
@@ -3446,6 +3480,12 @@ public sealed partial class MainViewModel : ObservableObject
 
     private static string? ExtractStableContentKey(string? mediaSessionKey, Uri? pageUrl)
     {
+        // YouTube updates its URL before the debounced player key catches up.
+        if (pageUrl is not null && !string.IsNullOrWhiteSpace(mediaSessionKey) &&
+            SiteHosts.MatchesAny(pageUrl, "youtube.com", "youtube-nocookie.com", "youtu.be") &&
+            ExtractStableContentKey(null, pageUrl) is { } pageKey)
+            return pageKey;
+
         if (!string.IsNullOrWhiteSpace(mediaSessionKey))
         {
             // Douyin/TikTok digit ids (unchanged).

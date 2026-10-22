@@ -37,7 +37,7 @@ public static class DetectionProbeScheduler
                     // complete format ladder/fragments this page session needs.
                     if (!external.IsCompleted)
                     {
-                        await Task.Delay(poll, token);
+                        await Task.WhenAny(external, Task.Delay(poll, token));
                         continue;
                     }
 
@@ -61,6 +61,7 @@ public static class DetectionProbeScheduler
                     else if (ready || watch.Elapsed >= externalDelay)
                     {
                         external = extract(token);
+                        continue;
                     }
                 }
 

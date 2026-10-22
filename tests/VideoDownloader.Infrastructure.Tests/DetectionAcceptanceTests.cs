@@ -38,6 +38,22 @@ public sealed class DetectionAcceptanceTests
         Assert.Equal("video:A", WebView2Host.NormalizeMediaSessionKey("video:A"));
     }
 
+    [Fact]
+    public void YouTubePlaylistSpa_AcceptsObservedHrefAheadOfDocumentSource()
+    {
+        var previous = new Uri("https://www.youtube.com/watch?v=sh6bvkxmKdc&list=PLsw2iU9xmpfaHt0HaqUCVTiF9_Tf0gE45&index=12");
+        var next = new Uri("https://www.youtube.com/watch?v=nextVideoId1&list=PLsw2iU9xmpfaHt0HaqUCVTiF9_Tf0gE45&index=13");
+        var sameWatchDifferentIndex = new Uri("https://www.youtube.com/watch?v=sh6bvkxmKdc&list=PLsw2iU9xmpfaHt0HaqUCVTiF9_Tf0gE45&index=13");
+
+        Assert.True(WebView2Host.AcceptsObservedPageUrl(previous, next));
+        Assert.True(WebView2Host.AcceptsObservedPageUrl(previous, sameWatchDifferentIndex));
+        Assert.True(WebView2Host.IsSameYouTubeWatchVideo(previous, sameWatchDifferentIndex));
+        Assert.False(WebView2Host.IsSameYouTubeWatchVideo(previous, next));
+        Assert.False(WebView2Host.AcceptsObservedPageUrl(
+            new Uri("https://www.douyin.com/video/1"),
+            next));
+    }
+
     [Theory]
     [InlineData(null, 10.0, false)]
     [InlineData(10.0, null, false)]

@@ -11,6 +11,7 @@ using VideoDownloader.Core.Models;
 using VideoDownloader.Core.Sites;
 using VideoDownloader.Infrastructure.Configuration;
 using VideoDownloader.Infrastructure.Logging;
+using VideoDownloader.Infrastructure.Sites;
 
 namespace VideoDownloader.Infrastructure.Browser;
 
@@ -44,6 +45,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
     private bool _captureEnabled = true;
     private string? _mediaSessionKey;
     private string? _pendingMediaSessionKey;
+    private string? _pendingMediaSessionTitle;
     private double? _mediaDurationSec;
     private CancellationTokenSource? _mediaSessionDebounceCts;
     private readonly object _mediaSessionLock = new();
@@ -266,7 +268,10 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             if (_core.Source is not null && Uri.TryCreate(_core.Source, UriKind.Absolute, out var url))
             {
                 _lastDocumentUrl = url;
-                NotifyPageIdentityChanged(url, _core.DocumentTitle);
+                // Playlist / SPA: DocumentTitle often still names the previous watch item.
+                // Address updates immediately; title waits for observation caption.
+                var youtube = SiteHosts.MatchesAny(url, "youtube.com", "youtu.be", "youtube-nocookie.com");
+                NotifyPageIdentityChanged(url, youtube ? null : _core.DocumentTitle);
             }
 
             _ = NotifyCurrentDocumentIdentityAsync();
@@ -397,9 +402,12 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
 
         if (root.TryGetProperty("type", out var messageType) && messageType.GetString() == "vd-video-identity")
         {
-            if (_captureEnabled && root.TryGetProperty("identity", out var identity) &&
-                root.TryGetProperty("href", out var href) && href.GetString() == CurrentPageUrl?.AbsoluteUri &&
-                identity.GetString() is { Length: > 0 } key)
+            if (_captureEnabled &&
+                root.TryGetProperty("identity", out var identity) &&
+                identity.GetString() is { Length: > 0 } key &&
+                root.TryGetProperty("href", out var href) &&
+                Uri.TryCreate(href.GetString(), UriKind.Absolute, out var observedPage) &&
+                AcceptsObservedPageUrl(CurrentPageUrl, observedPage))
             {
                 double? durationSec = null;
                 if (root.TryGetProperty("durationSec", out var durationEl) &&
@@ -409,9 +417,18 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
                     duration > 0)
                     durationSec = duration;
 
-                ObserveVideoIdentity(key, CurrentPageUrl!, durationSec);
-                if (root.TryGetProperty("caption", out var caption) &&
-                    caption.GetString() is { Length: > 0 } text)
+                var caption = root.TryGetProperty("caption", out var captionEl) &&
+                              captionEl.GetString() is { Length: > 0 } text
+                    ? text.Trim()
+                    : null;
+
+                // SPA can publish the new watch URL before WebView2 Source catches up.
+                _lastDocumentUrl = observedPage;
+                if (!string.IsNullOrWhiteSpace(caption))
+                    NotifyPageIdentityChanged(observedPage, caption);
+
+                ObserveVideoIdentity(key, observedPage, durationSec, caption);
+                if (!string.IsNullOrWhiteSpace(caption))
                 {
                     bool apply;
                     lock (_mediaSessionLock)
@@ -421,7 +438,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
                                 string.Equals(NormalizeMediaSessionKey(_pendingMediaSessionKey ?? string.Empty), normalized, StringComparison.Ordinal);
                     }
                     if (apply)
-                        _pipeline.UpdateCaption(_pipeline.SessionId, text);
+                        _pipeline.UpdateCaption(_pipeline.SessionId, caption);
                 }
             }
             return;
@@ -450,7 +467,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         // Kept for callers that report transport observations; these cannot change video identity.
     }
 
-    internal void ObserveVideoIdentity(string key, Uri page, double? durationSec = null)
+    internal void ObserveVideoIdentity(string key, Uri page, double? durationSec = null, string? pageTitle = null)
     {
         _lastDocumentUrl = page;
         var normalized = NormalizeMediaSessionKey(key);
@@ -466,11 +483,22 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             // If a quick swipe returns to the old work, it needs a fresh session too:
             // the old displayed result has already been retired by MediaSessionChanging.
             var reverted = same && _pendingMediaSessionKey is not null && _pendingMediaSessionKey != normalized;
-            if (same && !durationRevision && !reverted) return;
-            if (!durationRevision && !reverted && _pendingMediaSessionKey == normalized) return;
+            if (same && !durationRevision && !reverted)
+            {
+                if (!string.IsNullOrWhiteSpace(pageTitle))
+                    _pendingMediaSessionTitle = pageTitle.Trim();
+                return;
+            }
+            if (!durationRevision && !reverted && _pendingMediaSessionKey == normalized)
+            {
+                if (!string.IsNullOrWhiteSpace(pageTitle))
+                    _pendingMediaSessionTitle = pageTitle.Trim();
+                return;
+            }
             forceRestart = durationRevision || reverted;
             changing = _mediaSessionKey is not null;
             _pendingMediaSessionKey = normalized;
+            _pendingMediaSessionTitle = string.IsNullOrWhiteSpace(pageTitle) ? null : pageTitle.Trim();
             _mediaSessionDebounceCts?.Cancel();
             _mediaSessionDebounceCts?.Dispose();
             debounce = _mediaSessionDebounceCts = new();
@@ -500,6 +528,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         }
 
         string? previous;
+        string? pageTitle;
         lock (_mediaSessionLock)
         {
             if (token.IsCancellationRequested) return;
@@ -512,6 +541,8 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             previous = _mediaSessionKey;
             _mediaSessionKey = normalized;
             _pendingMediaSessionKey = null;
+            pageTitle = _pendingMediaSessionTitle;
+            _pendingMediaSessionTitle = null;
             key = normalized;
         }
 
@@ -534,7 +565,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             this,
             new MediaSessionChangedEventArgs(
                 page,
-                _core?.DocumentTitle,
+                pageTitle ?? _core?.DocumentTitle,
                 rawMediaUrl,
                 previous ?? "unobserved",
                 source,
@@ -583,6 +614,41 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
         return Math.Abs(previous.Value - next.Value) >= 2.0;
     }
 
+    /// <summary>
+    /// YouTube playlist SPA may rewrite list/index (or the whole watch URL) before WebView2
+    /// Source catches up. Observation href is ground truth while the document is still YouTube.
+    /// </summary>
+    public static bool AcceptsObservedPageUrl(Uri? document, Uri observed)
+    {
+        if (string.Equals(document?.AbsoluteUri, observed.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (!SiteHosts.MatchesAny(observed, "youtube.com", "youtu.be", "youtube-nocookie.com"))
+            return false;
+
+        if (SiteNetworkHelper.ExtractYouTubeVideoId(observed) is null)
+            return false;
+
+        // Still on YouTube (or no document yet): allow SPA-ahead href with a new v=.
+        return document is null ||
+               SiteHosts.MatchesAny(document, "youtube.com", "youtu.be", "youtube-nocookie.com");
+    }
+
+    public static bool IsSameYouTubeWatchVideo(Uri? a, Uri? b)
+    {
+        if (a is null || b is null)
+            return false;
+        if (string.Equals(a.AbsoluteUri, b.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
+            return true;
+        if (!SiteHosts.MatchesAny(a, "youtube.com", "youtu.be", "youtube-nocookie.com") ||
+            !SiteHosts.MatchesAny(b, "youtube.com", "youtu.be", "youtube-nocookie.com"))
+            return false;
+        var left = SiteNetworkHelper.ExtractYouTubeVideoId(a);
+        var right = SiteNetworkHelper.ExtractYouTubeVideoId(b);
+        return left is not null && right is not null &&
+               string.Equals(left, right, StringComparison.Ordinal);
+    }
+
     private void ResetMediaSessionAnchor()
     {
         lock (_mediaSessionLock)
@@ -592,6 +658,7 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             _mediaSessionDebounceCts = null;
             _mediaSessionKey = null;
             _pendingMediaSessionKey = null;
+            _pendingMediaSessionTitle = null;
             _mediaDurationSec = null;
         }
     }
@@ -642,22 +709,31 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
             return;
 
         var session = _pipeline.SessionId;
+        var youtube = SiteHosts.MatchesAny(CurrentPageUrl, "youtube.com", "youtube-nocookie.com", "youtu.be");
+        using var observation = youtube ? _pipeline.BeginDiscovery(session) : null;
         Diagnostics.HangProbe.Mark("host.probe.begin", $"session={session:N} page={CurrentPageUrl.AbsoluteUri}");
         var scriptJson = await ExecuteProbeScriptAsync(ct);
         Diagnostics.HangProbe.Mark("host.probe.afterScript", $"session={session:N} jsonLen={scriptJson?.Length ?? 0}");
         ct.ThrowIfCancellationRequested();
         if (session != _pipeline.SessionId || !_captureEnabled) return;
         var pageUrl = ExtractPageUrl(scriptJson) ?? CurrentPageUrl;
-        if (pageUrl is null)
+        if (pageUrl is null || youtube && !AcceptsObservedPageUrl(CurrentPageUrl, pageUrl))
             return;
 
         _lastDocumentUrl = pageUrl;
-        var title = ExtractPageTitle(scriptJson) ?? _core.DocumentTitle;
+        // Prefer observation caption — DocumentTitle lags on playlist SPA advances.
+        var title = ExtractPageTitle(scriptJson) ?? (youtube ? null : _core.DocumentTitle);
         // Do NOT NotifyPageIdentityChanged here — probe href/title jitter was restarting
         // the full detection cycle (Clear) and canceling ffprobe before results appeared.
         var context = CaptureCurrentContext(pageUrl, pageUrl);
         Diagnostics.HangProbe.Mark("host.probe.beforePipeline", pageUrl.AbsoluteUri);
-        await _pipeline.ProbePageAsync(pageUrl, title, scriptJson, context, ct, runExternal: false);
+        if (youtube)
+        {
+            if (observation is not null && scriptJson is not null)
+                await observation.SubmitAsync(pageUrl, scriptJson, context, ct);
+        }
+        else
+            await _pipeline.ProbePageAsync(pageUrl, title, scriptJson, context, ct, runExternal: false);
         Diagnostics.HangProbe.Mark("host.probe.end", $"session={_pipeline.SessionId:N}");
     }
 
@@ -985,13 +1061,22 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
     {
         try
         {
+            var expectedPage = CurrentPageUrl;
+            var generation = NavigationGeneration;
             var scriptJson = await ExecuteProbeScriptAsync(CancellationToken.None);
+            if (generation != NavigationGeneration || expectedPage != CurrentPageUrl)
+                return;
             var pageUrl = ExtractPageUrl(scriptJson) ?? CurrentPageUrl;
             if (pageUrl is null)
                 return;
+            var youtube = expectedPage is not null &&
+                SiteHosts.MatchesAny(expectedPage, "youtube.com", "youtube-nocookie.com", "youtu.be");
+            if (youtube && !AcceptsObservedPageUrl(expectedPage, pageUrl))
+                return;
 
             _lastDocumentUrl = pageUrl;
-            NotifyPageIdentityChanged(pageUrl, ExtractPageTitle(scriptJson) ?? _core?.DocumentTitle);
+            var title = ExtractPageTitle(scriptJson) ?? (youtube ? null : _core?.DocumentTitle);
+            NotifyPageIdentityChanged(pageUrl, title);
         }
         catch (Exception ex)
         {

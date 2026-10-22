@@ -13,7 +13,7 @@ public sealed class AutoModeAdvanceGate(DateTimeOffset itemStartedAt)
     public DateTimeOffset AddressDeadline { get; private set; } = itemStartedAt + AddressTimeout;
     public DateTimeOffset? DownloadStartedAt { get; private set; }
     private DateTimeOffset _lastObservedAt = itemStartedAt;
-    private bool _wasWaitingForSlot;
+    private bool _wasWaiting;
 
     // Douyin live previews can retain the preceding VOD media key. A live/VOD transition
     // must release the switch wait even when that key has not changed.
@@ -24,17 +24,17 @@ public sealed class AutoModeAdvanceGate(DateTimeOffset itemStartedAt)
          !string.Equals(previousIdentity, currentIdentity, StringComparison.Ordinal));
 
     public AutoModeAdvanceReason Observe(DateTimeOffset now, bool isLive, DownloadStatus? jobStatus,
-        bool wasAlreadyCompleted = false, bool waitingForSlot = false)
+        bool wasAlreadyCompleted = false, bool waitingForSlot = false, bool waitingForDetection = false)
     {
         if (isLive)
             return AutoModeAdvanceReason.Live;
 
-        // Capacity waiting is not an address-discovery failure. Exclude it from the timeout,
-        // including the interval where a slot becomes available again.
-        if (DownloadStartedAt is null && (waitingForSlot || _wasWaitingForSlot) && now > _lastObservedAt)
+        var waiting = waitingForSlot || waitingForDetection;
+        // Discovery has its own budget; the auto deadline must not cut it short.
+        if (DownloadStartedAt is null && (waiting || _wasWaiting) && now > _lastObservedAt)
             AddressDeadline += now - _lastObservedAt;
         _lastObservedAt = now;
-        _wasWaitingForSlot = waitingForSlot;
+        _wasWaiting = waiting;
 
         // Preparing and Pending have not started transferring media yet.
         if (DownloadStartedAt is null && !wasAlreadyCompleted &&
@@ -46,7 +46,7 @@ public sealed class AutoModeAdvanceGate(DateTimeOffset itemStartedAt)
                 ? AutoModeAdvanceReason.DownloadStarted
                 : AutoModeAdvanceReason.None;
 
-        return !waitingForSlot && now >= AddressDeadline
+        return !waiting && now >= AddressDeadline
             ? AutoModeAdvanceReason.AddressTimeout : AutoModeAdvanceReason.None;
     }
 }

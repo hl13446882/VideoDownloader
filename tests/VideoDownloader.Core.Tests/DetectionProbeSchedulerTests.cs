@@ -77,6 +77,23 @@ public sealed class DetectionProbeSchedulerTests
     }
 
     [Fact]
+    public async Task ReadyExtraction_DoesNotWaitForPollOrTrailingWindow()
+    {
+        var extraction = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var observations = 0;
+        var run = DetectionProbeScheduler.RunAsync(
+            _ => { observations++; return Task.CompletedTask; },
+            _ => { started.SetResult(); return extraction.Task; },
+            () => false, () => false, TimeSpan.Zero, TimeSpan.FromSeconds(10), default,
+            pollInterval: TimeSpan.FromSeconds(5), trailingObservation: TimeSpan.Zero);
+        await started.Task;
+        extraction.SetResult();
+        await run.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.Equal(1, observations);
+    }
+
+    [Fact]
     public async Task PageBudget_CancelsAndJoinsStalledProcess()
     {
         var cleaned = false;

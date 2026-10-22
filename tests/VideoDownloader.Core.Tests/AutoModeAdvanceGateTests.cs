@@ -139,6 +139,29 @@ public sealed class AutoModeAdvanceGateTests
     }
 
     [Fact]
+    public void ActiveDetection_OutlivesAutoAddressDeadline_AndCanStillStartDownload()
+    {
+        var gate = new AutoModeAdvanceGate(Start);
+        for (var second = 0; second <= 100; second++)
+            Assert.Equal(AutoModeAdvanceReason.None,
+                gate.Observe(Start.AddSeconds(second), false, null, waitingForDetection: true));
+        Assert.Equal(AutoModeAdvanceReason.None,
+            gate.Observe(Start.AddSeconds(101), false, null));
+        Assert.Equal(AutoModeAdvanceReason.None,
+            gate.Observe(Start.AddSeconds(102), false, DownloadStatus.Downloading));
+        Assert.Equal(AutoModeAdvanceReason.DownloadStarted,
+            gate.Observe(Start.AddSeconds(107), false, DownloadStatus.Downloading));
+    }
+
+    [Fact]
+    public void ActiveDetection_DoesNotDelayLiveSkip()
+    {
+        var gate = new AutoModeAdvanceGate(Start);
+        Assert.Equal(AutoModeAdvanceReason.Live,
+            gate.Observe(Start.AddSeconds(1), true, null, waitingForDetection: true));
+    }
+
+    [Fact]
     public void ExistingCompletedDuplicate_DoesNotPretendToStartANewDownload()
     {
         var gate = new AutoModeAdvanceGate(Start);

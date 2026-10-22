@@ -110,6 +110,8 @@ public sealed class DetectionSpeedAndIsolationTests
         await detector.ProcessPageObservationAsync(page, "current",
             """{"media":["https://rr.googlevideo.com/videoplayback?itag=18&mime=video"],"combinedMedia":["https://rr.googlevideo.com/videoplayback?itag=18&mime=video"]}""",
             RequestContext.CreateEmpty(), default, runExternal: true);
+        Assert.Empty(results);
+        await detector.CompleteAsync(default);
         Assert.Single(results);
         Assert.Equal(MediaTrackKind.Combined, results[0].Video!.Kind);
         Assert.True(VideoDownloader.Core.Detection.DetectionReadiness.IsUsable(
@@ -137,6 +139,8 @@ public sealed class DetectionSpeedAndIsolationTests
 
         extractor.Complete();
         await discovery;
+        Assert.Empty(results);
+        await detector.CompleteAsync(default);
         var descriptor = Assert.Single(results);
         Assert.NotNull(descriptor.Video);
         Assert.NotNull(descriptor.Audio);
