@@ -16,6 +16,7 @@ public partial class MainWindow : Window
     private readonly MainViewModel _viewModel;
     private readonly DispatcherTimer _timer;
     private readonly Dictionary<Guid, WebView2> _webViews = new();
+    private readonly DispatcherTimer _sidebarHideTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private bool _isClosing;
     private bool _allowClose;
     private bool _suppressQueueSelectionSync;
@@ -26,6 +27,7 @@ public partial class MainWindow : Window
         _viewModel = viewModel;
         DataContext = _viewModel;
         _viewModel.RestoreQueueSelection = RestoreDownloadQueueSelection;
+        _viewModel.RestoreAutoRowSelection = RestoreAutoRowSelection;
 
         _timer = new DispatcherTimer(DispatcherPriority.Background)
         {
@@ -33,15 +35,30 @@ public partial class MainWindow : Window
         };
         _timer.Tick += (_, _) => _viewModel.TickDownloads();
         _timer.Start();
+        _sidebarHideTimer.Tick += (_, _) =>
+        {
+            if (SidePanel.IsMouseOver ||
+                DownloadQueueList.ContextMenu?.IsOpen == true || Mouse.Captured is not null) return;
+            _sidebarHideTimer.Stop();
+            _viewModel.IsSidePanelVisible = false;
+        };
 
         Loaded += OnLoadedAsync;
         Closing += OnClosing;
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
     }
 
+    private void OnSidePanelMouseEnter(object sender, MouseEventArgs e)
+    {
+        _sidebarHideTimer.Stop();
+        _viewModel.IsSidePanelVisible = true;
+    }
+
+    private void OnSidePanelMouseLeave(object sender, MouseEventArgs e) => _sidebarHideTimer.Start();
+
     private void OnDownloadQueueSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_suppressQueueSelectionSync || sender is not ListBox list)
+        if (_suppressQueueSelectionSync || _viewModel.QueueSelectionSuspended || sender is not ListBox list)
             return;
 
         SyncQueueSelectionFromList(list);
@@ -90,9 +107,31 @@ public partial class MainWindow : Window
         SyncQueueSelectionFromList(DownloadQueueList);
     }
 
+    private void RestoreAutoRowSelection(object? row)
+    {
+        _suppressQueueSelectionSync = true;
+        try
+        {
+            DownloadQueueList.SelectedItems.Clear();
+            if (row is null)
+                DownloadQueueList.SelectedItem = null;
+            else
+            {
+                DownloadQueueList.SelectedItems.Add(row);
+                DownloadQueueList.SelectedItem = row;
+            }
+        }
+        finally
+        {
+            _suppressQueueSelectionSync = false;
+        }
+
+        SyncQueueSelectionFromList(DownloadQueueList);
+    }
+
     private void OnDownloadQueueContextMenuOpening(object sender, ContextMenuEventArgs e)
     {
-        if (QueueRowFromSource(e.OriginalSource) is not DownloadJobViewModel)
+        if (QueueRowFromSource(e.OriginalSource) is not (DownloadJobViewModel or AutoSessionRowViewModel or AutoQueueItemRowViewModel))
         {
             e.Handled = true;
             return;
@@ -129,15 +168,15 @@ public partial class MainWindow : Window
 
     private void OnDownloadQueuePreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        if (QueueRowFromSource(e.OriginalSource) is AutoSessionRowViewModel autoSession)
+        if (QueueRowFromSource(e.OriginalSource) is AutoSessionRowViewModel autoSession &&
+            IsAutoExpandGlyph(e.OriginalSource))
         {
-            // Double-click is handled by OnDownloadQueueDoubleClick (run/pause).
-            if (e.ClickCount >= 2)
+            if (e.ClickCount < 2)
             {
-                e.Handled = true;
-                return;
+                _viewModel.SetSelectedAutoRows(autoSession, null);
+                _viewModel.ToggleAutoSessionExpanded(autoSession.SessionId);
             }
-            _viewModel.ToggleAutoSessionExpanded(autoSession.SessionId);
+            e.Handled = true;
             return;
         }
 
@@ -163,15 +202,25 @@ public partial class MainWindow : Window
         if (sender is not ListBox list)
             return;
 
-        if (QueueRowFromSource(e.OriginalSource) is not DownloadJobViewModel job)
+        switch (QueueRowFromSource(e.OriginalSource))
         {
-            ClearQueueListSelection();
-            e.Handled = true;
-            return;
+            case DownloadJobViewModel job:
+                SelectOnlyQueueRow(list, job);
+                _viewModel.NotifyQueueCommandsPublic();
+                return;
+            case AutoSessionRowViewModel session:
+                SelectOnlyAutoRow(list, session);
+                _viewModel.NotifyQueueCommandsPublic();
+                return;
+            case AutoQueueItemRowViewModel item:
+                SelectOnlyAutoRow(list, item);
+                _viewModel.NotifyQueueCommandsPublic();
+                return;
+            default:
+                ClearQueueListSelection();
+                e.Handled = true;
+                return;
         }
-
-        SelectOnlyQueueRow(list, job);
-        _viewModel.NotifyQueueCommandsPublic();
     }
 
     private void OnDownloadQueuePreviewKeyDown(object sender, KeyEventArgs e)
@@ -209,7 +258,40 @@ public partial class MainWindow : Window
         }
 
         _viewModel.SetSelectedDownloadJobs([job], job);
+        _viewModel.SetSelectedAutoRows(null, null);
         list.Focus();
+    }
+
+    private void SelectOnlyAutoRow(ListBox list, object row)
+    {
+        _suppressQueueSelectionSync = true;
+        try
+        {
+            list.SelectedItems.Clear();
+            list.SelectedItems.Add(row);
+            list.SelectedItem = row;
+        }
+        finally
+        {
+            _suppressQueueSelectionSync = false;
+        }
+
+        _viewModel.SetSelectedDownloadJobs(Array.Empty<DownloadJobViewModel>(), null);
+        _viewModel.SetSelectedAutoRows(row as AutoSessionRowViewModel, row as AutoQueueItemRowViewModel);
+        list.Focus();
+    }
+
+    private static bool IsAutoExpandGlyph(object source)
+    {
+        for (var current = source as DependencyObject; current is not null; current = VisualTreeHelper.GetParent(current))
+        {
+            if (current is FrameworkElement { Tag: "auto-expand" })
+                return true;
+            if (current is ListBoxItem)
+                break;
+        }
+
+        return false;
     }
 
     private void ClearQueueListSelection()
@@ -496,6 +578,7 @@ public partial class MainWindow : Window
 
         _isClosing = true;
         _timer.Stop();
+        _sidebarHideTimer.Stop();
         _viewModel.Tabs.CollectionChanged -= OnTabsChanged;
         _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
 

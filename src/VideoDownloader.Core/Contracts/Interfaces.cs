@@ -1,4 +1,4 @@
-using VideoDownloader.Core.Contracts;
+﻿using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Models;
 
 using System.Net.Http;
@@ -165,6 +165,12 @@ public interface IAutoSessionRepository
     Task<AutoSession?> GetRunningSessionAsync(CancellationToken ct = default);
     Task PauseAllRunningAsync(CancellationToken ct = default);
     Task DeleteSessionAsync(Guid id, CancellationToken ct = default);
+    /// <summary>Atomically removes a non-running session only when every item completed; keeps download jobs and files.</summary>
+    Task<bool> TryDeleteCompletedSessionAsync(Guid id, CancellationToken ct = default);
+    Task<int> DeleteEmptySessionsAsync(CancellationToken ct = default);
+    /// <summary>Drops completed queue rows. Download jobs and finished files stay.</summary>
+    Task<int> DeleteCompletedItemsAsync(CancellationToken ct = default);
+    Task<IReadOnlyList<Guid>> GetDownloadJobIdsAsync(CancellationToken ct = default);
 
     Task<AutoQueueItem?> TryAddQueuedItemAsync(AutoQueueItem item, CancellationToken ct = default);
     Task SaveItemAsync(AutoQueueItem item, CancellationToken ct = default);

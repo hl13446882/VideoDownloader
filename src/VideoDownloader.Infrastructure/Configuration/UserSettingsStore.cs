@@ -207,6 +207,7 @@ public sealed class UserSettingsStore
             {
                 Language = source.Ui?.Language ?? "zh-CN",
                 QueueGrouped = source.Ui?.QueueGrouped ?? false,
+                QueueGroupingMode = source.Ui?.QueueGroupingMode,
                 AutoModeIdleMinutes = source.Ui?.AutoModeIdleMinutes is >= 0
                     ? source.Ui.AutoModeIdleMinutes
                     : 5,

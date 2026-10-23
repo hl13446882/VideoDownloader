@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NSubstitute;
@@ -122,7 +122,35 @@ public class RecoverOnStartupConcurrencyTests
         UpdatedAt = updatedAt
     };
 
-    private static DownloadEngine CreateEngine(IDownloadRepository repo, int maxConcurrent, bool autoRecover)
+    [Fact]
+    public async Task Startup_DefersAutomaticSessionJobsToTheSequentialScheduler()
+    {
+        var repo = new MemoryDownloadRepository();
+        var job = MakeJob("auto-owned", "https://example.test/video.mp4", DateTimeOffset.UtcNow, DownloadStatus.Paused);
+        await repo.SaveAsync(job);
+        var sessions = Substitute.For<IAutoSessionRepository>();
+        sessions.GetDownloadJobIdsAsync(Arg.Any<CancellationToken>()).Returns(new[] { job.Id });
+        using var engine = CreateEngine(repo, maxConcurrent: 3, autoRecover: true, autoSessions: sessions);
+        await engine.RecoverOnStartupAsync();
+        await Task.Delay(300);
+        Assert.Equal(DownloadStatus.Paused, engine.GetActiveJobs().Single().Status);
+    }
+
+    [Fact]
+    public async Task Resume_CanStartRecoveredPendingJobs()
+    {
+        var repo = new MemoryDownloadRepository();
+        var job = MakeJob("pending-resume", "https://example.test/video.mp4", DateTimeOffset.UtcNow, DownloadStatus.Pending);
+        await repo.SaveAsync(job);
+        using var engine = CreateEngine(repo, maxConcurrent: 1, autoRecover: false);
+        await engine.RecoverOnStartupAsync();
+        Assert.Equal(DownloadStatus.Pending, job.Status);
+        await engine.ResumeAsync(job.Id);
+        await Task.Delay(300);
+        Assert.NotEqual(DownloadStatus.Pending, job.Status);
+    }
+
+    private static DownloadEngine CreateEngine(IDownloadRepository repo, int maxConcurrent, bool autoRecover, IAutoSessionRepository? autoSessions = null)
     {
         var options = Options.Create(new AppOptions
         {
@@ -170,7 +198,7 @@ public class RecoverOnStartupConcurrencyTests
             NullLogger<DownloadEngine>.Instance,
             new LicenseService(new HttpClient(), options, NullLogger<LicenseService>.Instance),
             new LocalVideoThumbnailStore(ffmpeg, NullLogger<LocalVideoThumbnailStore>.Instance),
-            new MemoryLibraryKindCatalog());
+            new MemoryLibraryKindCatalog(), autoSessions: autoSessions);
     }
 
     private sealed class MemoryDownloadRepository : IDownloadRepository

@@ -23,6 +23,7 @@ namespace VideoDownloader.Infrastructure.Download;
 
 public sealed class DownloadEngine : IDownloadEngine, IDisposable
 {
+    private readonly IAutoSessionRepository? _autoSessions;
     private readonly HttpMediaDownloader _httpDownloader;
     private readonly M3u8DownloadAdapter _m3u8;
     private readonly IFfmpegAdapter _ffmpegAdapter;
@@ -63,8 +64,10 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         ILibraryKindCatalog kinds,
         IEnumerable<IExternalSiteResolver>? resolvers = null,
         MediaAvailabilityValidator? availability = null,
-        IMediaAddressRediscoverer? rediscoverer = null)
+        IMediaAddressRediscoverer? rediscoverer = null,
+        IAutoSessionRepository? autoSessions = null)
     {
+        _autoSessions = autoSessions;
         _httpDownloader = httpDownloader;
         _m3u8 = m3u8;
         _ffmpegAdapter = ffmpegAdapter;
@@ -225,7 +228,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
     public Task ResumeAsync(Guid jobId, CancellationToken ct = default)
     {
         if (_jobs.TryGetValue(jobId, out var job) &&
-            job.Status is DownloadStatus.Paused or DownloadStatus.Failed)
+            job.Status is DownloadStatus.Pending or DownloadStatus.Paused or DownloadStatus.Failed)
         {
             if (job.Status == DownloadStatus.Failed)
                 job.LastErrorCode = null;
@@ -830,6 +833,8 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
 
     public async Task RecoverOnStartupAsync(CancellationToken ct = default)
     {
+        var autoJobIds = _autoSessions is null ? new HashSet<Guid>()
+            : (await _autoSessions.GetDownloadJobIdsAsync(ct)).ToHashSet();
         var persisted = await _repository.GetAllAsync(ct);
         var maxAutoStart = Math.Clamp(_options.Download.MaxConcurrentDownloads, 1, 5);
         var autoStarted = 0;
@@ -865,7 +870,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
             }
             await _repository.SaveAsync(job, ct);
 
-            if (!_options.Download.AutoRecoverDownloads)
+            if (autoJobIds.Contains(job.Id) || !_options.Download.AutoRecoverDownloads)
                 continue;
 
             // Resume incomplete work: interrupted downloads become Paused; queued ones stay Pending.
@@ -2124,11 +2129,18 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
                 break;
             }
 
-            PickupFailedJobs();
+            try
+            {
+                var autoJobIds = _autoSessions is null ? new HashSet<Guid>()
+                    : (await _autoSessions.GetDownloadJobIdsAsync(ct)).ToHashSet();
+                PickupFailedJobs(autoJobIds);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
+            catch (Exception ex) { _logger.LogWarning(ex, "Failed-job pickup deferred"); }
         }
     }
 
-    private void PickupFailedJobs()
+    private void PickupFailedJobs(IReadOnlySet<Guid> autoJobIds)
     {
         var intervalSeconds = _options.Download.FailedRetryIntervalSeconds;
         if (intervalSeconds <= 0)
@@ -2146,7 +2158,7 @@ public sealed class DownloadEngine : IDownloadEngine, IDisposable
         {
             if (picked >= freeSlots)
                 break;
-            if (job.Status != DownloadStatus.Failed)
+            if (autoJobIds.Contains(job.Id) || job.Status != DownloadStatus.Failed)
                 continue;
             if (_removedJobs.ContainsKey(job.Id) || _ctsMap.ContainsKey(job.Id))
                 continue;

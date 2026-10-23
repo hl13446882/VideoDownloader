@@ -1,4 +1,4 @@
-using Dapper;
+﻿using Dapper;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
 using VideoDownloader.Core.Contracts;
@@ -116,7 +116,7 @@ public sealed class SqliteAutoSessionRepository : IAutoSessionRepository
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync(ct);
         var rows = await conn.QueryAsync<SessionRow>(
-            "SELECT * FROM auto_sessions ORDER BY started_at DESC");
+            "SELECT * FROM auto_sessions ORDER BY started_at DESC, id DESC");
         return rows.Select(MapSession).ToList();
     }
 
@@ -158,6 +158,53 @@ public sealed class SqliteAutoSessionRepository : IAutoSessionRepository
             "DELETE FROM auto_sessions WHERE id = @Id",
             new { Id = id.ToString() }, tx);
         await tx.CommitAsync(ct);
+    }
+
+    public async Task<int> DeleteEmptySessionsAsync(CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        return await conn.ExecuteAsync("""
+            DELETE FROM auto_sessions WHERE NOT EXISTS
+                (SELECT 1 FROM auto_queue_items WHERE session_id = auto_sessions.id)
+            """);
+    }
+
+    public async Task<int> DeleteCompletedItemsAsync(CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        return await conn.ExecuteAsync(
+            "DELETE FROM auto_queue_items WHERE status = @Completed",
+            new { Completed = (int)AutoQueueItemStatus.Completed });
+    }
+
+    public async Task<IReadOnlyList<Guid>> GetDownloadJobIdsAsync(CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        var ids = await conn.QueryAsync<string>(
+            "SELECT DISTINCT download_job_id FROM auto_queue_items WHERE download_job_id IS NOT NULL");
+        return ids.Select(Guid.Parse).ToArray();
+    }
+
+    public async Task<bool> TryDeleteCompletedSessionAsync(Guid id, CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        var deleted = await conn.ExecuteAsync("""
+            DELETE FROM auto_sessions
+            WHERE id = @Id AND status != @Running
+              AND EXISTS (SELECT 1 FROM auto_queue_items WHERE session_id = @Id)
+              AND NOT EXISTS (SELECT 1 FROM auto_queue_items WHERE session_id = @Id AND status != @Completed)
+            """, new { Id = id.ToString(), Running = (int)AutoSessionStatus.Running,
+                Completed = (int)AutoQueueItemStatus.Completed }, tx);
+        if (deleted > 0)
+            await conn.ExecuteAsync("DELETE FROM auto_queue_items WHERE session_id = @Id",
+                new { Id = id.ToString() }, tx);
+        await tx.CommitAsync(ct);
+        return deleted > 0;
     }
 
     public async Task<AutoQueueItem?> TryAddQueuedItemAsync(AutoQueueItem item, CancellationToken ct = default)

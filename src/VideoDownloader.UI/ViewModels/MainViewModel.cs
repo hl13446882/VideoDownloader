@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -295,7 +295,8 @@ public sealed partial class AutoQueueItemRowViewModel : ObservableObject
     public string DisplayName => string.IsNullOrWhiteSpace(Item.Caption)
         ? ("#" + Item.Seq.ToString(CultureInfo.InvariantCulture))
         : ("#" + Item.Seq.ToString(CultureInfo.InvariantCulture) + "  " + Item.Caption);
-    public string StatusText => Item.Status switch
+    public AutoQueueItemStatus EffectiveStatus => Job is null ? Item.Status : AutoQueueItemState.FromDownload(Job.Status, Item.Status);
+    public string StatusText => EffectiveStatus switch
     {
         AutoQueueItemStatus.Queued => _loc.T("auto.itemQueued"),
         AutoQueueItemStatus.Enqueued => _loc.T("auto.itemEnqueued"),
@@ -314,12 +315,14 @@ public sealed partial class AutoQueueItemRowViewModel : ObservableObject
         }
     }
     public bool ShowProgress => Job is not null &&
-                                Item.Status is AutoQueueItemStatus.Enqueued or AutoQueueItemStatus.Downloading;
-    public bool IsCompleted => Item.Status == AutoQueueItemStatus.Completed;
+                                EffectiveStatus is AutoQueueItemStatus.Enqueued or AutoQueueItemStatus.Downloading;
+    public bool IsCompleted => EffectiveStatus == AutoQueueItemStatus.Completed;
 
     public void BindJob(DownloadJob? job)
     {
         Job = job;
+        OnPropertyChanged(nameof(EffectiveStatus));
+        OnPropertyChanged(nameof(IsCompleted));
         OnPropertyChanged(nameof(ProgressPercent));
         OnPropertyChanged(nameof(ShowProgress));
         OnPropertyChanged(nameof(StatusText));
@@ -521,12 +524,18 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly HashSet<string> _collapsedQueueGroups = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<Guid> _collapsedAutoSessions = new();
     private bool _queueGrouped;
+    private int _queueGroupingMode;
+    private bool ShowAutoTaskGroups => _queueGroupingMode == 2;
     private Guid? _autoDbSessionId;
     private AutoSessionRowViewModel? _selectedAutoSession;
     private AutoQueueItemRowViewModel? _selectedAutoItem;
     private readonly Dictionary<Guid, DetectedVideoViewModel> _videoMap = new();
+    private readonly Dictionary<Guid, DetectedVideo> _pendingProbeVideos = new();
     private readonly object _pageSync = new();
     private CancellationTokenSource _probeCts = new();
+    private readonly PageProbePublications _probePublications = new();
+    private IPageProbePublications PublishedProbes => _probePublications.Reader;
+    private Guid? _autoConsumedProbeSessionId;
     private string? _currentPageIdentity;
     private string? _lastNavigatedPageUrl;
     private long _pageGeneration;
@@ -587,8 +596,8 @@ public sealed partial class MainViewModel : ObservableObject
     private bool _isAutoMode;
 
     public string AutoModeButtonLabel => IsAutoMode ? _loc.NavAutoStop : _loc.NavAuto;
-    public string QueuePanelHeader => IsAutoMode ? _loc.T("side.autoTasks") : _loc.SideQueue;
-    public bool CanToggleQueueGrouping => !IsAutoMode;
+    public string QueuePanelHeader => ShowAutoTaskGroups ? _loc.T("side.autoTasks") : _loc.SideQueue;
+    public bool CanToggleQueueGrouping => true;
 
     partial void OnIsAutoModeChanged(bool value)
     {
@@ -628,9 +637,18 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private bool _canGoForward;
 
-    /// <summary>Hidden on local library pages so the WebView can use full width.</summary>
+    /// <summary>Whether the edge sidebar is expanded.</summary>
     [ObservableProperty]
-    private bool _isSidePanelVisible = true;
+    private bool _isSidePanelVisible;
+
+    [ObservableProperty]
+    private bool _canProbeCurrentPage;
+
+    partial void OnCanProbeCurrentPageChanged(bool value)
+    {
+        RefreshCommand.NotifyCanExecuteChanged();
+        DownloadSelectedVideoCommand.NotifyCanExecuteChanged();
+    }
 
     /// <summary>True when the local player asked the WPF host for true window fullscreen.</summary>
     [ObservableProperty]
@@ -760,13 +778,19 @@ public sealed partial class MainViewModel : ObservableObject
     public ObservableCollection<object> QueueRows { get; } = new();
 
     public bool IsQueueGrouped => _queueGrouped;
-    public string QueueGroupToggleLabel => _queueGrouped ? _loc.T("btn.ungroup") : _loc.T("btn.group");
+    public string QueueGroupToggleLabel => _loc.T(_queueGroupingMode switch { 1 => "btn.groupSite", 2 => "btn.groupAuto", _ => "btn.groupNone" });
 
     /// <summary>Queue multi-selection (click toggles). Batch ops require every selected row to support them.</summary>
     public IReadOnlyList<DownloadJobViewModel> SelectedDownloadJobs => _selectedDownloadJobs;
 
     /// <summary>Invoked after queue rebuild so the ListBox can restore multi-selection.</summary>
     public Action<IReadOnlyList<Guid>>? RestoreQueueSelection { get; set; }
+
+    /// <summary>Invoked after an auto-task rebuild so the selected task or item stays selected.</summary>
+    public Action<object?>? RestoreAutoRowSelection { get; set; }
+
+    /// <summary>While true, queue selection changes come from a rebuild and must not clear the user's pick.</summary>
+    public bool QueueSelectionSuspended { get; private set; }
 
     private readonly List<DownloadJobViewModel> _selectedDownloadJobs = new();
     private readonly List<Guid> _selectedDownloadJobIds = new();
@@ -786,7 +810,7 @@ public sealed partial class MainViewModel : ObservableObject
          EffectiveSelectedJobs.All(j => j.Job.Status is DownloadStatus.Downloading));
 
     public bool CanResumeSelected =>
-        (_selectedAutoSession is { Session.Status: AutoSessionStatus.Paused or AutoSessionStatus.Stopped }) ||
+        (_selectedAutoSession is { Session.Status: AutoSessionStatus.Paused or AutoSessionStatus.Stopped or AutoSessionStatus.Failed }) ||
         (_selectedAutoItem?.Item.DownloadJobId is not null &&
          _selectedAutoItem.Job?.Status is DownloadStatus.Paused or DownloadStatus.Failed) ||
         (EffectiveSelectedJobs.Count > 0 &&
@@ -842,13 +866,17 @@ public sealed partial class MainViewModel : ObservableObject
         _downloadEngine = downloadEngine;
         _autoSessions = services.GetRequiredService<IAutoSessionRepository>();
         _autoScheduler = services.GetRequiredService<AutoDownloadScheduler>();
+        _autoScheduler.StateChanged += (_, _) => Application.Current?.Dispatcher.BeginInvoke(
+            new Action(() => { _ = RefreshAutoQueueUiAsync(); }));
         _aggregator = aggregator;
         _settingsViewModel = settingsViewModel;
         _loc = loc;
         _localLibrary = localLibrary;
         _options = services.GetRequiredService<AppOptions>();
         _settingsStore = services.GetRequiredService<UserSettingsStore>();
-        _queueGrouped = _options.Ui.QueueGrouped;
+        _queueGroupingMode = _options.Ui.QueueGroupingMode ?? (_options.Ui.QueueGrouped ? 1 : 0);
+        if (_queueGroupingMode is < 0 or > 2) _queueGroupingMode = 0;
+        _queueGrouped = _queueGroupingMode != 0;
 
         _pipeline.VideoDetected += OnVideoDetected;
         _pipeline.PageProbed += OnPageProbed;
@@ -970,6 +998,7 @@ public sealed partial class MainViewModel : ObservableObject
 
     public async Task InitializeAsync()
     {
+        await _autoScheduler.InitializeAsync();
         RefreshDownloadJobs();
         ClearStatus();
         await AddTabAsync(DefaultHomeUrl, select: true);
@@ -1263,7 +1292,7 @@ public sealed partial class MainViewModel : ObservableObject
 
     private void RefreshSidePanelVisibility(Uri? pageUrl)
     {
-        IsSidePanelVisible = pageUrl is null || !LocalLibraryHost.IsLocalLibraryHost(pageUrl);
+        CanProbeCurrentPage = pageUrl is not null && !LocalLibraryHost.IsLocalLibraryHost(pageUrl);
     }
 
     private bool CanExecuteGoBack => CanGoBack;
@@ -1304,9 +1333,12 @@ public sealed partial class MainViewModel : ObservableObject
     {
         _selectedDownloadJobs.Clear();
         _selectedDownloadJobIds.Clear();
+        _selectedAutoSession = null;
+        _selectedAutoItem = null;
         if (SelectedDownloadJob is not null)
             SelectedDownloadJob = null;
-        NotifyQueueCommands();
+        else
+            NotifyQueueCommands();
     }
 
     public void SelectOnlyQueueJob(DownloadJobViewModel job)
@@ -1571,8 +1603,14 @@ public sealed partial class MainViewModel : ObservableObject
         return true;
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanProbeCurrentPage))]
     private void Refresh()
+    {
+        StopAutoMode(announce: false, resumeDetection: false);
+        ProbeCurrentPage();
+    }
+
+    private void ProbeCurrentPage()
     {
         var tab = SelectedTab;
         var pageUrl = tab?.Host.CurrentPageUrl
@@ -1582,26 +1620,15 @@ public sealed partial class MainViewModel : ObservableObject
             SetStatusKey("status.probeNoPage");
             return;
         }
-
         if (LocalLibraryHost.IsLocalLibraryHost(pageUrl))
         {
             SetStatusKey("status.localLibraryNoProbe");
             return;
         }
-
-        // Manual probing takes control from the auto loop; otherwise auto can consume
-        // the first new card and advance away, cancelling this probe.
-        StopAutoMode(announce: false, resumeDetection: false);
-
-        // Manual probe: singleton destroy + full re-probe (same entry as auto navigation/SPA/session).
         _feedDisplayState.BeginSession();
         ClearStatus();
-        SetStatusKey("status.probeManual");
-        RestartDetectionForPageChange(
-            pageUrl,
-            tab?.Title,
-            mediaSessionKey: tab?.Host.CurrentMediaSessionKey,
-            forceRestart: true);
+        SetStatusKey("status.probeWaiting");
+        RestartDetectionForPageChange(pageUrl, tab?.Title, tab?.Host.CurrentMediaSessionKey, forceRestart: true);
     }
 
     /// <summary>
@@ -1659,11 +1686,13 @@ public sealed partial class MainViewModel : ObservableObject
         lock (_pageSync)
         {
             _probeCts.Cancel();
+            _probePublications.Invalidate();
             _detectionRunning = false;
             _currentPageIdentity = BuildPageIdentity(pageUrl);
             _lastNavigatedPageUrl = _currentPageIdentity;
         }
 
+        _pendingProbeVideos.Clear();
         DetectedVideos.Clear();
         _videoMap.Clear();
         SelectedDetectedVideo = null;
@@ -1749,8 +1778,10 @@ public sealed partial class MainViewModel : ObservableObject
         {
             _pageGeneration++;
             _probeCts.Cancel();
+            _probePublications.Invalidate();
             _detectionRunning = false;
         }
+        _pendingProbeVideos.Clear();
         DetectedVideos.Clear();
         _videoMap.Clear();
         SelectedDetectedVideo = null;
@@ -1788,12 +1819,15 @@ public sealed partial class MainViewModel : ObservableObject
             _detectionRunning = true;
             generation = ++_pageGeneration;
             _probeCts.Cancel();
+            _probePublications.Invalidate();
             _probeCts.Dispose();
             _probeCts = new CancellationTokenSource();
+            _probePublications.Begin();
             token = _probeCts.Token;
         }
 
         _feedDisplayState.BeginSession();
+        _pendingProbeVideos.Clear();
         DetectedVideos.Clear();
         _videoMap.Clear();
         SelectedDetectedVideo = null;
@@ -1813,6 +1847,8 @@ public sealed partial class MainViewModel : ObservableObject
         CancellationToken token,
         long generation)
     {
+        var completion = _probePublications.Completion;
+        var sessionId = _pipeline.SessionId;
         try
         {
             HangProbe.Mark("vm.session.begin", pageUrl.AbsoluteUri);
@@ -1836,8 +1872,8 @@ public sealed partial class MainViewModel : ObservableObject
             var preferExternal = stats?.PreferYtdlpFirst(scope) ?? siteId != SiteIds.Douyin;
             var isAlbum = siteId == SiteIds.Douyin && pageUrl.AbsolutePath.Contains("/note/", StringComparison.OrdinalIgnoreCase);
             bool Current() => generation == _pageGeneration && !token.IsCancellationRequested;
-            bool Ready() => Current() && DetectedVideos.Any(v => DetectionReadiness.IsUsable(v.Video));
-            bool Stop() => !Current() || DetectedVideos.Any(v => v.Video.IsLive);
+            bool Ready() => Current() && _pendingProbeVideos.Values.Any(DetectionReadiness.IsUsable);
+            bool Stop() => !Current() || _pendingProbeVideos.Values.Any(v => v.IsLive);
 
             // Observe first without external processes; then race one extraction with continuing
             // browser observations. No second full round and no restarting the same singleton.
@@ -1853,28 +1889,21 @@ public sealed partial class MainViewModel : ObservableObject
                 trailingObservation: siteId == SiteIds.YouTube ? TimeSpan.Zero : null);
             if (!Current()) return;
 
-            // Seal once, after the external process has completed or been cancelled and joined.
-            // Already displayed good results never wait on this final bookkeeping step.
-            using (var sealing = CancellationTokenSource.CreateLinkedTokenSource(token))
-            {
-                sealing.CancelAfter(TimeSpan.FromSeconds(2));
-                try { await _pipeline.CompleteDiscoveryAsync(sealing.Token); }
-                catch (OperationCanceledException) when (!token.IsCancellationRequested)
-                {
-                    HangProbe.Mark("vm.completeDiscovery.budget", "late validations may still enrich this session");
-                }
-            }
+            // Join final validation before the only public result. A timeout is not completion.
+            await _pipeline.CompleteDiscoveryAsync(token);
             if (!Current()) return;
             if (siteId == SiteIds.Douyin && !Ready() &&
                 await TryBoostDouyinDetailAsync(pageUrl, token)) return;
 
             await Application.Current.Dispatcher.InvokeAsync(() =>
             {
-                if (generation != _pageGeneration)
+                if (generation != _pageGeneration || sessionId != _pipeline.SessionId || token.IsCancellationRequested)
                     return;
-                if (DetectedVideos.Count > 0)
+                var videos = PublishFinalProbe(sessionId);
+                if (videos.Length > 0)
                 {
-                    SetStatusKey("status.probeDone", DetectedVideos.Count);
+                    SetStatusKey("status.probeDone", videos.Length);
+                    completion.TrySetResult(BuildPublishedProbeResult(sessionId, videos));
                     return;
                 }
 
@@ -1887,7 +1916,8 @@ public sealed partial class MainViewModel : ObservableObject
                     SetStatusKey("status.probeEmpty");
                 else
                     SetStatusKey("status.probeEmptyExt", hint);
-            });
+                completion.TrySetResult(BuildPublishedProbeResult(sessionId, videos, hint));
+            }, System.Windows.Threading.DispatcherPriority.Background);
             HangProbe.Mark("vm.session.end", $"videos={DetectedVideos.Count}");
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -1898,11 +1928,17 @@ public sealed partial class MainViewModel : ObservableObject
         {
             HangProbe.Mark("vm.session.fail", ex.GetType().Name + " " + ex.Message);
             await Application.Current.Dispatcher.InvokeAsync(
-                () => { if (generation == _pageGeneration) SetStatusKey("status.probeFailed", ex.Message); },
+                () =>
+                {
+                    if (generation != _pageGeneration || sessionId != _pipeline.SessionId) return;
+                    SetStatusKey("status.probeFailed", ex.Message);
+                    completion.TrySetResult(BuildPublishedProbeResult(sessionId, PublishFinalProbe(sessionId), ex.Message));
+                },
                 System.Windows.Threading.DispatcherPriority.Background);
         }
         finally
         {
+            completion.TrySetCanceled(); // Retired/navigation-boost sessions cannot complete a later page.
             lock (_pageSync)
             {
                 if (generation == _pageGeneration)
@@ -2016,7 +2052,15 @@ public sealed partial class MainViewModel : ObservableObject
                         // Force WebView cookie jar for yt-dlp even when CaptureCookies is off
                         // (YouTube/Bilibili bot checks). Does not change Douyin detector code.
                         if (runExternal)
+                        {
+                            if (SiteHosts.MatchesAny(pageUrl, "youtube.com", "youtube-nocookie.com", "youtu.be"))
+                            {
+                                await tab.Host.WaitForYouTubePlayerAsync(pageUrl, token);
+                                // Ingest the matching player, including its live flag, before extraction.
+                                await tab.Host.ProbeCurrentPageAsync(token);
+                            }
                             await tab.Host.RefreshContextSnapshotAsync(token, forceCookies: true);
+                        }
                         if (!runExternal || !SiteHosts.MatchesAny(pageUrl, "youtube.com", "youtube-nocookie.com", "youtu.be"))
                         {
                             HangProbe.Mark("vm.pagePass.probe1.begin");
@@ -2033,6 +2077,8 @@ public sealed partial class MainViewModel : ObservableObject
                         HangProbe.Mark("vm.pagePass.probe1.fail", ex.GetType().Name);
                         // Cookie/DOM probe failures must not abort the whole detection session.
                         SetStatusKey("status.contextWarn", ex.Message);
+                        if (runExternal && SiteHosts.MatchesAny(pageUrl, "youtube.com", "youtube-nocookie.com", "youtu.be"))
+                            return;
                     }
                 }
 
@@ -2127,6 +2173,7 @@ public sealed partial class MainViewModel : ObservableObject
     private async Task StartNewAutoSessionAsync(Uri pageUrl)
     {
         await PauseRunningAutoSessionAsync(pauseJobs: true);
+        RefreshDownloadJobs();
 
         var now = DateTimeOffset.Now;
         var session = new AutoSession
@@ -2161,8 +2208,9 @@ public sealed partial class MainViewModel : ObservableObject
         IsAutoMode = true;
         _autoScheduler.SetActiveSession(session.Id);
         SetStatusKey("status.autoStarted", FormatAutoStartedLimits());
-        EnsureAutoStartProbe();
         await RefreshAutoQueueUiAsync();
+        _autoConsumedProbeSessionId = null;
+        ProbeCurrentPage();
         _ = RunAutoModeLoopAsync(cts.Token);
     }
 
@@ -2196,36 +2244,8 @@ public sealed partial class MainViewModel : ObservableObject
     }
 
     /// <summary>
-    /// A fresh tab has no detected card yet; without a probe the loop would wait out the
-    /// address deadline and advance blindly.
+    /// Auto start/resume issues exactly the same page-probe request as the manual Probe button.
     /// </summary>
-    private void EnsureAutoStartProbe()
-    {
-        var tab = _autoTab;
-        var page = tab?.Host.CurrentPageUrl;
-        if (tab is null || page is null || LocalLibraryHost.IsLocalLibraryHost(page))
-            return;
-        if (SiteHosts.MatchesAny(page, "youtube.com", "youtube-nocookie.com", "youtu.be"))
-        {
-            RestartDetectionForPageChange(page, tab.Title, tab.Host.CurrentMediaSessionKey, forceRestart: true);
-            return;
-        }
-        if (DetectedVideos.Any(v => VideoDownloader.Core.Detection.DetectionReadiness.IsUsable(v.Video)))
-            return;
-
-        var key = tab.Host.CurrentMediaSessionKey;
-        bool tracking;
-        lock (_pageSync)
-            tracking = _detectionRunning &&
-                       string.Equals(_currentPageIdentity,
-                           BuildPageIdentity(EnrichPageUrlWithContentId(page, key), key),
-                           StringComparison.Ordinal);
-        if (tracking)
-            return;
-
-        _feedDisplayState.BeginSession();
-        RestartDetectionForPageChange(page, tab.Title, key, forceRestart: true);
-    }
 
     private string FormatAutoStartedLimits()
     {
@@ -2290,31 +2310,32 @@ public sealed partial class MainViewModel : ObservableObject
             SetStatusKey("status.autoStopped");
         await RefreshAutoQueueUiAsync();
 
-        if (!resumeDetection)
-            return;
-
-        // Auto may stop while the feed display is suspended mid-advance; the user must not be
-        // left with a permanently blank panel.
-        var tab = SelectedTab;
-        var page = tab?.Host.CurrentPageUrl;
-        if (tab is null || page is null || LocalLibraryHost.IsLocalLibraryHost(page))
-            return;
-        bool needsResume;
-        lock (_pageSync)
-            needsResume = !_detectionRunning &&
-                          (_feedDisplayState.IsSuspended || DetectedVideos.Count == 0);
-        if (!needsResume)
-            return;
-        _feedDisplayState.BeginSession();
-        RestartDetectionForPageChange(page, tab.Title, tab.Host.CurrentMediaSessionKey, forceRestart: true);
+        // Ending an automatic consumer never changes the common probe lifecycle.
     }
 
     private async Task PauseRunningAutoSessionAsync(bool pauseJobs)
     {
-        var running = await _autoSessions.GetRunningSessionAsync();
-        if (running is null)
+        // Stop chaining first so an in-flight tick cannot start another task after we pause.
+        _autoScheduler.Stop();
+        foreach (var running in await _autoSessions.GetSessionsAsync())
+        {
+            if (running.Status != AutoSessionStatus.Running)
+                continue;
+            await PauseAutoSessionCoreAsync(running.Id, pauseJobs: false, markStopped: false);
+        }
+
+        if (!pauseJobs)
             return;
-        await PauseAutoSessionCoreAsync(running.Id, pauseJobs, markStopped: false);
+
+        await _autoScheduler.PauseAllListedDownloadsAsync();
+        foreach (var running in await _autoSessions.GetSessionsAsync())
+        {
+            if (running.Status != AutoSessionStatus.Running)
+                continue;
+            running.Status = AutoSessionStatus.Paused;
+            running.UpdatedAt = DateTimeOffset.UtcNow;
+            await _autoSessions.SaveSessionAsync(running);
+        }
     }
 
     private async Task PauseAutoSessionCoreAsync(Guid sessionId, bool pauseJobs, bool markStopped)
@@ -2349,7 +2370,23 @@ public sealed partial class MainViewModel : ObservableObject
     public async Task ToggleAutoSessionAsync(Guid sessionId)
     {
         if (!IsAutoMode)
+        {
+            var downloadSession = await _autoSessions.GetSessionAsync(sessionId);
+            if (downloadSession is null) return;
+            if (downloadSession.Status == AutoSessionStatus.Running)
+            {
+                await PauseAutoSessionCoreAsync(sessionId, pauseJobs: true, markStopped: false);
+                SetStatusKey("status.autoSessionPaused", downloadSession.Name);
+            }
+            else
+            {
+                await _autoScheduler.ActivateDownloadSessionAsync(sessionId);
+                SetStatusKey("status.autoSessionResumed", downloadSession.Name);
+            }
+            RefreshDownloadJobs();
+            await RefreshAutoQueueUiAsync();
             return;
+        }
 
         var session = await _autoSessions.GetSessionAsync(sessionId);
         if (session is null || session.Status == AutoSessionStatus.Completed)
@@ -2365,6 +2402,7 @@ public sealed partial class MainViewModel : ObservableObject
             if (_autoDbSessionId == sessionId)
                 _autoDbSessionId = null;
             SetStatusKey("status.autoSessionPaused", session.Name);
+            RefreshDownloadJobs();
             await RefreshAutoQueueUiAsync();
             return;
         }
@@ -2403,8 +2441,10 @@ public sealed partial class MainViewModel : ObservableObject
         _autoCts = cts;
         _autoScheduler.SetActiveSession(sessionId);
         SetStatusKey("status.autoSessionResumed", session.Name);
-        EnsureAutoStartProbe();
+        RefreshDownloadJobs();
         await RefreshAutoQueueUiAsync();
+        _autoConsumedProbeSessionId = null;
+        ProbeCurrentPage();
         _ = RunAutoModeLoopAsync(cts.Token);
     }
 
@@ -2426,8 +2466,10 @@ public sealed partial class MainViewModel : ObservableObject
         {
             _pageGeneration++;
             _probeCts.Cancel();
+            _probePublications.Invalidate();
             _detectionRunning = false;
         }
+        _pendingProbeVideos.Clear();
         DetectedVideos.Clear();
         _videoMap.Clear();
         SelectedDetectedVideo = null;
@@ -2454,14 +2496,14 @@ public sealed partial class MainViewModel : ObservableObject
         {
             // Keep the current cards until the page confirms the switch; a rejected key must
             // not leave the panel empty.
-            await SendFeedNextCoreAsync(ct, suspendFirst: false, target: tab);
+            await SendFeedNextCoreAsync(ct, target: tab);
             if (await WaitForManualContentSwitchAsync(before, tab, ct))
                 return;
             if (!ReferenceEquals(SelectedTab, tab))
                 return;
 
             // A page can drop the first synthetic key while focus moves; retry once.
-            await SendFeedNextCoreAsync(ct, suspendFirst: false, target: tab);
+            await SendFeedNextCoreAsync(ct, target: tab);
             if (await WaitForManualContentSwitchAsync(before, tab, ct))
                 return;
             RecoverManualNextFailure(tab);
@@ -2480,7 +2522,7 @@ public sealed partial class MainViewModel : ObservableObject
         SetStatusKey("status.nextSwitchFailed");
     }
 
-    private async Task SendFeedNextCoreAsync(CancellationToken ct, bool suspendFirst = true,
+    private async Task SendFeedNextCoreAsync(CancellationToken ct,
         BrowserTabViewModel? target = null)
     {
         var tab = target ?? SelectedTab;
@@ -2489,12 +2531,6 @@ public sealed partial class MainViewModel : ObservableObject
         try
         {
             ct.ThrowIfCancellationRequested();
-            if (suspendFirst)
-                await Application.Current.Dispatcher.InvokeAsync(() =>
-                {
-                    ct.ThrowIfCancellationRequested();
-                    SuspendDetectedResults(tab);
-                });
             await tab.Host.SendFeedNextAsync(ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
@@ -2542,22 +2578,7 @@ public sealed partial class MainViewModel : ObservableObject
         if (!HasManualPlaybackChanged(before, tab))
             return false;
 
-        EnsurePlaybackDetection(tab);
         return true;
-    }
-
-    private void EnsurePlaybackDetection(BrowserTabViewModel tab)
-    {
-        if (!ReferenceEquals(SelectedTab, tab) || tab.Host.CurrentPageUrl is not { } page ||
-            LocalLibraryHost.IsLocalLibraryHost(page))
-            return;
-        var key = tab.Host.CurrentMediaSessionKey;
-        var identity = BuildPageIdentity(EnrichPageUrlWithContentId(page, key), key);
-        if (!_feedDisplayState.IsSuspended &&
-            string.Equals(_currentPageIdentity, identity, StringComparison.Ordinal) &&
-            (_detectionRunning || _pipeline.IsCompleted))
-            return;
-        RestartDetectionForPageChange(page, tab.Title, key);
     }
 
     private async Task RunAutoModeLoopAsync(CancellationToken token)
@@ -2663,41 +2684,6 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
-    private async Task<bool> IsCurrentPlaybackLiveAsync(CancellationToken token)
-    {
-        var tab = SelectedTab;
-        if (tab?.Host is null || !tab.IsInitialized)
-            return false;
-
-        try
-        {
-            if (await tab.Host.IsLivePlaybackAsync(token))
-                return true;
-        }
-        catch
-        {
-            // fall through to URL / detected-variant heuristics
-        }
-
-        var page = tab.Host.CurrentPageUrl
-                   ?? (Uri.TryCreate(AddressBar, UriKind.Absolute, out var uri) ? uri : null);
-        if (page is not null && WebView2Host.LooksLikeLivePageUrl(page))
-            return true;
-
-        // Detected ladder is only live FLV/HLS pull — treat as live card.
-        DetectedVideoViewModel? first = null;
-        await Application.Current.Dispatcher.InvokeAsync(() => first = FindAutoDownloadCandidate());
-        if (first?.Video.IsLive == true)
-            return true;
-        if (first?.Video.Variants.Any(VideoDownloader.Infrastructure.Detection.Sites.YouTube.YouTubeLiveMedia.IsLiveVariant) == true)
-            return true;
-        if (first?.Video.Variants is { Count: > 0 } variants &&
-            variants.All(v => UnifiedMediaPipeline.IsDouyinLiveStream(v.SourceUrl)))
-            return true;
-
-        return false;
-    }
-
     private Task EndAutoModeTimeoutAsync(CancellationToken token) =>
         EndAutoModeWithStatusAsync("status.autoStoppedTimeout", token);
 
@@ -2715,7 +2701,6 @@ public sealed partial class MainViewModel : ObservableObject
         if (token.IsCancellationRequested || _autoCts?.Token != token)
             return;
 
-        _autoScheduler.Stop();
         if (_autoDbSessionId is Guid sid)
         {
             var session = await _autoSessions.GetSessionAsync(sid);
@@ -2730,6 +2715,7 @@ public sealed partial class MainViewModel : ObservableObject
             }
         }
 
+        _autoScheduler.FinishProducer();
         await Application.Current.Dispatcher.InvokeAsync(() =>
         {
             if (_autoCts?.Token != token)
@@ -2754,44 +2740,35 @@ public sealed partial class MainViewModel : ObservableObject
     }
 
     /// <summary>
-    /// Waits for a detected card, persists its address into the auto-session queue, then delays
+    /// Consumes the common page probe's delivered result, persists its address, then delays
     /// five seconds before the caller advances the feed. Downloads are handled by AutoDownloadScheduler.
     /// </summary>
     private async Task<AutoProbeResult> TryAutoEnqueueUntilAsync(DateTime sessionEndUtc, CancellationToken token)
     {
-        var gate = new AutoModeAdvanceGate(_autoItemStartedAt);
         var persisted = false;
-
+        var subscription = new PublishedProbeSubscription(PublishedProbes);
         while (!token.IsCancellationRequested && DateTime.UtcNow < sessionEndUtc)
         {
-            var live = await IsCurrentPlaybackLiveAsync(token);
-            DetectedVideoViewModel? candidate = null;
-            var waitingForDetection = false;
-            var detectionEmpty = false;
-            await Application.Current.Dispatcher.InvokeAsync(() =>
+            var publication = await subscription.WaitAsync(sessionEndUtc, token);
+            if (publication is null) break;
+            if (!ReferenceEquals(PublishedProbes.Current, publication)) continue;
+            if (publication.SessionId == _autoConsumedProbeSessionId)
             {
-                token.ThrowIfCancellationRequested();
-                candidate = FindAutoDownloadCandidate();
-                // Wait out the full exclusive/external ladder before persisting or advancing.
-                // Slot pressure must not cut enrichment short (old waitingForSlot had that side effect).
-                waitingForDetection = !persisted && (_detectionRunning || !_pipeline.IsCompleted);
-                detectionEmpty = !persisted && !_detectionRunning && _pipeline.IsCompleted &&
-                                 !_feedDisplayState.IsSuspended && candidate is null;
-            });
-            if (detectionEmpty && !live)
-                return new AutoProbeResult(Queued: false, SkipLive: false, AdvanceNoAddress: true);
-            live |= candidate?.Video.IsLive == true;
-            live |= candidate?.Video.Variants.Any(VideoDownloader.Infrastructure.Detection.Sites.YouTube.YouTubeLiveMedia.IsLiveVariant) == true;
-            if (candidate?.Video.Variants is { Count: > 0 } variants &&
-                variants.All(v => UnifiedMediaPipeline.IsDouyinLiveStream(v.SourceUrl)))
-                live = true;
-
-            var reason = gate.Observe(DateTimeOffset.UtcNow, live, jobStatus: null, wasAlreadyCompleted: false,
-                waitingForSlot: false, waitingForDetection);
-            if (reason == AutoModeAdvanceReason.Live)
+                await Task.Delay(200, token);
+                continue;
+            }
+            var result = publication;
+            var candidate = result.Addresses.FirstOrDefault();
+            if (result.Videos.Any(v => v.IsLive))
+            {
+                _autoConsumedProbeSessionId = result.SessionId;
                 return new AutoProbeResult(Queued: false, SkipLive: true);
-            if (reason == AutoModeAdvanceReason.AddressTimeout)
+            }
+            if (result.Videos.Count == 0 || !IsAutoCandidateDownloadable(candidate))
+            {
+                _autoConsumedProbeSessionId = result.SessionId;
                 return new AutoProbeResult(Queued: false, SkipLive: false, AdvanceNoAddress: true);
+            }
 
             if (!persisted && IsAutoCandidateDownloadable(candidate) && _autoDbSessionId is Guid sessionId)
             {
@@ -2799,6 +2776,7 @@ public sealed partial class MainViewModel : ObservableObject
                 if (saved)
                 {
                     persisted = true;
+                    _autoConsumedProbeSessionId = result.SessionId;
                     _autoLastEnqueuedFingerprint = BuildAutoQueueFingerprint(candidate!);
                     _autoFailedFingerprint = null;
                     await DelayAfterAutoProbeAsync(token);
@@ -2808,6 +2786,7 @@ public sealed partial class MainViewModel : ObservableObject
                 var fingerprint = BuildAutoQueueFingerprint(candidate!);
                 if (IsSameAsLastAutoEnqueue(fingerprint))
                 {
+                    _autoConsumedProbeSessionId = result.SessionId;
                     // Same content already queued this session — advance after the standard delay.
                     await DelayAfterAutoProbeAsync(token);
                     return new AutoProbeResult(Queued: false, SkipLive: false, AdvanceNoAddress: true);
@@ -2816,11 +2795,6 @@ public sealed partial class MainViewModel : ObservableObject
                 _autoFailedFingerprint = fingerprint;
             }
 
-            if (!waitingForDetection)
-            {
-                var seconds = Math.Max(1, (int)Math.Ceiling((gate.AddressDeadline - DateTimeOffset.UtcNow).TotalSeconds));
-                await Application.Current.Dispatcher.InvokeAsync(() => SetStatusKey("status.autoNoAddress", seconds));
-            }
             await Task.Delay(200, token);
         }
         return new AutoProbeResult(Queued: false, SkipLive: false);
@@ -2842,7 +2816,7 @@ public sealed partial class MainViewModel : ObservableObject
     }
 
     private async Task<bool> TryPersistAutoCandidateAsync(
-        Guid sessionId, DetectedVideoViewModel current, CancellationToken token)
+        Guid sessionId, PublishedVideoAddress current, CancellationToken token)
     {
         if (token.IsCancellationRequested || _autoCts?.Token != token || !IsAutoMode)
             return false;
@@ -2856,7 +2830,7 @@ public sealed partial class MainViewModel : ObservableObject
             return false;
 
         // Pack the full probed ladder into Alternatives so slot-limited downloads keep every resolution.
-        var selected = current.SelectedVariant!.Variant;
+        var selected = current.Variant;
         var packed = MediaVariantAlternatives.WithLadder(selected, current.Video.Variants);
         var (meta, secret) = DownloadJobMapper.SerializeVariant(packed);
         var now = DateTimeOffset.UtcNow;
@@ -2883,7 +2857,7 @@ public sealed partial class MainViewModel : ObservableObject
         return saved is not null;
     }
 
-    private static string? BuildAutoQueueFingerprint(DetectedVideoViewModel item)
+    private static string? BuildAutoQueueFingerprint(PublishedVideoAddress item)
     {
         if (!string.IsNullOrWhiteSpace(item.Video.SiteContentId))
             return item.Video.SiteId + ":" + item.Video.SiteContentId.Trim();
@@ -2899,18 +2873,8 @@ public sealed partial class MainViewModel : ObservableObject
         while (!token.IsCancellationRequested && DateTime.UtcNow < sessionEndUtc && DateTimeOffset.UtcNow < deadline)
         {
             var now = CaptureAutoPlaybackIdentity();
-            // Read the current player, not the previous detected-card list. Live previews do not
-            // necessarily create a new VOD session key, so waiting only for that key hides live checks.
-            var currentIsLive = SelectedTab?.Host is { } currentHost &&
-                await currentHost.IsLivePlaybackAsync(token);
-            if (AutoModeAdvanceGate.HasPlaybackChanged(beforeIdentity, now, previousWasLive, currentIsLive))
+            if (AutoModeAdvanceGate.HasPlaybackChanged(beforeIdentity, now, false, false))
             {
-                await Application.Current.Dispatcher.InvokeAsync(() =>
-                {
-                    token.ThrowIfCancellationRequested();
-                    if (_autoTab is { } tab)
-                        EnsurePlaybackDetection(tab);
-                });
                 _autoItemStartedAt = DateTimeOffset.UtcNow;
                 return true;
             }
@@ -2933,7 +2897,7 @@ public sealed partial class MainViewModel : ObservableObject
         var snapshot = CaptureManualPlaybackSnapshot(tab);
         return snapshot.Identity ?? snapshot.PageUrl;
     }
-    private static string? BuildAutoContentFingerprint(DetectedVideoViewModel item) =>
+    private static string? BuildAutoContentFingerprint(PublishedVideoAddress item) =>
         BuildAutoContentFingerprint(item.Video.PageUrl.AbsoluteUri, item.Video.DisplayTitle);
 
     private static string? BuildAutoContentFingerprint(string? pageUrl, string? caption)
@@ -2960,21 +2924,8 @@ public sealed partial class MainViewModel : ObservableObject
         !string.IsNullOrEmpty(_autoLastEnqueuedFingerprint) &&
         string.Equals(fingerprint, _autoLastEnqueuedFingerprint, StringComparison.Ordinal);
 
-    private DetectedVideoViewModel? FindAutoDownloadCandidate()
-    {
-        if (_feedDisplayState.IsSuspended)
-            return null;
-        // All sites: wait for the probe session to finish so progressive yt-dlp ladders are complete
-        // before auto persists / advances (especially when download slots are already saturated).
-        if (_detectionRunning || !_pipeline.IsCompleted)
-            return null;
-        return DetectedVideos.FirstOrDefault(v =>
-            v.Video.SessionId == _pipeline.SessionId && IsVideoRelevantToCurrentPage(v.Video));
-    }
-
-    private static bool IsAutoCandidateDownloadable(DetectedVideoViewModel? item) =>
-        item is { IsDrm: false, Video.IsLive: false, SelectedVariant.Variant: not null } &&
-        !UnifiedMediaPipeline.IsDouyinLiveStream(item.SelectedVariant.Variant.SourceUrl);
+    private static bool IsAutoCandidateDownloadable(PublishedVideoAddress? item) =>
+        item is { Video.IsDrmProtected: false, Video.IsLive: false, Variant: not null };
 
     public async Task StartDownloadAsync(DetectedVideo video, MediaVariant variant) =>
         await TryStartDownloadQuietAsync(video, variant, showErrors: true);
@@ -3035,7 +2986,7 @@ public sealed partial class MainViewModel : ObservableObject
     }
 
     private bool CanDownloadSelectedVideo =>
-        SelectedDetectedVideo is { IsDrm: false, SelectedVariant: not null };
+        CanProbeCurrentPage && SelectedDetectedVideo is { IsDrm: false, SelectedVariant: not null };
 
     partial void OnSelectedDetectedVideoChanged(DetectedVideoViewModel? oldValue, DetectedVideoViewModel? newValue)
     {
@@ -3084,6 +3035,8 @@ public sealed partial class MainViewModel : ObservableObject
             RestoreQueueSelection?.Invoke(_selectedDownloadJobIds);
     }
 
+    private string? _autoJobStateSignature;
+
     public void TickDownloads()
     {
         var jobs = _downloadEngine.GetActiveJobs();
@@ -3092,15 +3045,23 @@ public sealed partial class MainViewModel : ObservableObject
         if (orderChanged)
         {
             RefreshDownloadJobs();
-            if (IsAutoMode)
+            if (ShowAutoTaskGroups)
                 _ = RefreshAutoQueueUiAsync();
             return;
         }
 
         foreach (var job in DownloadJobs)
             job.Refresh();
-        if (IsAutoMode)
+        if (ShowAutoTaskGroups)
+        {
             RefreshAutoItemProgressInPlace(jobs);
+            var signature = string.Join(";", jobs.Select(j => $"{j.Id}:{j.Status}"));
+            if (_autoJobStateSignature != signature)
+            {
+                _autoJobStateSignature = signature;
+                _ = RefreshAutoQueueUiAsync();
+            }
+        }
         NotifyQueueCommands();
     }
 
@@ -3117,11 +3078,12 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanToggleQueueGrouping))]
     private void ToggleQueueGrouping()
     {
-        if (IsAutoMode)
-            return;
-        _queueGrouped = !_queueGrouped;
+        _queueGroupingMode = (_queueGroupingMode + 1) % 3;
+        _queueGrouped = _queueGroupingMode != 0;
+        _options.Ui.QueueGroupingMode = _queueGroupingMode;
         _options.Ui.QueueGrouped = _queueGrouped;
         _settingsStore.Save(_options);
+        OnPropertyChanged(nameof(QueuePanelHeader));
         OnPropertyChanged(nameof(IsQueueGrouped));
         OnPropertyChanged(nameof(QueueGroupToggleLabel));
         RebuildQueueRows();
@@ -3132,17 +3094,22 @@ public sealed partial class MainViewModel : ObservableObject
 
     private async Task RefreshAutoQueueUiAsync()
     {
-        if (!IsAutoMode)
+        if (!ShowAutoTaskGroups)
             return;
         try
         {
             var sessions = await _autoSessions.GetSessionsAsync();
             var jobs = _downloadEngine.GetActiveJobs().ToDictionary(j => j.Id);
             var rows = new List<object>();
+            var sessionJobIds = new HashSet<Guid>();
             foreach (var session in sessions)
             {
                 var items = await _autoSessions.GetItemsAsync(session.Id);
-                var completed = items.Count(i => i.Status == AutoQueueItemStatus.Completed);
+                foreach (var item in items)
+                    if (item.DownloadJobId is Guid jobId) sessionJobIds.Add(jobId);
+                var completed = items.Count(i => i.DownloadJobId is Guid id && jobs.TryGetValue(id, out var job)
+                    ? job.Status == DownloadStatus.Completed
+                    : i.Status == AutoQueueItemStatus.Completed);
                 var expanded = !_collapsedAutoSessions.Contains(session.Id);
                 rows.Add(new AutoSessionRowViewModel(session, items.Count, completed, expanded, _loc));
                 if (!expanded)
@@ -3156,11 +3123,58 @@ public sealed partial class MainViewModel : ObservableObject
 
             await Application.Current.Dispatcher.InvokeAsync(() =>
             {
-                if (!IsAutoMode)
+                if (!ShowAutoTaskGroups)
                     return;
-                QueueRows.Clear();
-                foreach (var row in rows)
-                    QueueRows.Add(row);
+                foreach (var job in DownloadJobs.Where(j => j.Job.Status != DownloadStatus.Completed && !sessionJobIds.Contains(j.Job.Id)))
+                {
+                    job.IsGrouped = false;
+                    rows.Add(job);
+                }
+
+                var keepSessionId = _selectedAutoSession?.SessionId;
+                var keepItemId = _selectedAutoItem?.ItemId;
+                var keepJobIds = _selectedDownloadJobIds.ToList();
+                QueueSelectionSuspended = true;
+                try
+                {
+                    QueueRows.Clear();
+                    foreach (var row in rows)
+                        QueueRows.Add(row);
+                }
+                finally
+                {
+                    QueueSelectionSuspended = false;
+                }
+
+                object? selected = null;
+                if (keepItemId is Guid itemId)
+                    selected = rows.OfType<AutoQueueItemRowViewModel>().FirstOrDefault(r => r.ItemId == itemId);
+                else if (keepSessionId is Guid sessionId)
+                    selected = rows.OfType<AutoSessionRowViewModel>().FirstOrDefault(r => r.SessionId == sessionId);
+
+                if (selected is AutoQueueItemRowViewModel itemRow)
+                {
+                    _selectedAutoItem = itemRow;
+                    _selectedAutoSession = null;
+                }
+                else if (selected is AutoSessionRowViewModel sessionRow)
+                {
+                    _selectedAutoSession = sessionRow;
+                    _selectedAutoItem = null;
+                }
+                else if (keepSessionId is not null || keepItemId is not null)
+                {
+                    _selectedAutoSession = null;
+                    _selectedAutoItem = null;
+                }
+
+                NotifyQueueCommands();
+                if (selected is not null)
+                    RestoreAutoRowSelection?.Invoke(selected);
+                else if (keepJobIds.Count > 0)
+                    RestoreQueueSelection?.Invoke(keepJobIds);
+                else if (keepSessionId is not null || keepItemId is not null)
+                    RestoreAutoRowSelection?.Invoke(null);
             });
         }
         catch
@@ -3190,7 +3204,7 @@ public sealed partial class MainViewModel : ObservableObject
 
     private void RebuildQueueRows()
     {
-        if (IsAutoMode)
+        if (ShowAutoTaskGroups)
         {
             _ = RefreshAutoQueueUiAsync();
             return;
@@ -3261,7 +3275,7 @@ public sealed partial class MainViewModel : ObservableObject
     {
         if (_selectedAutoSession is { } session)
         {
-            if (session.Session.Status is AutoSessionStatus.Paused or AutoSessionStatus.Stopped)
+            if (session.Session.Status is AutoSessionStatus.Paused or AutoSessionStatus.Stopped or AutoSessionStatus.Failed)
                 await ToggleAutoSessionAsync(session.SessionId);
             return;
         }
@@ -3320,25 +3334,108 @@ public sealed partial class MainViewModel : ObservableObject
         RefreshDownloadJobs();
     }
 
+    /// <summary>
+    /// Drops the task. Finished videos stay in the library. Unfinished downloads and their files are removed.
+    /// </summary>
+    private async Task RemoveAutoSessionAsync(AutoSessionRowViewModel session)
+    {
+        if (_autoDbSessionId == session.SessionId)
+            await StopAutoModeAsync(announce: false);
+        else if (session.Session.Status == AutoSessionStatus.Running ||
+                 _autoScheduler.ActiveSessionId == session.SessionId)
+        {
+            await PauseAutoSessionCoreAsync(session.SessionId, pauseJobs: false, markStopped: true);
+            if (_autoScheduler.ActiveSessionId == session.SessionId)
+                _autoScheduler.Stop();
+        }
+
+        var jobs = _downloadEngine.GetActiveJobs().ToDictionary(j => j.Id);
+        foreach (var item in await _autoSessions.GetItemsAsync(session.SessionId))
+        {
+            if (IsCompletedAutoItem(item, jobs))
+                continue;
+            if (item.DownloadJobId is Guid jobId && jobs.TryGetValue(jobId, out var job))
+                await DiscardIncompleteAutoDownloadAsync(job);
+        }
+
+        await _autoSessions.DeleteSessionAsync(session.SessionId);
+        if (_selectedAutoSession?.SessionId == session.SessionId)
+            _selectedAutoSession = null;
+        SetStatusKey("status.autoSessionRemoved", session.Name);
+        RefreshDownloadJobs();
+        await RefreshAutoQueueUiAsync();
+    }
+
+    private static bool IsCompletedAutoItem(AutoQueueItem item, IReadOnlyDictionary<Guid, DownloadJob> jobs)
+    {
+        if (item.DownloadJobId is Guid jobId && jobs.TryGetValue(jobId, out var job))
+            return job.Status == DownloadStatus.Completed;
+        return item.Status == AutoQueueItemStatus.Completed;
+    }
+
+    private async Task DiscardIncompleteAutoDownloadAsync(DownloadJob job)
+    {
+        if (job.Status is DownloadStatus.Completed or DownloadStatus.Removed)
+            return;
+
+        var target = job.TargetPath;
+        var jobId = job.Id;
+        if (job.Status is DownloadStatus.Failed or DownloadStatus.Cancelled)
+            await _downloadEngine.RemoveAsync(jobId, deleteFile: false);
+        else
+            await _downloadEngine.CancelAsync(jobId);
+
+        DeleteIncompleteDownloadFiles(target, jobId);
+    }
+
+    private void DeleteIncompleteDownloadFiles(string? target, Guid jobId)
+    {
+        if (string.IsNullOrWhiteSpace(target))
+            return;
+
+        var keptByCompletedJob = _downloadEngine.GetActiveJobs().Any(j =>
+            j.Id != jobId &&
+            j.Status == DownloadStatus.Completed &&
+            string.Equals(j.TargetPath, target, StringComparison.OrdinalIgnoreCase));
+        if (!keptByCompletedJob)
+            TryDeleteDownloadFile(target);
+
+        TryDeleteDownloadFile(target + ".part");
+        var saveDir = Path.GetDirectoryName(target);
+        if (string.IsNullOrEmpty(saveDir))
+            return;
+
+        var partsDir = Path.Combine(saveDir, ".parts", jobId.ToString("N"));
+        try
+        {
+            if (Directory.Exists(partsDir))
+                Directory.Delete(partsDir, recursive: true);
+        }
+        catch
+        {
+            // A file can still be locked by a closing writer.
+        }
+    }
+
+    private static void TryDeleteDownloadFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+        catch
+        {
+            // ignore locked or already-removed files
+        }
+    }
+
     [RelayCommand(CanExecute = nameof(CanRemoveSelected))]
     private async Task RemoveSelectedAsync()
     {
         if (_selectedAutoSession is { } session)
         {
-            if (session.Session.Status == AutoSessionStatus.Running)
-                await PauseAutoSessionCoreAsync(session.SessionId, pauseJobs: true, markStopped: true);
-            if (_autoDbSessionId == session.SessionId)
-            {
-                try { _autoCts?.Cancel(); } catch { /* ignore */ }
-                _autoCts?.Dispose();
-                _autoCts = null;
-                _autoDbSessionId = null;
-                _autoScheduler.Stop();
-            }
-            await _autoSessions.DeleteSessionAsync(session.SessionId);
-            _selectedAutoSession = null;
-            SetStatusKey("status.autoSessionRemoved", session.Name);
-            await RefreshAutoQueueUiAsync();
+            await RemoveAutoSessionAsync(session);
             return;
         }
 
@@ -3629,10 +3726,17 @@ public sealed partial class MainViewModel : ObservableObject
     /// <summary>Refresh queue command enablement after right-click selection changes.</summary>
     public void NotifyQueueCommandsPublic() => NotifyQueueCommands();
 
+    private static void DispatchProbePublication(Action apply)
+    {
+        var dispatcher = Application.Current.Dispatcher;
+        if (dispatcher.CheckAccess()) apply();
+        else _ = dispatcher.InvokeAsync(apply, System.Windows.Threading.DispatcherPriority.Background);
+    }
+
     private void OnVideoDetected(object? sender, DetectedVideo video)
     {
         var displayEpoch = _feedDisplayState.Epoch;
-        _ = Application.Current.Dispatcher.InvokeAsync(() =>
+        DispatchProbePublication(() =>
         {
             if (!_feedDisplayState.CanPublish(displayEpoch, video.SessionId, _pipeline.SessionId)) return;
             if (!IsVideoRelevantToCurrentPage(video))
@@ -3642,14 +3746,14 @@ public sealed partial class MainViewModel : ObservableObject
             if (video.Variants.Count == 0 && !video.IsLive)
                 return;
 
-            UpsertDetectedVideo(video, focus: SelectedDetectedVideo is null);
-        }, System.Windows.Threading.DispatcherPriority.Background);
+            CollectProbeVideo(video);
+        });
     }
 
     private void OnPageProbed(object? sender, IReadOnlyList<DetectedVideo> videos)
     {
         var displayEpoch = _feedDisplayState.Epoch;
-        _ = Application.Current.Dispatcher.InvokeAsync(() =>
+        DispatchProbePublication(() =>
         {
             var relevant = videos
                 .Where(v => v.Variants.Count > 0 || v.IsLive)
@@ -3659,33 +3763,50 @@ public sealed partial class MainViewModel : ObservableObject
             if (relevant.Length == 0)
                 return;
 
+            if (!_detectionRunning) return;
             var pageKey = BuildPageIdentity(relevant[0].PageUrl);
             var keepIds = relevant.Select(v => v.VideoId).ToHashSet();
-
-            // Drop stale cards for this page that are no longer in the final probe set.
-            for (var i = DetectedVideos.Count - 1; i >= 0; i--)
-            {
-                var item = DetectedVideos[i];
-                if (!string.Equals(BuildPageIdentity(item.Video.PageUrl), pageKey, StringComparison.OrdinalIgnoreCase))
-                    continue;
-                if (keepIds.Contains(item.Video.VideoId))
-                    continue;
-
-                DetectedVideos.RemoveAt(i);
-                _videoMap.Remove(item.Video.VideoId);
-                if (ReferenceEquals(SelectedDetectedVideo, item))
-                    SelectedDetectedVideo = null;
-            }
-
+            foreach (var prior in _pendingProbeVideos.Values.Where(v =>
+                string.Equals(BuildPageIdentity(v.PageUrl), pageKey, StringComparison.OrdinalIgnoreCase) &&
+                !keepIds.Contains(v.VideoId)).ToArray())
+                _pendingProbeVideos.Remove(prior.VideoId);
             foreach (var video in relevant)
-                UpsertDetectedVideo(video, focus: false);
+                CollectProbeVideo(video);
+        });
+    }
 
-            if (SelectedDetectedVideo is null && DetectedVideos.Count > 0)
-                FocusLargestVideoVariant(DetectedVideos[0]);
+    // The probe owns all intermediate observations. Both consumers see only this final batch.
+    private void CollectProbeVideo(DetectedVideo video)
+    {
+        if (!_detectionRunning) return;
+        if (_pendingProbeVideos.TryGetValue(video.VideoId, out var previous) &&
+            (IsEquivalentDetection(video, previous) || IsWeakerDetection(video, previous))) return;
+        _pendingProbeVideos[video.VideoId] = video;
+    }
 
-            _forceReplaceResults = false;
-            SetStatusKey(_pipeline.IsCompleted ? "status.probeDone" : "status.probeFound", DetectedVideos.Count);
-        }, System.Windows.Threading.DispatcherPriority.Background);
+    private DetectedVideo[] PublishFinalProbe(Guid sessionId)
+    {
+        var videos = _pendingProbeVideos.Values
+            .Where(v => v.SessionId == sessionId && IsVideoRelevantToCurrentPage(v)).ToArray();
+        _detectionRunning = false;
+        foreach (var video in videos)
+            UpsertDetectedVideo(video, focus: false);
+        if (SelectedDetectedVideo is null && DetectedVideos.Count > 0)
+            FocusLargestVideoVariant(DetectedVideos[0]);
+        _forceReplaceResults = false;
+        return DetectedVideos.Select(v => v.Video).ToArray();
+    }
+
+    private PageProbeResult BuildPublishedProbeResult(Guid sessionId, DetectedVideo[] videos, string? error = null)
+    {
+        var addresses = videos.Select(video =>
+            _videoMap.TryGetValue(video.VideoId, out var card) && card.SelectedVariant is { } selected
+                ? new PublishedVideoAddress(video, selected.Variant) : null)
+            .OfType<PublishedVideoAddress>().ToArray();
+        return new(sessionId, Array.AsReadOnly(videos), error)
+        {
+            Addresses = Array.AsReadOnly(addresses)
+        };
     }
 
     private void UpsertDetectedVideo(DetectedVideo video, bool focus)

@@ -407,7 +407,10 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
                 identity.GetString() is { Length: > 0 } key &&
                 root.TryGetProperty("href", out var href) &&
                 Uri.TryCreate(href.GetString(), UriKind.Absolute, out var observedPage) &&
-                AcceptsObservedPageUrl(CurrentPageUrl, observedPage))
+                AcceptsObservedPageUrl(CurrentPageUrl, observedPage) &&
+                (!SiteHosts.MatchesAny(observedPage, "youtube.com", "youtube-nocookie.com", "youtu.be") ||
+                 !Uri.TryCreate(_core?.Source, UriKind.Absolute, out var sourcePage) ||
+                 IsSameYouTubeWatchVideo(sourcePage, observedPage)))
             {
                 double? durationSec = null;
                 if (root.TryGetProperty("durationSec", out var durationEl) &&
@@ -702,6 +705,37 @@ public sealed class WebView2Host : IAsyncDisposable, IDisposable
 
     public Dictionary<string, string> GetCurrentRequestHeaders() =>
         new(_currentHeaders, StringComparer.OrdinalIgnoreCase);
+
+    // Shared by every probing entry point. A SPA URL changes before its player response;
+    // do not snapshot cookies or spend the session's only extraction on the old player.
+    public async Task WaitForYouTubePlayerAsync(Uri expectedPage, CancellationToken ct)
+    {
+        if (SiteNetworkHelper.ExtractYouTubeVideoId(expectedPage) is null) return;
+        var session = _pipeline.SessionId;
+        while (_core is not null && session == _pipeline.SessionId &&
+               CurrentPageUrl is { } current && IsSameYouTubeWatchVideo(expectedPage, current))
+        {
+            ct.ThrowIfCancellationRequested();
+            var json = await _core.ExecuteScriptAsync("""
+                (() => {
+                  const id = new URL(location.href).searchParams.get('v')
+                    || location.pathname.match(/\/(?:shorts|embed)\/([^/?#]+)/)?.[1]
+                    || (location.hostname==='youtu.be' ? location.pathname.slice(1) : null);
+                  let response;
+                  try { response=document.getElementById('movie_player')?.getPlayerResponse?.(); } catch {}
+                  if(response?.videoDetails?.videoId!==id) response=window.ytInitialPlayerResponse;
+                  return !!id && response?.videoDetails?.videoId===id;
+                })();
+                """).WaitAsync(ct);
+            if (json == "true")
+            {
+                Diagnostics.HangProbe.Mark("host.youtube.playerReady", expectedPage.AbsoluteUri);
+                return;
+            }
+            await Task.Delay(200, ct);
+        }
+        throw new OperationCanceledException("YouTube player changed while awaiting readiness", ct);
+    }
 
     public async Task ProbeCurrentPageAsync(CancellationToken ct = default)
     {

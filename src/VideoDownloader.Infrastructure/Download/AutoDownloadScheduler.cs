@@ -1,3 +1,4 @@
+﻿using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using VideoDownloader.Core.Contracts;
 using VideoDownloader.Core.Errors;
@@ -20,6 +21,12 @@ public sealed class AutoDownloadScheduler : IDisposable
     private CancellationTokenSource? _cts;
     private Task? _loop;
     private Guid? _activeSessionId;
+    private Guid? _producerSessionId;
+    private bool _sequentialEnabled;
+    private readonly SemaphoreSlim _tickGate = new(1, 1);
+    private readonly ConcurrentDictionary<Guid, byte> _visitedSessions = new();
+    private readonly ConcurrentDictionary<Guid, byte> _resumeAttempts = new();
+    private readonly ConcurrentDictionary<Guid, byte> _retryItems = new();
 
     public AutoDownloadScheduler(
         IAutoSessionRepository sessions,
@@ -31,9 +38,52 @@ public sealed class AutoDownloadScheduler : IDisposable
         _logger = logger;
     }
 
+    public event EventHandler? StateChanged;
+
     public Guid? ActiveSessionId
     {
         get { lock (_gate) return _activeSessionId; }
+    }
+
+    /// <summary>Keep status reconciliation alive even without an active producer session.</summary>
+    public void Start()
+    {
+        lock (_gate)
+        {
+            if (_loop is { IsCompleted: false }) return;
+            _cts?.Dispose();
+            var cts = new CancellationTokenSource();
+            _cts = cts;
+            _loop = Task.Run(() => RunAsync(cts.Token));
+        }
+    }
+
+    /// <summary>Startup runs once after engine recovery; it never restarts browser feed collection.</summary>
+    public async Task InitializeAsync(CancellationToken token = default)
+    {
+        await _tickGate.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            // Completed videos leave the task. Unfinished tasks stay, with their remaining items.
+            foreach (var session in await _sessions.GetSessionsAsync(token).ConfigureAwait(false))
+                await SyncItemStatusesAsync(session.Id, token).ConfigureAwait(false);
+            await _sessions.DeleteCompletedItemsAsync(token).ConfigureAwait(false);
+            await _sessions.DeleteEmptySessionsAsync(token).ConfigureAwait(false);
+            lock (_gate) _sequentialEnabled = true;
+        }
+        finally { _tickGate.Release(); }
+        Start();
+    }
+
+    /// <summary>Pauses every in-flight download in the queue. Holds the scheduler tick so it cannot resume them mid-pause.</summary>
+    public async Task PauseAllListedDownloadsAsync(CancellationToken token = default)
+    {
+        await _tickGate.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            await PauseListedDownloadsCoreAsync(token).ConfigureAwait(false);
+        }
+        finally { _tickGate.Release(); }
     }
 
     public void SetActiveSession(Guid? sessionId)
@@ -41,22 +91,83 @@ public sealed class AutoDownloadScheduler : IDisposable
         lock (_gate)
         {
             _activeSessionId = sessionId;
-            if (sessionId is null)
+            _producerSessionId = sessionId;
+            _sequentialEnabled = sessionId is not null;
+            _resumeAttempts.Clear();
+            _retryItems.Clear();
+            if (sessionId is Guid id) _visitedSessions.TryRemove(id, out _);
+        }
+        Start();
+    }
+
+    // An explicit user stop suspends chaining, while status observation remains alive.
+    public void Stop() => SetActiveSession(null);
+
+    public void FinishProducer()
+    {
+        lock (_gate)
+        {
+            _producerSessionId = null;
+            _sequentialEnabled = true;
+        }
+        Start();
+    }
+
+    public async Task ActivateDownloadSessionAsync(Guid sessionId, CancellationToken token = default)
+    {
+        await _tickGate.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            var session = await _sessions.GetSessionAsync(sessionId, token).ConfigureAwait(false);
+            if (session is null) return;
+            await PauseOtherAutoWorkAsync(sessionId, token).ConfigureAwait(false);
+            lock (_gate)
             {
-                try { _cts?.Cancel(); } catch { /* ignore */ }
-                return;
+                _activeSessionId = sessionId;
+                _producerSessionId = null;
+                _sequentialEnabled = true;
+                _resumeAttempts.Clear();
+                _retryItems.Clear();
+                _visitedSessions.TryRemove(sessionId, out _);
             }
+            session.Status = AutoSessionStatus.Running;
+            session.UpdatedAt = DateTimeOffset.UtcNow;
+            session.EndedAt = null;
+            await _sessions.SaveSessionAsync(session, token).ConfigureAwait(false);
+            StateChanged?.Invoke(this, EventArgs.Empty);
+        }
+        finally { _tickGate.Release(); }
+        Start();
+    }
 
-            if (_loop is { IsCompleted: false })
-                return;
-
-            _cts?.Dispose();
-            _cts = new CancellationTokenSource();
-            _loop = Task.Run(() => RunAsync(_cts.Token));
+    /// <summary>One auto task runs. Starting it pauses every other task and every in-flight download.</summary>
+    private async Task PauseOtherAutoWorkAsync(Guid sessionToRun, CancellationToken token)
+    {
+        await PauseListedDownloadsCoreAsync(token).ConfigureAwait(false);
+        foreach (var other in await _sessions.GetSessionsAsync(token).ConfigureAwait(false))
+        {
+            if (other.Id == sessionToRun || other.Status != AutoSessionStatus.Running)
+                continue;
+            other.Status = AutoSessionStatus.Paused;
+            other.UpdatedAt = DateTimeOffset.UtcNow;
+            await _sessions.SaveSessionAsync(other, token).ConfigureAwait(false);
         }
     }
 
-    public void Stop() => SetActiveSession(null);
+    private async Task PauseListedDownloadsCoreAsync(CancellationToken token)
+    {
+        foreach (var job in _engine.GetActiveJobs())
+        {
+            if (job.Status != DownloadStatus.Downloading)
+                continue;
+            try { await _engine.PauseAsync(job.Id, token).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Failed to pause listed download {JobId}", job.Id);
+            }
+        }
+    }
 
     private async Task RunAsync(CancellationToken token)
     {
@@ -64,14 +175,24 @@ public sealed class AutoDownloadScheduler : IDisposable
         {
             try
             {
-                Guid? sessionId;
-                lock (_gate) sessionId = _activeSessionId;
-                if (sessionId is Guid sid)
+                await _tickGate.WaitAsync(token).ConfigureAwait(false);
+                try
                 {
-                    await ReclaimStrandedAsync(sid, token).ConfigureAwait(false);
-                    await SyncItemStatusesAsync(sid, token).ConfigureAwait(false);
-                    await TryEnqueueNextAsync(sid, token).ConfigureAwait(false);
+                    var changed = false;
+                    foreach (var session in await _sessions.GetSessionsAsync(token).ConfigureAwait(false))
+                    {
+                        changed |= await SyncItemStatusesAsync(session.Id, token).ConfigureAwait(false);
+                        if (await _sessions.TryDeleteCompletedSessionAsync(session.Id, token).ConfigureAwait(false))
+                        {
+                            changed = true;
+                            _logger.LogInformation("Removed completed auto session {SessionId}; downloaded videos retained", session.Id);
+                        }
+                    }
+                    if (changed) StateChanged?.Invoke(this, EventArgs.Empty);
+    
+                    await ProcessDownloadQueueAsync(token).ConfigureAwait(false);
                 }
+                finally { _tickGate.Release(); }
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
@@ -87,6 +208,99 @@ public sealed class AutoDownloadScheduler : IDisposable
         }
     }
 
+    private async Task ProcessDownloadQueueAsync(CancellationToken token)
+    {
+        Guid? sid;
+        lock (_gate)
+        {
+            if (!_sequentialEnabled) return;
+            sid = _activeSessionId;
+        }
+        if (sid is null)
+        {
+            foreach (var candidate in await _sessions.GetSessionsAsync(token).ConfigureAwait(false))
+            {
+                if (_visitedSessions.ContainsKey(candidate.Id)) continue;
+                var candidateItems = await _sessions.GetItemsAsync(candidate.Id, token).ConfigureAwait(false);
+                if (!candidateItems.Any(i => i.Status is AutoQueueItemStatus.Queued or AutoQueueItemStatus.Enqueued
+                        or AutoQueueItemStatus.Downloading or AutoQueueItemStatus.Failed)) continue;
+                await PauseOtherAutoWorkAsync(candidate.Id, token).ConfigureAwait(false);
+                lock (_gate)
+                {
+                    if (!_sequentialEnabled || _activeSessionId is not null) return;
+                    _activeSessionId = sid = candidate.Id;
+                    _resumeAttempts.Clear();
+                    _retryItems.Clear();
+                }
+                candidate.Status = AutoSessionStatus.Running;
+                candidate.UpdatedAt = DateTimeOffset.UtcNow;
+                await _sessions.SaveSessionAsync(candidate, token).ConfigureAwait(false);
+                _logger.LogInformation("Auto download queue activated session {SessionId}", candidate.Id);
+                StateChanged?.Invoke(this, EventArgs.Empty);
+                break;
+            }
+        }
+        if (sid is not Guid id) return;
+        var session = await _sessions.GetSessionAsync(id, token).ConfigureAwait(false);
+        if (session is null)
+        {
+            lock (_gate) { if (_activeSessionId == id) _activeSessionId = null; }
+            return;
+        }
+        lock (_gate) { if (!_sequentialEnabled || _activeSessionId != id) return; }
+        if (session.Status != AutoSessionStatus.Running)
+        {
+            session.Status = AutoSessionStatus.Running;
+            session.UpdatedAt = DateTimeOffset.UtcNow;
+            await _sessions.SaveSessionAsync(session, token).ConfigureAwait(false);
+        }
+        var startedWork = false;
+        await ReclaimStrandedAsync(id, token).ConfigureAwait(false);
+        var items = await _sessions.GetItemsAsync(id, token).ConfigureAwait(false);
+        var jobs = _engine.GetActiveJobs().ToDictionary(j => j.Id);
+        foreach (var item in items.OrderBy(i => i.Seq))
+        {
+            lock (_gate) { if (!_sequentialEnabled || _activeSessionId != id) return; }
+            if (_engine.FreeDownloadSlots <= 0) break;
+            if (item.DownloadJobId is Guid jobId && jobs.TryGetValue(jobId, out var job))
+            {
+                if (job.Status is DownloadStatus.Pending or DownloadStatus.Paused or DownloadStatus.Failed &&
+                    _resumeAttempts.TryAdd(jobId, 0))
+                {
+                    await _engine.ResumeAsync(jobId, token).ConfigureAwait(false);
+                    startedWork = true;
+                }
+            }
+            else if (item.Status is AutoQueueItemStatus.Enqueued or AutoQueueItemStatus.Downloading ||
+                     item.Status == AutoQueueItemStatus.Failed && _retryItems.TryAdd(item.Id, 0))
+            {
+                item.DownloadJobId = null;
+                item.Status = AutoQueueItemStatus.Queued;
+                item.ErrorCode = null;
+                await _sessions.SaveItemAsync(item, token).ConfigureAwait(false);
+            }
+        }
+        lock (_gate) { if (!_sequentialEnabled || _activeSessionId != id) return; }
+        startedWork |= await TryEnqueueNextAsync(id, token).ConfigureAwait(false);
+        if (startedWork) return;
+        // Re-read engine state after starting work. Never advance while an item is queued or in flight.
+        await SyncItemStatusesAsync(id, token).ConfigureAwait(false);
+        items = await _sessions.GetItemsAsync(id, token).ConfigureAwait(false);
+        lock (_gate) { if (_producerSessionId == id || !_sequentialEnabled || _activeSessionId != id) return; }
+        if (items.Any(i => i.Status is AutoQueueItemStatus.Queued or AutoQueueItemStatus.Enqueued or AutoQueueItemStatus.Downloading)) return;
+        if (items.Any(i => i.Status == AutoQueueItemStatus.Failed &&
+            (i.DownloadJobId is Guid jobId && jobs.ContainsKey(jobId)
+                ? !_resumeAttempts.ContainsKey(jobId) : !_retryItems.ContainsKey(i.Id)))) return;
+        session.Status = items.All(i => i.Status == AutoQueueItemStatus.Completed)
+            ? AutoSessionStatus.Completed : AutoSessionStatus.Failed;
+        session.EndedAt = session.UpdatedAt = DateTimeOffset.UtcNow;
+        await _sessions.SaveSessionAsync(session, token).ConfigureAwait(false);
+        _visitedSessions.TryAdd(id, 0);
+        await _sessions.TryDeleteCompletedSessionAsync(id, token).ConfigureAwait(false);
+        lock (_gate) { if (_activeSessionId == id) _activeSessionId = null; }
+        StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
     private async Task ReclaimStrandedAsync(Guid sessionId, CancellationToken token)
     {
         var items = await _sessions.GetItemsAsync(sessionId, token).ConfigureAwait(false);
@@ -98,18 +312,18 @@ public sealed class AutoDownloadScheduler : IDisposable
         }
     }
 
-    private async Task TryEnqueueNextAsync(Guid sessionId, CancellationToken token)
+    private async Task<bool> TryEnqueueNextAsync(Guid sessionId, CancellationToken token)
     {
         if (_engine.FreeDownloadSlots <= 0)
-            return;
+            return false;
 
         var session = await _sessions.GetSessionAsync(sessionId, token).ConfigureAwait(false);
         if (session is null || session.Status != AutoSessionStatus.Running)
-            return;
+            return false;
 
         var item = await _sessions.TryClaimNextQueuedAsync(sessionId, token).ConfigureAwait(false);
         if (item is null)
-            return;
+            return false;
 
         try
         {
@@ -153,12 +367,14 @@ public sealed class AutoDownloadScheduler : IDisposable
             item.ErrorCode = ex is DownloadException de ? de.ErrorCode : "auto_enqueue_failed";
             await _sessions.SaveItemAsync(item, token).ConfigureAwait(false);
         }
+        return true;
     }
 
-    private async Task SyncItemStatusesAsync(Guid sessionId, CancellationToken token)
+    private async Task<bool> SyncItemStatusesAsync(Guid sessionId, CancellationToken token)
     {
         var items = await _sessions.GetItemsAsync(sessionId, token).ConfigureAwait(false);
         var jobs = _engine.GetActiveJobs().ToDictionary(j => j.Id);
+        var changed = false;
         foreach (var item in items)
         {
             if (item.DownloadJobId is not Guid jobId)
@@ -166,31 +382,26 @@ public sealed class AutoDownloadScheduler : IDisposable
             if (!jobs.TryGetValue(jobId, out var job))
                 continue;
 
-            var next = job.Status switch
-            {
-                DownloadStatus.Downloading or DownloadStatus.Preparing or DownloadStatus.Muxing
-                    => AutoQueueItemStatus.Downloading,
-                DownloadStatus.Completed => AutoQueueItemStatus.Completed,
-                DownloadStatus.Failed => AutoQueueItemStatus.Failed,
-                DownloadStatus.Cancelled or DownloadStatus.Removed => AutoQueueItemStatus.Cancelled,
-                DownloadStatus.Paused => item.Status == AutoQueueItemStatus.Downloading
-                    ? AutoQueueItemStatus.Enqueued
-                    : item.Status,
-                _ => item.Status
-            };
-            if (next == item.Status &&
-                (job.LastErrorCode is null || job.LastErrorCode == item.ErrorCode))
+            var next = AutoQueueItemState.FromDownload(job.Status, item.Status);
+            if (next == item.Status && job.LastErrorCode == item.ErrorCode)
                 continue;
 
             item.Status = next;
             item.ErrorCode = job.LastErrorCode;
             await _sessions.SaveItemAsync(item, token).ConfigureAwait(false);
+            changed = true;
         }
+        return changed;
     }
 
     public void Dispose()
     {
-        Stop();
+        lock (_gate)
+        {
+            _activeSessionId = null;
+            _cts?.Cancel();
+        }
+        // The loop owns outstanding asynchronous work; its token remains valid after disposal.
         _cts?.Dispose();
     }
 }

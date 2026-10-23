@@ -26,6 +26,9 @@ public sealed class UiOptions
     /// <summary>When true, the download queue is grouped by site-folder domain.</summary>
     public bool QueueGrouped { get; set; }
 
+    /// <summary>0: none, 1: site, 2: automatic task; null migrates the legacy setting.</summary>
+    public int? QueueGroupingMode { get; set; }
+
     /// <summary>
     /// Last used auto-mode session duration in minutes. 0 = no time limit.
     /// </summary>

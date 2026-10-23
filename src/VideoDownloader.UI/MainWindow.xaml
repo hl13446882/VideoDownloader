@@ -174,7 +174,10 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="10"/>
             </Grid.ColumnDefinitions>
+            <Border Grid.Column="2" Background="#E2E8F0" Cursor="Hand"
+                    MouseEnter="OnSidePanelMouseEnter" MouseLeave="OnSidePanelMouseLeave" ToolTip="展开 / Show sidebar"/>
 
             <DockPanel x:Name="BrowserPane"
                        Grid.Column="0"
@@ -292,8 +295,9 @@
                 </Border>
             </DockPanel>
 
-            <Grid Grid.Column="1"
-                  Width="300"
+            <Grid x:Name="SidePanel" Grid.Column="1"
+                  MouseEnter="OnSidePanelMouseEnter" MouseLeave="OnSidePanelMouseLeave"
+                  Background="Transparent" Width="360"
                   Visibility="{Binding IsSidePanelVisible, Converter={StaticResource BoolToVis}}">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="*"/>
@@ -363,9 +367,11 @@
                             <DataTemplate DataType="{x:Type vm:AutoSessionRowViewModel}">
                                 <DockPanel Margin="0,4,0,2" Background="Transparent">
                                     <TextBlock Text="{Binding Glyph}"
+                                               Tag="auto-expand"
                                                Width="16"
                                                FontWeight="SemiBold"
-                                               VerticalAlignment="Center"/>
+                                               VerticalAlignment="Center"
+                                               Cursor="Hand"/>
                                     <TextBlock DockPanel.Dock="Right"
                                                Text="{Binding CountText}"
                                                Margin="8,0,0,0"
@@ -567,7 +573,7 @@
                 </GroupBox>
 
                 <StackPanel x:Name="QueueActionBar" Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Center">
-                    <Button Content="{Binding QueueGroupToggleLabel}" Width="56" Height="28" Margin="0,0,4,0"
+                    <Button Content="{Binding QueueGroupToggleLabel}" Width="100" Height="28" Margin="0,0,4,0"
                             Command="{Binding ToggleQueueGroupingCommand}"
                             IsEnabled="{Binding CanToggleQueueGrouping}"/>
                     <Button Content="{Binding L.BtnPause}" Width="56" Height="28" Margin="0,0,4,0" Command="{Binding PauseSelectedCommand}"/>
